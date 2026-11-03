@@ -62,6 +62,14 @@
       </div>
       <div class="row" style="margin-top:8px"><button class="small" id="testTurn">Test relay</button><span id="turnStatus" class="small-text"></span></div>
 
+      <h2 style="margin-top:22px">🔑 Admin password</h2>
+      <p class="muted small-text" style="margin:0" id="pwNote">Each install gets its own random password. Change it to one you'll remember. Changing it signs out every other browser.</p>
+      <div class="grid2">
+        <div><label>Current password</label><input type="password" id="pwCur" autocomplete="current-password"></div>
+        <div><label>New password (8+ characters)</label><input type="password" id="pwNew" autocomplete="new-password"></div>
+      </div>
+      <div class="row" style="margin-top:8px"><button class="small" id="pwBtn">Change password</button><span id="pwStatus" class="small-text"></span></div>
+
       <h2 style="margin-top:22px">🔗 Public address</h2>
       <p class="muted small-text" style="margin:0">Used for links in emails. Filled in automatically.</p>
       <input type="text" id="sUrl" placeholder="https://podcast.yourdomain.com" style="margin-top:8px">
@@ -169,6 +177,12 @@ $('#testTurn').onclick = async () => {
   $('#turnStatus').textContent = 'Testing…';
   const res = await fetch('/api/settings/test-turn', { method: 'POST' }); const j = await res.json();
   $('#turnStatus').innerHTML = res.ok ? `<span style="color:var(--ok)">✓ Relay working (${j.servers} addresses)</span>` : `<span style="color:var(--rec)">${esc(j.error)}</span>`;
+};
+$('#pwBtn').onclick = async () => {
+  const res = await fetch('/api/settings/password', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ current: $('#pwCur').value, next: $('#pwNew').value }) });
+  const j = await res.json();
+  $('#pwStatus').innerHTML = res.ok ? '<span style="color:var(--ok)">✓ Password changed</span>' : `<span style="color:var(--rec)">${esc(j.error)}</span>`;
+  if (res.ok) { $('#pwCur').value = $('#pwNew').value = ''; }
 };
 $('#settingsCard').addEventListener('toggle', () => { if ($('#settingsCard').open) loadSettings(); });
 $('#logoutBtn').onclick = async () => { await fetch('/api/logout', { method: 'POST' }); location.reload(); };

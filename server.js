@@ -18,7 +18,7 @@ const archiver = require('archiver');
 let nodemailer = null;
 try { nodemailer = require('nodemailer'); } catch { /* email optional */ }
 
-const VERSION = '1.1.0';
+const VERSION = '1.2.0';
 
 // ---------- settings (from .env next to this file) ----------
 (function loadEnv() {
@@ -33,7 +33,7 @@ const VERSION = '1.1.0';
 const PORT = parseInt(process.env.PORT || '8790', 10);
 const BIND = process.env.BIND || '127.0.0.1';
 const DATA_DIR = path.resolve(process.env.DATA_DIR || path.join(__dirname, 'recordings'));
-const STUDIO_NAME = process.env.STUDIO_NAME || 'Podcast Studio';
+const STUDIO_NAME = process.env.STUDIO_NAME || 'Rolling';
 const MAX_PEOPLE = parseInt(process.env.MAX_PEOPLE || '5', 10);
 const FFMPEG = process.env.FFMPEG || 'ffmpeg';
 const FFPROBE = process.env.FFPROBE || 'ffprobe';
@@ -83,9 +83,28 @@ const settings = (() => {
     turn: Object.assign({ keyId: process.env.CF_TURN_KEY_ID || '', token: process.env.CF_TURN_API_TOKEN || '' }, s.turn),
     backupDir: s.backupDir !== undefined ? s.backupDir : (process.env.BACKUP_DIR || ''),
     publicUrl: s.publicUrl || process.env.PUBLIC_URL || '',
+    adminHash: s.adminHash || '',   // set once the password is changed from the dashboard (scrypt, never stored in plain text)
+    sessionGen: s.sessionGen || 0,  // bumped on password change so old logins stop working
   };
 })();
 function saveSettings() { writeJSON(SETTINGS_FILE, settings); try { fs.chmodSync(SETTINGS_FILE, 0o600); } catch {} }
+
+// ---------- admin password ----------
+function hashPassword(pw) { const salt = crypto.randomBytes(16); return `scrypt:${salt.toString('hex')}:${crypto.scryptSync(pw, salt, 64).toString('hex')}`; }
+function checkPassword(pw) {
+  pw = String(pw || '');
+  if (!settings.adminHash) return safeEq(pw, ADMIN_PASSWORD);
+  const [, salt, hash] = settings.adminHash.split(':');
+  return crypto.timingSafeEqual(crypto.scryptSync(pw, Buffer.from(salt, 'hex'), 64), Buffer.from(hash, 'hex'));
+}
+function setPassword(pw) { settings.adminHash = hashPassword(pw); settings.sessionGen++; saveSettings(); }
+// forgot it?  run:  node server.js --reset-password   (the installer adds: sudo podcast-studio-reset-password)
+if (process.argv.includes('--reset-password')) {
+  const pw = crypto.randomBytes(9).toString('base64url').replace(/[^a-zA-Z0-9]/g, '').slice(0, 12);
+  setPassword(pw);
+  console.log(`New admin password: ${pw}\n(Restart the studio so it takes effect: sudo systemctl restart podcast-studio)`);
+  process.exit(0);
+}
 
 // takes are cached in memory while in use; written to disk (debounced)
 const takeCache = new Map();
@@ -142,12 +161,12 @@ async function iceServers() {
 }
 
 // ---------- auth ----------
-function adminCookie() { const exp = Date.now() + 30 * 864e5; return `${exp}.${hmac('admin.' + exp)}`; }
+function adminCookie() { const exp = Date.now() + 30 * 864e5; return `${exp}.${hmac(`admin.${settings.sessionGen}.${exp}`)}`; }
 function isAdmin(req) {
   const m = (req.headers.cookie || '').match(/(?:^|;\s*)ps_admin=([^;]+)/);
   if (!m) return false;
   const [exp, sig] = decodeURIComponent(m[1]).split('.');
-  return +exp > Date.now() && safeEq(sig || '', hmac('admin.' + exp));
+  return +exp > Date.now() && safeEq(sig || '', hmac(`admin.${settings.sessionGen}.${exp}`));
 }
 function hostKeyOk(room, k) { return room && k && safeEq(k, room.hostKey); }
 function canManage(req, room) { return room && (isAdmin(req) || hostKeyOk(room, req.query.k || req.headers['x-host-key'])); }
@@ -590,10 +609,13 @@ app.get('/api/speedtest', (req, res) => {
 });
 app.post('/api/speedtest', express.raw({ type: () => true, limit: '16mb' }), (req, res) => { res.set('Cache-Control', 'no-store'); res.json({ bytes: req.body ? req.body.length : 0 }); });
 
-app.post('/api/login', express.json(), (req, res) => {
-  if (!safeEq(String((req.body || {}).password || ''), ADMIN_PASSWORD)) return setTimeout(() => res.status(401).json({ error: 'Wrong password' }), 800);
+function setAdminCookie(req, res) {
   const secure = req.secure || req.headers['x-forwarded-proto'] === 'https';
   res.setHeader('Set-Cookie', `ps_admin=${encodeURIComponent(adminCookie())}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${30 * 86400}${secure ? '; Secure' : ''}`);
+}
+app.post('/api/login', express.json(), (req, res) => {
+  if (!checkPassword((req.body || {}).password)) return setTimeout(() => res.status(401).json({ error: 'Wrong password' }), 800);
+  setAdminCookie(req, res);
   res.json({ ok: true });
 });
 app.post('/api/logout', (req, res) => { res.setHeader('Set-Cookie', 'ps_admin=; Path=/; Max-Age=0'); res.json({ ok: true }); });
@@ -610,9 +632,17 @@ async function backupStatus() {
   let free = null; try { const s = await fsp.statfs(p); free = s.bavail * s.bsize; } catch {}
   return { set: true, ok: !same, free, msg: same ? 'That folder is on the same disk as the recordings — is the backup drive plugged in / mounted?' : '' };
 }
+app.post('/api/settings/password', needAdmin, express.json(), (req, res) => {
+  const { current, next } = req.body || {};
+  if (!checkPassword(current)) return setTimeout(() => res.status(400).json({ error: 'Your current password is not right.' }), 800);
+  if (String(next || '').length < 8) return res.status(400).json({ error: 'The new password needs at least 8 characters.' });
+  setPassword(String(next));
+  setAdminCookie(req, res); // keep this browser logged in; every other login is signed out
+  res.json({ ok: true });
+});
 app.get('/api/settings', needAdmin, async (req, res) => {
   res.json({ smtp: { ...settings.smtp, pass: settings.smtp.pass ? MASK : '' }, turn: { keyId: settings.turn.keyId, token: settings.turn.token ? MASK : '' },
-    backupDir: settings.backupDir, publicUrl: settings.publicUrl, backup: await backupStatus(), emailAvailable: !!nodemailer, turnError: cfIce.error });
+    backupDir: settings.backupDir, publicUrl: settings.publicUrl, backup: await backupStatus(), emailAvailable: !!nodemailer, turnError: cfIce.error, passwordChanged: !!settings.adminHash });
 });
 app.post('/api/settings', needAdmin, express.json(), async (req, res) => {
   const b = req.body || {};

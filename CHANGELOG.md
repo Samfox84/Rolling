@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.2.0
+- Named **Rolling**; released under AGPL-3.0
+- Change the admin password from the dashboard (stored hashed); `sudo podcast-studio-reset-password` if forgotten
+- Each install still gets its own random starting password
+
 ## 1.1.0
 - Crash-proof uploads (saved to the browser's disk first, resumed after a crash), auto-rebuild when late files arrive
 - Problem alerts: silent / unplugged / distorting mic, audio glitches, upload falling behind, poor connection, low disk

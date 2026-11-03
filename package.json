@@ -1,10 +1,10 @@
 {
-  "name": "podcast-studio",
-  "version": "1.1.0",
+  "name": "rolling",
+  "version": "1.2.0",
   "description": "Self-hosted remote podcast studio: video call + lossless per-person audio and per-person video recording",
   "main": "server.js",
   "private": true,
-  "license": "MIT",
+  "license": "AGPL-3.0-only",
   "engines": {
     "node": ">=18"
   },

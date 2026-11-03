@@ -1,6 +1,10 @@
-# Podcast Studio
+# Rolling
 
-A self-hosted remote recording studio, a bit like Riverside.
+**A free, open-source, self-hosted remote recording studio for podcasts** — a bit like Riverside, but on your own server.
+
+> **Made by a human and an AI, together.** Rolling was designed and directed by **Sam Fox** and written with **Claude**, Anthropic's AI assistant (model: Claude Opus 5.5, `claude-opus-5-5`), in conversation. Sam set the goals, tested it and made the decisions; Claude wrote the code and tests. Every change is in the commit history, and AI-written commits are marked *Co-Authored-By: Claude*.
+
+Version: see [CHANGELOG.md](CHANGELOG.md). Licence: [GNU AGPL-3.0](LICENSE) — free to use, study, change and share; any changed version that is shared, or run as a service for others, must stay free and open too.
 
 **Recording**
 - **Video call** for up to 5 people in the browser — guests just click a link, nothing to install.
@@ -80,6 +84,9 @@ Everything else: edit `/opt/podcast-studio/.env`, then `sudo systemctl restart p
 | `TURN_URLS`, `TURN_SECRET` | – | your own coturn relay instead of Cloudflare's (`use-auth-secret`) |
 
 Without a relay, a guest on a locked-down network (some offices/hotels) may not see/hear the others live — **their recording still uploads fine**, because uploads go over normal HTTPS. Add the free Cloudflare relay in Studio settings to fix the live call too.
+
+## Admin password
+Each install gets its own random password, shown at the end of the install. Change it any time in **Studio settings → Admin password** (it's stored hashed). Forgot it? Run `sudo podcast-studio-reset-password` on the server.
 
 ## Looking after it
 - Status: `systemctl status podcast-studio`

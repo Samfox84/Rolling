@@ -16,7 +16,7 @@ set -euo pipefail
 APP_DIR="${APP_DIR:-/opt/podcast-studio}"
 PORT="${PORT:-8790}"
 DOMAIN="${DOMAIN:-}"
-STUDIO_NAME="${STUDIO_NAME:-Podcast Studio}"
+STUDIO_NAME="${STUDIO_NAME:-Rolling}"
 RUN_USER="${RUN_USER:-${SUDO_USER:-$(id -un)}}"
 SERVICE=podcast-studio
 SRC="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -162,8 +162,16 @@ if [ -n "$DOMAIN" ]; then
   fi
 fi
 
+# forgotten password helper:  sudo podcast-studio-reset-password
+cat > /usr/local/bin/podcast-studio-reset-password <<RESETEOF
+#!/bin/sh
+cd "$APP_DIR" && sudo -u "$RUN_USER" "$(command -v node)" server.js --reset-password | head -1 && systemctl restart $SERVICE
+RESETEOF
+chmod 755 /usr/local/bin/podcast-studio-reset-password
+
 # ---------- done ----------
 PW="$(grep -E '^ADMIN_PASSWORD=' "$APP_DIR/.env" | cut -d= -f2)"
+grep -q '"adminHash": *"scrypt' "$APP_DIR/recordings/settings.json" 2>/dev/null && PW="(you changed it in the dashboard — forgot it? run: sudo podcast-studio-reset-password)"
 URL="${DOMAIN:+https://$DOMAIN}"; URL="${URL:-http://127.0.0.1:$PORT (needs HTTPS in front — see README)}"
 printf '\n\033[1;32m================  Podcast Studio is running  ================\033[0m\n'
 echo "  Open:            $URL"
