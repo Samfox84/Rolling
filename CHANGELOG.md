@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.3.1 — deep audit (see docs/reviews/2026-11-03-audit-v1.3.1.toon)
+- **Live loudness on the video tiles:** the host sees every person's LUFS while they talk; guests see their own
+- **No silent failures:** every error is logged (journalctl) or shown; corrupt files are kept and reported
+- **Every request has a timeout** — a stalled connection can no longer freeze uploads; the studio reconnects if the link goes quiet for 15 s
+- "Click to hear everyone" appears if the browser blocks sound
+- Marker/chapter updates swap files in place (never briefly missing) and reach the backup drive
+- One logger (log.js), one program runner (proc.js), one set of page helpers (public/common.js); duplicate code removed
+- **Automated tests:** `npm test` (44 tests: meters, transcripts, documents, full server take) and `npm run test:e2e` (real browsers)
+
 ## 1.3.0
 - **Control room:** the host can run the show with no camera or mic (not recorded)
 - **Broadcast loudness meters** (EBU R128 / BS.1770) for everyone in the Health panel: momentary, short-term, integrated LUFS and true peak; own loudness shown in the lobby

@@ -1,0 +1,167 @@
+'use strict';
+// End-to-end through the real server: a host joins over WebSocket, records a take while uploading lossless
+// audio exactly like the browser does, then the server builds every file. Plus the things that must fail safely.
+const test = require('node:test');
+const assert = require('node:assert/strict');
+const fs = require('fs');
+const path = require('path');
+const { startServer, login, waitFor, pcm24, talky, ffMeasure, duration, xmlWellFormed } = require('./helpers');
+
+const hasWS = typeof WebSocket === 'function'; // Node 22+
+let srv, cookie, room;
+
+test.before(async () => {
+  srv = await startServer();
+  cookie = (await login(srv.url)).cookie;
+  room = await (await fetch(srv.url + '/api/rooms', { method: 'POST', headers: { cookie, 'Content-Type': 'application/json' }, body: JSON.stringify({ name: 'Test Show' }) })).json();
+  await fetch(`${srv.url}/api/rooms/${room.id}/settings?k=${room.hostKey}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ waitingRoom: false }) });
+});
+test.after(async () => { if (srv) await srv.stop(); });
+
+/** connect like a browser and collect messages */
+function client(name, key) {
+  const ws = new WebSocket(srv.url.replace('http', 'ws') + '/ws');
+  const msgs = [];
+  ws.onmessage = e => msgs.push(JSON.parse(e.data));
+  const opened = new Promise(r => { ws.onopen = r; });
+  return {
+    ws, msgs,
+    async join() { await opened; ws.send(JSON.stringify({ t: 'join', room: room.id, key, name, clientId: 'C' + name.replace(/\W/g, '') + 'xxxx', camId: 'cam-' + name })); return waitFor(() => msgs.find(m => m.t === 'welcome'), 10000, 50); },
+    send(m) { ws.send(JSON.stringify(m)); },
+    next(t, after = 0) { return waitFor(() => msgs.slice(after).find(m => m.t === t), 20000, 50); },
+  };
+}
+
+test('wrong admin password is refused', async () => {
+  assert.equal((await login(srv.url, 'nope')).status, 401);
+});
+test('a room page with the wrong host key is refused', async () => {
+  assert.equal((await fetch(`${srv.url}/api/rooms/${room.id}?k=wrong`)).status, 403);
+});
+test('pages are never cached by Cloudflare or the browser', async () => {
+  const r = await fetch(srv.url + '/api/info');
+  assert.match(r.headers.get('cache-control'), /no-store/);
+  assert.match(r.headers.get('cloudflare-cdn-cache-control'), /no-store/);
+});
+
+test('full take: record, upload lossless audio, build every file', { skip: !hasWS && 'needs Node 22+ (built-in WebSocket)' }, async () => {
+  const host = client('Steve', room.hostKey);
+  const guest = client('Guest', '');
+  assert.equal((await host.join()).isHost, true);
+  assert.equal((await guest.join()).isHost, false);
+
+  // a guest can't start recording — only the host
+  guest.send({ t: 'record', on: true });
+  await new Promise(r => setTimeout(r, 300));
+  assert.equal(guest.msgs.filter(m => m.t === 'record-start').length, 0);
+
+  host.send({ t: 'record', on: true, roomTone: true, episode: { n: '7', title: 'Testing' } });
+  const start = await host.next('record-start');
+  const gstart = await guest.next('record-start');
+  assert.ok(start.tok && start.seg && gstart.seg !== start.seg);
+
+  // upload 40 s of audio in half-second pieces, out of order, exactly as browsers send it (24-bit PCM)
+  const up = async (who, s, shape) => {
+    const pcm = pcm24(40, shape), piece = 24000 * 3;
+    const order = [];
+    for (let off = 0; off < pcm.length; off += piece) order.push(off);
+    order.reverse();
+    for (const off of order) {
+      const sample = off / 3, t = s.started + 50 + (sample / 48000) * 1000;
+      const r = await fetch(`${srv.url}/up/${room.id}/${s.take}/${s.seg}/audio?tok=${s.tok}&s=${sample}&t=${t.toFixed(1)}&rate=48000`, { method: 'POST', body: pcm.subarray(off, off + piece) });
+      assert.equal(r.status, 200);
+    }
+  };
+  await up('Steve', start, talky(1));
+  await up('Guest', gstart, talky(2, x => x < 10));
+  host.send({ t: 'marker' });
+  const mk = await host.next('marker');
+  assert.equal(mk.label, 'Marker 1');
+
+  // things that must be refused
+  assert.equal((await fetch(`${srv.url}/up/${room.id}/${start.take}/${start.seg}/audio?tok=bad&s=0&t=1`, { method: 'POST', body: Buffer.alloc(3) })).status, 403);
+  assert.equal((await fetch(`${srv.url}/up/${room.id}/${start.take}/${start.seg}/audio?tok=${start.tok}&s=0&t=1`, { method: 'POST', body: Buffer.alloc(4) })).status, 400);
+
+  for (const s of [start, gstart]) assert.equal((await fetch(`${srv.url}/up/${room.id}/${s.take}/${s.seg}/done?tok=${s.tok}`, { method: 'POST' })).status, 200);
+  const before = host.msgs.length;
+  host.send({ t: 'record', on: false });
+  await host.next('record-stop', before);
+
+  // the host sees build progress, then "ready"
+  const ready = await waitFor(() => host.msgs.find(m => m.t === 'build' && m.status === 'ready'), 180000, 200);
+  assert.equal(ready.pct, 100);
+  assert.ok(host.msgs.some(m => m.t === 'build' && m.status === 'processing' && m.pct > 0 && m.pct < 100), 'progress was reported along the way');
+
+  const info = await (await fetch(`${srv.url}/api/rooms/${room.id}?k=${room.hostKey}`)).json();
+  const take = info.takes[0];
+  assert.equal(take.status, 'ready', take.error);
+  assert.equal(take.error, '');
+  assert.deepEqual(take.episode, { n: '7', title: 'Testing' });
+  const out = path.join(srv.dataDir, 'rooms', room.id, 'takes', take.id, 'out');
+  const files = take.outputs.map(o => o.file);
+  for (const f of ['Steve.wav', 'Guest.wav', 'Steve - room tone.wav', 'Steve - normalised -16 LUFS.wav', 'Steve - normalised -23 LUFS.wav',
+    'Mix - all voices.wav', 'Transcript.txt', 'Transcript.srt', 'Transcript.vtt', 'Level report.txt', 'Markers.txt', 'Chapters.json',
+    'Test Show - Ep 7 - Testing (Audition).sesx', 'Test Show - Ep 7 - Testing (Premiere, Resolve, Audition).xml']) assert.ok(files.includes(f), `missing ${f}`);
+
+  // lossless audio, lined up: 40 s of audio that started 50 ms into the take
+  assert.ok(Math.abs(duration(path.join(out, 'Steve.wav')) - 40.05) < 0.03);
+  // normalised copies really hit their targets (measured by ffmpeg, not by our own code)
+  assert.ok(Math.abs(ffMeasure(path.join(out, 'Steve - normalised -16 LUFS.wav')).I - -16) < 0.5);
+  assert.ok(Math.abs(ffMeasure(path.join(out, 'Steve - normalised -23 LUFS.wav')).I - -23) < 0.5);
+  // the level verdict travels with the levels (one rule, used by report and page)
+  assert.ok(take.levels.Steve.verdict && take.levels.Steve.verdict.text);
+  // room tone is the right length
+  assert.ok(Math.abs(duration(path.join(out, 'Steve - room tone.wav')) - 3) < 0.05);
+  // transcript: speaker names, nothing from the guest's silent first 10 s, no hallucinations
+  const txt = fs.readFileSync(path.join(out, 'Transcript.txt'), 'utf8');
+  assert.match(txt, /Steve: Sentence at 0 seconds\./);
+  assert.match(txt, /Guest: /);
+  assert.doesNotMatch(txt, /Thank you/);
+  // session files are valid XML and reference the people
+  const sesx = fs.readFileSync(path.join(out, 'Test Show - Ep 7 - Testing (Audition).sesx'), 'utf8');
+  assert.ok(xmlWellFormed(sesx)); assert.match(sesx, /relativePath="Steve.wav"/);
+  assert.ok(xmlWellFormed(fs.readFileSync(path.join(out, 'Test Show - Ep 7 - Testing (Premiere, Resolve, Audition).xml'), 'utf8')));
+  // downloads are named after the episode
+  const dl = await fetch(`${srv.url}/dl/${room.id}/${take.id}/Steve.wav?k=${room.hostKey}`);
+  assert.equal(dl.status, 200);
+  assert.match(dl.headers.get('content-disposition'), /Test Show - Ep 7 - Testing - Steve\.wav/);
+  const zip = await fetch(`${srv.url}/zip/${room.id}/${take.id}?k=${room.hostKey}`);
+  assert.equal(zip.status, 200); assert.ok((await zip.arrayBuffer()).byteLength > 1000000);
+
+  // renaming a marker updates the documents only (the audio is not rebuilt)
+  const wavTime = fs.statSync(path.join(out, 'Steve.wav')).mtimeMs;
+  const r = await fetch(`${srv.url}/api/rooms/${room.id}/takes/${take.id}/markers?k=${room.hostKey}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ markers: [{ at: take.markers[0].at, label: 'The big question' }] }) });
+  assert.equal(r.status, 200);
+  // the chapters file must exist at every moment while it is being updated
+  await waitFor(() => /The big question/.test(fs.readFileSync(path.join(out, 'Chapters.json'), 'utf8')), 30000, 20);
+  assert.equal(fs.statSync(path.join(out, 'Steve.wav')).mtimeMs, wavTime);
+
+  // freeing space removes the raw data; a later rebuild only refreshes documents and keeps every file
+  await waitFor(async () => (await (await fetch(`${srv.url}/api/rooms/${room.id}?k=${room.hostKey}`)).json()).takes[0].status === 'ready', 30000);
+  const c = await (await fetch(`${srv.url}/api/rooms/${room.id}/takes/${take.id}/compact?k=${room.hostKey}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ what: 'rebuild-data' }) })).json();
+  assert.ok(c.freed > 1000000);
+  assert.equal(fs.existsSync(path.join(srv.dataDir, 'rooms', room.id, 'takes', take.id, 'segs', start.seg, 'audio.pcm')), false);
+  await fetch(`${srv.url}/api/rooms/${room.id}/takes/${take.id}/rebuild?k=${room.hostKey}`, { method: 'POST' });
+  await waitFor(async () => (await (await fetch(`${srv.url}/api/rooms/${room.id}?k=${room.hostKey}`)).json()).takes[0].status === 'ready', 30000);
+  assert.ok(fs.existsSync(path.join(out, 'Steve.wav')), 'finished audio survives');
+
+  host.ws.close(); guest.ws.close();
+});
+
+test('a damaged take file is reported and kept, and the server carries on', async () => {
+  const d = path.join(srv.dataDir, 'rooms', room.id, 'takes', 'Broken12');
+  fs.mkdirSync(d, { recursive: true });
+  fs.writeFileSync(path.join(d, 'take.json'), '{ this is not json');
+  const r = await fetch(`${srv.url}/api/rooms/${room.id}?k=${room.hostKey}`);
+  assert.equal(r.status, 200);
+  assert.ok(fs.readdirSync(d).some(f => f.startsWith('take.json.corrupt-')), 'a copy of the damaged file is kept');
+  assert.match(srv.logs(), /damaged/);
+});
+test('only real intro/outro names can be removed', async () => {
+  assert.equal((await fetch(`${srv.url}/api/rooms/${room.id}/asset/..%2Froom?k=${room.hostKey}`, { method: 'DELETE' })).status, 400);
+});
+test('an audio file that is not audio is refused clearly', async () => {
+  const r = await fetch(`${srv.url}/api/rooms/${room.id}/asset/intro?k=${room.hostKey}`, { method: 'POST', body: Buffer.from('not audio at all') });
+  assert.equal(r.status, 400);
+  assert.match((await r.json()).error, /could not be read as audio/);
+});

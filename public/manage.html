@@ -53,31 +53,30 @@
     </div>
   </div>
 </div>
+<script src="/common.js"></script>
 <script>
-const $ = s => document.querySelector(s);
+const { $, esc, toast, api, fmtMB: mb, hms } = window.Rolling;
 const roomId = location.pathname.split('/').filter(Boolean)[1];
 const k = new URLSearchParams(location.search).get('k') || '';
 const q = k ? '?k=' + encodeURIComponent(k) : '';
-const esc = s => String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
-const mb = b => b > 1073741824 ? (b / 1073741824).toFixed(2) + ' GB' : b > 1048576 ? (b / 1048576).toFixed(1) + ' MB' : Math.max(1, Math.round(b / 1024)) + ' KB';
 const dur = (a, b) => { const s = Math.round((b - a) / 1000); return `${Math.floor(s / 3600) ? Math.floor(s / 3600) + 'h ' : ''}${Math.floor(s % 3600 / 60)}m ${s % 60}s`; };
-const hms = ms => { const s = Math.floor(ms / 1000); return [s / 3600, (s % 3600) / 60, s % 60].map(x => String(Math.floor(x)).padStart(2, '0')).join(':'); };
 const secs = s => `${Math.floor(s / 60)}:${String(Math.round(s % 60)).padStart(2, '0')}`;
-function toast(t) { const d = document.createElement('div'); d.className = 'toast'; d.textContent = t; document.body.appendChild(d); setTimeout(() => d.remove(), 2500); }
 const KIND = { audio: ['Audio', 'Lossless WAV (untouched)'], normalised: ['Normalised', ''], roomtone: ['Room tone', 'Noise print WAV'], mix: ['Mix', 'All voices together'],
   roughmix: ['Rough mix', ''], intro: ['Intro', ''], outro: ['Outro', ''], video: ['Video', 'MP4 (H.264)'], 'video-original': ['Video', 'Camera original'], screen: ['Screen share', 'MP4'],
   session: ['Session', ''], transcript: ['Transcript', ''], chapters: ['Chapters', ''], markers: ['Markers', ''], report: ['Level report', ''], chat: ['Chat', 'Messages during the take'] };
 const ORDER = { audio: 0, normalised: 1, roomtone: 2, video: 3, 'video-original': 4, screen: 5, roughmix: 6, mix: 7, intro: 8, outro: 9, session: 10, transcript: 11, chapters: 12, markers: 13, report: 14, chat: 15 };
 const STATUS = { recording: ['rec', '● Recording'], waiting: ['warn', 'Waiting for uploads to finish'], queued: ['warn', 'In the queue'], processing: ['warn', 'Building files'], ready: ['ok', '✓ Ready'], error: ['rec', 'Problem'] };
-const verdict = l => !l || l.I == null || !isFinite(l.I) ? ['', 'no speech'] : l.TP >= -0.1 && l.float ? ['warnc', 'over 0 dB (32-bit float — fine)'] : l.TP >= -0.1 ? ['bad', 'clipping'] : l.TP > -1 ? ['warnc', 'hot peaks'] : l.I < -35 ? ['warnc', 'very quiet'] : l.I < -28 ? ['warnc', 'quiet'] : l.I > -12 ? ['warnc', 'very loud'] : ['goodc', 'good'];
+const VCLASS = { good: 'goodc', warn: 'warnc', bad: 'bad', none: '' };
+const verdictView = l => (l && l.verdict ? [VCLASS[l.verdict.level] || '', l.verdict.text] : ['', 'not measured']);
 const f1 = v => v == null || !isFinite(v) ? '—' : v.toFixed(1);
 let lastJson = '', settingsLoaded = false, editing = false;
 
 async function load() {
   if (editing) return;
-  const res = await fetch(`/api/rooms/${roomId}${q}`);
-  if (!res.ok) { $('#err').classList.remove('hidden'); return; }
-  const r = await res.json();
+  const res = await api(`/api/rooms/${roomId}${q}`);
+  if (res.status === 403 || res.status === 404) { $('#err').classList.remove('hidden'); return; }
+  if (!res.ok) { $('#roomSub').textContent = '⚠ ' + res.error + ' — retrying…'; return; }
+  const r = res.data;
   if (!settingsLoaded) {
     settingsLoaded = true;
     $('#waitingRoom').checked = r.waitingRoom; $('#notifyEmail').value = r.notifyEmail;
@@ -117,7 +116,7 @@ async function load() {
       ${t.status === 'recording' && t.transcript != null ? `<div class="small-text muted" style="margin-top:6px">📝 Live transcript: ${t.transcript}% done so far</div>` : ''}
       ${t.error ? `<p class="small-text" style="color:var(--rec);white-space:pre-wrap">${esc(t.error)}</p>` : ''}
       ${t.backup && !t.backup.ok ? `<p class="small-text" style="color:var(--warn)">Backup: ${esc(t.backup.error)}</p>` : ''}
-      ${levels.length ? `<table class="levels"><tr><th>Levels (EBU R128)</th><th>Loudness</th><th>True peak</th><th>Range</th><th></th></tr>${levels.map(([who, l]) => { const [c, v] = verdict(l); return `<tr><td>${esc(who)}</td><td>${f1(l.I)} LUFS</td><td>${f1(l.TP)} dBTP</td><td>${f1(l.LRA)} LU</td><td class="${c}">${v}</td></tr>`; }).join('')}</table>` : ''}
+      ${levels.length ? `<table class="levels"><tr><th>Levels (EBU R128)</th><th>Loudness</th><th>True peak</th><th>Range</th><th></th></tr>${levels.map(([who, l]) => { const [c, v] = verdictView(l); return `<tr><td>${esc(who)}</td><td>${f1(l.I)} LUFS</td><td>${f1(l.TP)} dBTP</td><td>${f1(l.LRA)} LU</td><td class="${c}">${v}</td></tr>`; }).join('')}</table>` : ''}
       ${t.markers.length ? `<details class="markers"><summary class="small-text">📍 ${t.markers.length} marker${t.markers.length > 1 ? 's' : ''} — ${t.markers.map(m => `${hms(m.at)} ${esc(m.label)}`).join(' · ')}</summary>
         <div class="mklist" data-take="${t.id}">${t.markers.map(m => `<div class="row mk" data-at="${m.at}" data-by="${esc(m.by || '')}"><span class="small-text muted mono">${hms(m.at)}</span><input type="text" value="${esc(m.label)}" maxlength="80"><button class="small ghost mkdel" title="Delete">✕</button></div>`).join('')}
         <div class="row" style="justify-content:flex-end"><button class="small primary mksave" data-take="${t.id}">Save marker names</button></div><p class="small-text muted">Names are used for chapters and in the session files. Saving updates those files in a few seconds.</p></div></details>` : ''}
@@ -134,8 +133,8 @@ async function load() {
   }
 }
 async function saveRoom(body) {
-  const res = await fetch(`/api/rooms/${roomId}/settings${q}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
-  toast(res.ok ? 'Saved ✓' : 'Could not save');
+  const res = await api(`/api/rooms/${roomId}/settings${q}`, { json: body });
+  toast(res.ok ? 'Saved ✓' : 'Could not save: ' + res.error);
 }
 $('#waitingRoom').onchange = () => saveRoom({ waitingRoom: $('#waitingRoom').checked });
 for (const el of document.querySelectorAll('.asset')) {
@@ -144,12 +143,11 @@ for (const el of document.querySelectorAll('.asset')) {
     const f = input.files[0]; if (!f) return;
     if (f.size > 100 * 1048576) { toast('That file is over 100 MB'); return; }
     el.querySelector('.aname').textContent = 'Uploading…';
-    const res = await fetch(`/api/rooms/${roomId}/asset/${kind}${q}`, { method: 'POST', body: f, headers: { 'x-filename': encodeURIComponent(f.name) } });
-    const j = await res.json().catch(() => ({}));
-    toast(res.ok ? `${kind === 'intro' ? 'Intro' : 'Outro'} saved ✓ — used from the next take (or press Rebuild)` : (j.error || 'Upload failed'));
+    const res = await api(`/api/rooms/${roomId}/asset/${kind}${q}`, { method: 'POST', body: f, headers: { 'x-filename': encodeURIComponent(f.name) }, timeout: 600000 });
+    toast(res.ok ? `${kind === 'intro' ? 'Intro' : 'Outro'} saved ✓ — used from the next take (or press Rebuild)` : (res.error || 'Upload failed'), 5000);
     input.value = ''; lastJson = ''; load();
   };
-  el.querySelector('.adel').onclick = async () => { await fetch(`/api/rooms/${roomId}/asset/${kind}${q}`, { method: 'DELETE' }); lastJson = ''; load(); };
+  el.querySelector('.adel').onclick = async () => { const r = await api(`/api/rooms/${roomId}/asset/${kind}${q}`, { method: 'DELETE' }); if (!r.ok) toast(r.error); lastJson = ''; load(); };
 }
 document.addEventListener('focusin', e => { if (e.target.closest('.mklist')) editing = true; });
 document.addEventListener('click', async e => {
@@ -160,24 +158,24 @@ document.addEventListener('click', async e => {
   if (b.classList.contains('mksave')) {
     const list = b.closest('.mklist');
     const markers = [...list.querySelectorAll('.mk')].map(r => ({ at: +r.dataset.at, by: r.dataset.by, label: r.querySelector('input').value }));
-    const res = await fetch(`/api/rooms/${roomId}/takes/${b.dataset.take}/markers${q}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ markers }) });
-    toast(res.ok ? 'Markers saved — updating files…' : 'Could not save'); editing = false; lastJson = ''; load();
+    const res = await api(`/api/rooms/${roomId}/takes/${b.dataset.take}/markers${q}`, { json: { markers } });
+    toast(res.ok ? 'Markers saved — updating files…' : 'Could not save: ' + res.error); editing = false; lastJson = ''; load();
   }
-  if (b.dataset.rebuild) { await fetch(`/api/rooms/${roomId}/takes/${b.dataset.rebuild}/rebuild${q}`, { method: 'POST' }); lastJson = ''; load(); }
+  if (b.dataset.rebuild) { const r = await api(`/api/rooms/${roomId}/takes/${b.dataset.rebuild}/rebuild${q}`, { method: 'POST' }); if (!r.ok) toast(r.error); lastJson = ''; load(); }
   if (b.dataset.compact) {
     const what = b.dataset.what;
     const msg = what === 'camera-originals' ? 'Delete the untouched camera files for this take? The MP4 videos are kept.' : 'Delete the raw upload data for this take? All finished files are kept, but you won\'t be able to fully rebuild this take afterwards.';
     if (!confirm(msg)) return;
-    const res = await fetch(`/api/rooms/${roomId}/takes/${b.dataset.compact}/compact${q}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ what }) });
-    const j = await res.json(); toast(res.ok ? `Freed ${mb(j.freed || 0)}` : j.error); lastJson = ''; load();
+    const res = await api(`/api/rooms/${roomId}/takes/${b.dataset.compact}/compact${q}`, { json: { what }, timeout: 120000 });
+    toast(res.ok ? `Freed ${mb(res.data.freed || 0)}` : res.error); lastJson = ''; load();
   }
   if (b.dataset.del) {
     if (!confirm(`Delete take ${b.dataset.n} and all its files? This can't be undone.`)) return;
-    const res = await fetch(`/api/rooms/${roomId}/takes/${b.dataset.del}${q}`, { method: 'DELETE' });
-    if (!res.ok) toast((await res.json()).error || 'Could not delete'); lastJson = ''; load();
+    const res = await api(`/api/rooms/${roomId}/takes/${b.dataset.del}${q}`, { method: 'DELETE', timeout: 120000 });
+    if (!res.ok) toast(res.error || 'Could not delete'); lastJson = ''; load();
   }
 });
-fetch('/api/info').then(r => r.json()).then(i => { document.querySelectorAll('.studio-name').forEach(e => e.textContent = i.name); if (!i.admin) $('#adminLink').classList.add('hidden'); });
+document.addEventListener('rolling-info', e => { if (!e.detail.admin) $('#adminLink').classList.add('hidden'); });
 load(); setInterval(load, 2000);
 </script>
 </body>

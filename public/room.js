@@ -1,9 +1,8 @@
 (() => {
 'use strict';
-const $ = s => document.querySelector(s);
+const { $, esc, toast, quiet, LS, fmtMB } = window.Rolling;
 const roomId = location.pathname.split('/').filter(Boolean)[1] || '';
 const hostKey = new URLSearchParams(location.search).get('k') || '';
-const LS = { get(k) { try { return localStorage.getItem(k); } catch { return null; } }, set(k, v) { try { localStorage.setItem(k, v); } catch {} } };
 function rand(n) { const c = 'abcdefghijkmnpqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789'; let s = ''; for (const x of crypto.getRandomValues(new Uint8Array(n))) s += c[x % c.length]; return s; }
 let clientId = LS.get('ps_client');
 if (!clientId || !/^[a-zA-Z0-9]{4,24}$/.test(clientId)) { clientId = rand(12); LS.set('ps_client', clientId); }
@@ -36,9 +35,7 @@ const serverNow = () => performance.now() + clockOffset;
 const dbg = (...a) => { if (window.__debug) console.log('[rtc]', ...a); };
 
 // ---------- small UI helpers ----------
-const esc = s => String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 function show(id) { for (const v of ['lobby', 'studio', 'message']) $('#' + v).classList.toggle('hidden', v !== id); }
-function toast(text, ms = 3000) { let box = document.getElementById('toasts'); if (!box) { box = document.createElement('div'); box.id = 'toasts'; document.body.appendChild(box); } const t = document.createElement('div'); t.className = 'toast'; t.textContent = text; box.appendChild(t); setTimeout(() => t.remove(), ms); }
 function ask(title, html, yes = 'OK', no = 'Cancel', alt = null) {
   return new Promise(resolve => {
     $('#modalTitle').textContent = title; $('#modalText').innerHTML = html;
@@ -51,10 +48,9 @@ function ask(title, html, yes = 'OK', no = 'Cancel', alt = null) {
   });
 }
 function message(title, html, rejoin = false) { show('message'); $('#msgTitle').textContent = title; $('#msgText').innerHTML = html; $('#rejoinBtn').classList.toggle('hidden', !rejoin); }
-const fmtMB = b => (b / 1048576).toFixed(b > 10485760 ? 0 : 1) + ' MB';
 const initials = n => (n || '?').split(/\s+/).map(w => w[0]).join('').slice(0, 2).toUpperCase();
 const fmtTime = ms => { const s = Math.max(0, Math.floor(ms / 1000)); return [s / 3600, (s % 3600) / 60, s % 60].map(x => String(Math.floor(x)).padStart(2, '0')).join(':'); };
-function chime() { try { const o = ctx.createOscillator(), g = ctx.createGain(); o.frequency.value = 880; g.gain.setValueAtTime(0.0001, ctx.currentTime); g.gain.exponentialRampToValueAtTime(0.15, ctx.currentTime + 0.02); g.gain.exponentialRampToValueAtTime(0.0001, ctx.currentTime + 0.5); o.connect(g).connect(ctx.destination); o.start(); o.stop(ctx.currentTime + 0.55); } catch {} }
+function chime() { try { const o = ctx.createOscillator(), g = ctx.createGain(); o.frequency.value = 880; g.gain.setValueAtTime(0.0001, ctx.currentTime); g.gain.exponentialRampToValueAtTime(0.15, ctx.currentTime + 0.02); g.gain.exponentialRampToValueAtTime(0.0001, ctx.currentTime + 0.5); o.connect(g).connect(ctx.destination); o.start(); o.stop(ctx.currentTime + 0.55); } catch (e) { quiet('knock chime')(e); } }
 
 // =====================================================================
 // 1. Crash-proof storage: every recorded piece is saved to this computer's
@@ -81,7 +77,7 @@ const store = (() => {
       const id = 'm' + (memId++); mem.set(id, rec); return id;
     },
     async get(id) { if (typeof id === 'string') return mem.get(id); return req('readonly', s => s.get(id)); },
-    async del(id) { if (typeof id === 'string') { mem.delete(id); return; } try { await req('readwrite', s => s.delete(id)); } catch {} },
+    async del(id) { if (typeof id === 'string') { mem.delete(id); return; } try { await req('readwrite', s => s.delete(id)); } catch (e) { quiet('remove uploaded piece from disk (it may be sent twice — harmless)')(e); } },
     async list() {
       await ready; if (!ok) return [];
       return new Promise(res => { const out = []; const q = db.transaction('chunks').objectStore('chunks').openCursor();
@@ -90,7 +86,7 @@ const store = (() => {
     },
   };
 })();
-try { navigator.storage && navigator.storage.persist && navigator.storage.persist(); } catch {}
+try { if (navigator.storage && navigator.storage.persist) navigator.storage.persist().catch(quiet('ask for persistent storage')); } catch (e) { quiet('ask for persistent storage')(e); }
 
 // uploader: audio first (it matters most), then video, then "finished" markers; 2 at a time; retries forever
 const up = { items: new Map(), inflight: new Set(), pending: 0, pendingAudio: 0, fails: 0, seq: 0, segPuts: {}, recovered: 0 };
@@ -122,15 +118,19 @@ async function sendItem(it) {
   try {
     const rec = await store.get(it.id);
     if (rec) {
-      const res = await fetch(it.url, { method: 'POST', body: rec.body || '', headers: { 'Content-Type': 'application/octet-stream' } });
+      const ctl = new AbortController(), timer = setTimeout(() => ctl.abort(), it.kind === 'video' ? 180000 : 45000);
+      let res;
+      try { res = await fetch(it.url, { method: 'POST', body: rec.body || '', headers: { 'Content-Type': 'application/octet-stream' }, signal: ctl.signal }); }
+      finally { clearTimeout(timer); }
       if (res.status >= 500 || res.status === 0) throw new Error('HTTP ' + res.status);
-      if (!res.ok) console.warn('upload refused', res.status, it.url);
+      if (!res.ok) quiet('server refused an uploaded piece (' + res.status + ')')(it.url);
     }
     await store.del(it.id);
     up.items.delete(it.id); up.pending -= it.size; if (it.kind === 'audio') up.pendingAudio -= it.size;
     up.fails = 0;
     if (it.onDone) it.onDone();
   } catch (e) {
+    quiet('upload will retry')(e);
     up.fails++;
     const wait = Math.min(15000, 1000 * up.fails);
     it.retryAt = Date.now() + wait;
@@ -165,7 +165,7 @@ $('#nameInput').value = LS.get('ps_name') || '';
 $('#headphones').checked = LS.get('ps_headphones') === '1';
 if (LS.get('ps_reccam') === '0') $('#recordCam').checked = false;
 if (hostKey) { $('#roleBadge').textContent = 'Host'; $('#roleBadge').classList.add('ok'); document.querySelector('.hostonly-lobby').classList.remove('hidden'); }
-fetch('/api/info').then(r => r.json()).then(i => { document.querySelectorAll('.studio-name').forEach(e => e.textContent = i.name); document.title = i.name; }).catch(() => {});
+document.addEventListener('rolling-info', e => { document.title = e.detail.name; });
 if (navigator.mediaDevices && navigator.mediaDevices.getDisplayMedia && !/Mobi|Android/i.test(navigator.userAgent)) $('#screenBtn').classList.remove('hidden');
 
 function canJoin() {
@@ -193,7 +193,7 @@ async function getMedia() {
   const audio = audioConstraints(true), video = videoConstraints(true);
   try { return await navigator.mediaDevices.getUserMedia({ audio, video }); }
   catch (e) {
-    if (video) { try { const s = await navigator.mediaDevices.getUserMedia({ audio, video: false }); toast('Camera not available — joining with audio only', 4000); return s; } catch {} }
+    if (video) { try { const s = await navigator.mediaDevices.getUserMedia({ audio, video: false }); toast('Camera not available — joining with audio only', 4000); return s; } catch (e2) { quiet('audio-only fallback')(e2); } }
     throw e;
   }
 }
@@ -205,10 +205,10 @@ async function ensureAudioGraph() {
   const silent = ctx.createGain(); silent.gain.value = 0;
   recNode.connect(silent).connect(ctx.destination);
   recNode.port.onmessage = onWorklet;
-  setInterval(() => { if (ctx.state === 'suspended' || ctx.state === 'interrupted') ctx.resume().catch(() => {}); }, 1000);
+  setInterval(() => { if (ctx.state === 'suspended' || ctx.state === 'interrupted') ctx.resume().catch(quiet('resume audio')); }, 1000);
 }
 function connectMic() {
-  if (micSource) try { micSource.disconnect(); } catch {}
+  if (micSource) try { micSource.disconnect(); } catch (e) { quiet('disconnect old mic')(e); }
   micSource = null;
   const at = stream && stream.getAudioTracks()[0];
   if (at) { micSource = ctx.createMediaStreamSource(new MediaStream([at])); micSource.connect(recNode); watchTrack(at); }
@@ -260,18 +260,19 @@ async function netTest() {
   $('#netBtn').disabled = true;
   const res = $('#netResult');
   res.className = 'small-text muted'; res.textContent = 'Testing your connection…';
+  const tfetch = (url, opt = {}, ms = 30000) => { const c = new AbortController(), t = setTimeout(() => c.abort(), ms); return fetch(url, { ...opt, signal: c.signal }).finally(() => clearTimeout(t)); };
   try {
     const rtts = [];
-    for (let i = 0; i < 5; i++) { const t0 = performance.now(); await fetch('/api/ping?' + Math.random(), { cache: 'no-store' }); rtts.push(performance.now() - t0); }
+    for (let i = 0; i < 5; i++) { const t0 = performance.now(); await tfetch('/api/ping?' + Math.random(), { cache: 'no-store' }, 10000); rtts.push(performance.now() - t0); }
     rtts.sort((a, b) => a - b); const rtt = rtts[2];
     let t0 = performance.now();
-    const dl = await (await fetch('/api/speedtest?bytes=4194304&' + Math.random(), { cache: 'no-store' })).arrayBuffer();
+    const dl = await (await tfetch('/api/speedtest?bytes=4194304&' + Math.random(), { cache: 'no-store' })).arrayBuffer();
     const down = dl.byteLength * 8 / ((performance.now() - t0) / 1000) / 1e6;
     const payload = n => { const b = new Uint8Array(n); for (let i = 0; i < n; i += 65536) crypto.getRandomValues(b.subarray(i, Math.min(n, i + 65536))); return b; };
     let size = 524288, upMbps;
     for (;;) {
       const body = payload(size); t0 = performance.now();
-      await fetch('/api/speedtest', { method: 'POST', body, cache: 'no-store' });
+      await tfetch('/api/speedtest', { method: 'POST', body, cache: 'no-store' }, 60000);
       const secs = (performance.now() - t0) / 1000; upMbps = size * 8 / secs / 1e6;
       if (secs > 1.5 || size >= 8388608) break;
       size *= 4;
@@ -292,6 +293,7 @@ async function netTest() {
     res.innerHTML = `<b>${head}</b> — upload ${net.up} Mbps · download ${net.down} Mbps · delay ${net.rtt} ms<br><span class="muted">${advice}</span>`;
     sendState(true);
   } catch (e) {
+    quiet('connection test')(e);
     res.className = 'small-text nettest-bad'; res.innerHTML = '<b>⚠ Couldn\'t reach the studio server.</b> Check your internet, then press Test again.';
   }
   $('#netBtn').disabled = false;
@@ -369,7 +371,7 @@ setInterval(() => {
   setWarn('glitch', glitchTimes.length >= 2);
   setWarn('behind', up.pendingAudio > 3 * 1048576 || up.pending > 150 * 1048576);
   setWarn('offline', joined && !left && (!ws || ws.readyState !== 1));
-  if (ctx && ctx.state !== 'running' && recording) ctx.resume().catch(() => {});
+  if (ctx && ctx.state !== 'running' && recording) ctx.resume().catch(quiet('resume audio while recording'));
 }, 1000);
 
 // a device unplugged mid-show: reconnect automatically and keep recording
@@ -387,9 +389,9 @@ async function recoverMic() {
       for (const old of stream.getAudioTracks()) { old.onended = null; stream.removeTrack(old); old.stop(); }
       nt.enabled = micOn; stream.addTrack(nt);
       connectMic();
-      for (const p of peers.values()) for (const snd of p.pc.getSenders()) if (snd.track && snd.track.kind === 'audio') snd.replaceTrack(nt).catch(() => {});
-      for (const p of peers.values()) { const tr = p.pc.getTransceivers().find(t => t.receiver.track.kind === 'audio' && !t.sender.track); if (tr) tr.sender.replaceTrack(nt).catch(() => {}); }
-      setWarn('mic-lost', false); toast('🎙 Microphone reconnected'); fillDevices().catch(() => {});
+      for (const p of peers.values()) for (const snd of p.pc.getSenders()) if (snd.track && snd.track.kind === 'audio') snd.replaceTrack(nt).catch(e => { quiet('send new mic')(e); toast('⚠ Others may not hear your new mic — if so, press Leave and rejoin', 6000); });
+      for (const p of peers.values()) { const tr = p.pc.getTransceivers().find(t => t.receiver.track.kind === 'audio' && !t.sender.track); if (tr) tr.sender.replaceTrack(nt).catch(quiet('send new mic (spare slot)')); }
+      setWarn('mic-lost', false); toast('🎙 Microphone reconnected'); fillDevices().catch(quiet('refresh device list'));
       break;
     } catch { await new Promise(r => setTimeout(r, 3000)); }
   }
@@ -400,7 +402,7 @@ if (navigator.mediaDevices) navigator.mediaDevices.addEventListener('devicechang
   if (!stream) return;
   const at = stream.getAudioTracks()[0];
   if (!at || at.readyState === 'ended') return recoverMic();
-  if (!joined) fillDevices().catch(() => {});
+  if (!joined) fillDevices().catch(quiet('refresh device list'));
 });
 
 // live-call quality (packet loss) from the browser's own stats
@@ -414,7 +416,7 @@ setInterval(async () => {
         if (s.type === 'remote-inbound-rtp' && typeof s.fractionLost === 'number') loss = Math.max(loss, s.fractionLost);
         if (s.type === 'candidate-pair' && s.nominated && s.state === 'succeeded') { const lc = stats.get(s.localCandidateId); if (lc && lc.candidateType === 'relay') relay = true; }
       });
-    } catch {}
+    } catch (e) { quiet('read call stats')(e); }
   }
   myNet.loss = loss; myNet.relay = relay;
   myNet.badCount = loss > 0.08 ? (myNet.badCount || 0) + 1 : 0;
@@ -455,7 +457,7 @@ $('#controlBtn').onclick = async () => {
   const name = $('#nameInput').value.trim() || 'Host';
   $('#nameInput').value = name; LS.set('ps_name', name);
   controlMode = true;
-  try { await ensureAudioGraph(); await ctx.resume(); } catch {}
+  try { await ensureAudioGraph(); await ctx.resume(); } catch (e) { quiet('control room audio')(e); toast('Meters may not work in this browser — everything else will', 5000); }
   if (stream) stream.getTracks().forEach(t => t.stop());
   stream = new MediaStream();
   micOn = false; camOn = false;
@@ -465,7 +467,7 @@ $('#joinBtn').onclick = () => {
   const name = $('#nameInput').value.trim();
   if (!name || !stream) return;
   LS.set('ps_name', name);
-  ctx.resume().catch(() => {});
+  ctx.resume().catch(quiet('resume audio'));
   connect();
 };
 $('#rejoinBtn').onclick = () => location.reload();
@@ -475,10 +477,11 @@ function connect() {
   left = false;
   ws = new WebSocket((location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/ws');
   ws.onopen = () => {
+    lastPong = Date.now();
     wsSend({ t: 'join', room: roomId, key: hostKey, name: $('#nameInput').value.trim(), clientId, recSeg: recording ? recording.seg : null, camId: stream.id, control: controlMode });
     for (let i = 0; i < 8; i++) setTimeout(() => wsSend({ t: 'ping', c: performance.now() }), i * 250);
   };
-  ws.onmessage = e => { let m; try { m = JSON.parse(e.data); } catch { return; } onMsg(m); };
+  ws.onmessage = e => { let m; try { m = JSON.parse(e.data); } catch (err) { quiet('unreadable message from server')(err); return; } onMsg(m); };
   ws.onclose = () => {
     for (const p of [...peers.values()]) removePeer(p.id);
     pendingSignals.clear();
@@ -486,11 +489,16 @@ function connect() {
     if (joined || inWaiting) { $('#uploadLine').textContent = 'Reconnecting…'; setTimeout(connect, 2000); }
   };
 }
-setInterval(() => wsSend({ t: 'ping', c: performance.now() }), 5000);
+let lastPong = Date.now();
+setInterval(() => {
+  wsSend({ t: 'ping', c: performance.now() });
+  if (ws && ws.readyState === 1 && Date.now() - lastPong > 15000) { quiet('no answer from the server for 15 s — reconnecting')(''); lastPong = Date.now(); ws.close(); }
+}, 5000);
 
 function onMsg(m) {
   switch (m.t) {
     case 'pong': {
+      lastPong = Date.now();
       const now = performance.now(), rtt = now - m.c;
       syncSamples.push({ rtt, off: m.s + rtt / 2 - now });
       if (syncSamples.length > 20) syncSamples.shift();
@@ -523,7 +531,7 @@ function onMsg(m) {
     }
     case 'error':
       left = true; inWaiting = false;
-      try { ws.close(); } catch {}
+      try { ws.close(); } catch (e) { quiet('close connection')(e); }
       message(m.code === 'full' ? 'Studio is full' : m.code === 'kicked' ? 'Removed from studio' : m.code === 'denied' ? 'Not let in' : 'Can\'t join', esc(m.msg), m.code === 'full' || m.code === 'denied');
       if (up.items.size) finishScreen();
       break;
@@ -533,7 +541,7 @@ function onMsg(m) {
     case 'peer-state': { const p = peers.get(m.id); if (p) { const before = new Set((p.state && p.state.warnings) || []); p.state = m.state; renderStatus(p); if (isHost) for (const w of p.state.warnings || []) if (!before.has(w)) { toast(`⚠ ${p.name}: ${WARN_TEXT[w] ? WARN_TEXT[w][1] : w}`, 5000); } } break; }
     case 'screen': { const p = peers.get(m.id); if (p) { p.screenId = m.on ? m.streamId : null; if (!m.on) removeScreenTile(p.id); else attachScreenIfReady(p); } break; }
     case 'signal': onSignal(m.from, m.data); break;
-    case 'recording': recStartedAt = m.on ? m.started : null; updateRecUI(); if (m.on) { toast(`Recording started (take ${m.n})`); markers.length = 0; if (!m.roomTone) countdown(); recNode.port.postMessage({ cmd: 'resetLoud' }); } else { toast('Recording stopped — finishing uploads…', 3500); uploadPeak = 0; } break;
+    case 'recording': recStartedAt = m.on ? m.started : null; updateRecUI(); if (m.on) { toast(`Recording started (take ${m.n})`); markers.length = 0; build = null; if (m.nextEpisode) nextEpisode = m.nextEpisode; if (!m.roomTone) countdown(); recNode.port.postMessage({ cmd: 'resetLoud' }); } else { toast('Recording stopped — finishing uploads…', 3500); uploadPeak = 0; } break;
     case 'record-start': startLocal(m); break;
     case 'record-stop': if (recording && recording.take === m.take) stopLocal(recording); stopToneOverlay(true); break;
     case 'roomtone': startToneOverlay(m); break;
@@ -577,9 +585,9 @@ function addPeer(info, initiator) {
     if (isScreen) { if (!p.screenId) p.screenId = st.id; showScreenTile(p.id, st, `${p.name}'s screen`); return; }
     const v = p.tile.querySelector('video');
     if (v.srcObject !== st) v.srcObject = st;
-    v.play().catch(() => {});
+    playOrAsk(v);
     if (e.track.kind === 'audio' && !p.analyser) {
-      try { const src = ctx.createMediaStreamSource(new MediaStream([e.track])); p.analyser = ctx.createAnalyser(); p.analyser.fftSize = 512; p.buf = new Float32Array(512); src.connect(p.analyser); } catch {}
+      try { const src = ctx.createMediaStreamSource(new MediaStream([e.track])); p.analyser = ctx.createAnalyser(); p.analyser.fftSize = 512; p.buf = new Float32Array(512); src.connect(p.analyser); } catch (e) { quiet('level meter for ' + p.name)(e); }
     }
   };
   pc.onnegotiationneeded = async () => {
@@ -620,7 +628,7 @@ function onSignal(from, data) {
 function removePeer(id) {
   const p = peers.get(id); if (!p) return;
   peers.delete(id);
-  try { p.pc.close(); } catch {}
+  try { p.pc.close(); } catch (e) { quiet('close connection to ' + p.name)(e); }
   if (p.tile) p.tile.remove();
   removeScreenTile(id);
   tuneSenders();
@@ -635,10 +643,20 @@ function tuneSenders() {
     if (!params.encodings || !params.encodings.length) continue;
     if (s.track === cam) { params.encodings[0].maxBitrate = br; params.encodings[0].scaleResolutionDownBy = scale; }
     else { params.encodings[0].maxBitrate = 1500000; params.encodings[0].scaleResolutionDownBy = 1; }
-    s.setParameters(params).catch(() => {});
+    s.setParameters(params).catch(quiet('adjust video quality'));
   }
 }
 
+// browsers can block sound until the page is clicked — never fail silently: show a button
+function playOrAsk(v) {
+  v.play().catch(e => {
+    quiet('autoplay blocked')(e);
+    if (document.getElementById('soundGate')) return;
+    const b = document.createElement('button'); b.id = 'soundGate'; b.className = 'primary sound-gate'; b.textContent = '🔊 Click to hear everyone';
+    b.onclick = () => { document.querySelectorAll('video').forEach(x => x.play().catch(quiet('play after click'))); if (ctx) ctx.resume().catch(quiet('resume audio')); b.remove(); };
+    document.body.appendChild(b);
+  });
+}
 // =====================================================================
 // 6. Tiles + layout
 // =====================================================================
@@ -673,7 +691,7 @@ function showScreenTile(id, st, label) {
     el.querySelector('.name').textContent = '🖥 ' + label;
     $('#grid').prepend(el);
   }
-  el.querySelector('video').srcObject = st; el.querySelector('video').play().catch(() => {});
+  el.querySelector('video').srcObject = st; playOrAsk(el.querySelector('video'));
   layout();
 }
 function attachScreenIfReady(p) { const st = p.screenId && p.streams.get(p.screenId); if (st) showScreenTile(p.id, st, `${p.name}'s screen`); }
@@ -733,7 +751,7 @@ async function startScreen() {
   try { screenStream = await navigator.mediaDevices.getDisplayMedia({ video: { frameRate: { ideal: 30, max: 30 } }, audio: false }); }
   catch { return; }
   const tr = screenStream.getVideoTracks()[0];
-  try { tr.contentHint = 'detail'; } catch {}
+  try { tr.contentHint = 'detail'; } catch (e) { quiet('screen share sharpness hint')(e); }
   tr.onended = stopScreen;
   wsSend({ t: 'screen', on: true, streamId: screenStream.id });
   for (const p of peers.values()) p.screenSender = p.pc.addTrack(tr, screenStream);
@@ -743,7 +761,7 @@ async function startScreen() {
 }
 function stopScreen() {
   if (!screenStream) return;
-  for (const p of peers.values()) if (p.screenSender) { try { p.pc.removeTrack(p.screenSender); } catch {} p.screenSender = null; }
+  for (const p of peers.values()) if (p.screenSender) { try { p.pc.removeTrack(p.screenSender); } catch (e) { quiet('stop sending screen')(e); } p.screenSender = null; }
   screenStream.getTracks().forEach(t => { t.onended = null; t.stop(); });
   if (recording && recording.screenRec) recording.screenRec.stop();
   screenStream = null;
@@ -870,6 +888,19 @@ function renderHealth() {
   $('#healthMarkers').innerHTML = markers.length ? '<b>Markers this take</b><br>' + markers.map(m => `📍 ${fmtTime(m.at)} — ${esc(m.label)}`).join('<br>') : (recStartedAt ? 'Press <b>M</b> or 📍 to drop a marker for editing.' : '');
 }
 setInterval(renderHealth, 250);
+function tileLoud(el, L, muted) {
+  if (!el) return;
+  let b = el.querySelector('.tloud');
+  if (!b) { b = document.createElement('div'); b.className = 'tloud'; el.appendChild(b); }
+  if (!L || muted || !Number.isFinite(L.S)) { b.textContent = ''; b.className = 'tloud'; return; }
+  b.className = 'tloud ' + loudClass(L.S);
+  b.textContent = `${L.S.toFixed(0)} LUFS${L.TPmax != null && L.TPmax > -1 ? ' · PEAK' : ''}`;
+}
+setInterval(() => {
+  if (!joined) return;
+  if (!controlMode) tileLoud(document.getElementById('tile-me'), myLoud, !micOn);
+  if (isHost) for (const p of peers.values()) tileLoud(p.tile, p.loud, p.state && p.state.mic === false);
+}, 250);
 
 // =====================================================================
 // 8. Local recording: lossless audio + camera + screen, saved to disk then uploaded
@@ -946,7 +977,7 @@ function onPcm(m) {
   }
   // when was the first sample of this chunk captured, in server time?
   let perf;
-  try { const ts = ctx.getOutputTimestamp(); perf = ts.performanceTime > 0 ? ts.performanceTime + (m.time - ts.contextTime) * 1000 : null; } catch {}
+  try { const ts = ctx.getOutputTimestamp(); perf = ts.performanceTime > 0 ? ts.performanceTime + (m.time - ts.contextTime) * 1000 : null; } catch (e) { if (!onPcm.warned) { onPcm.warned = true; quiet('precise audio clock (using the fallback)')(e); } }
   if (!perf) perf = performance.now() - (ctx.currentTime - m.time) * 1000;
   const t = perf + clockOffset;
   enqueue(`/up/${roomId}/${r.take}/${r.seg}/audio?tok=${r.tok}&s=${r.samples}&t=${t.toFixed(1)}&rate=${ctx.sampleRate}`, b, { pri: 0, seg: r.seg, kind: 'audio' });
@@ -978,7 +1009,8 @@ function sendState(force) {
     uploadPeak = Math.max(uploadPeak, s.pending);
     const pct = uploadPeak ? Math.round(100 * (1 - s.pending / uploadPeak)) : 0;
     $('#uploadLine').innerHTML = `Uploading your recording… ${fmtMB(s.pending)} left <span class="pbar"><span style="width:${pct}%"></span></span>`;
-  } else if (!build || build.status === 'ready') $('#uploadLine').textContent = s.rec === 'saved' ? 'Your recording is saved ✓' : '';
+  } else if (build && isHost) renderBuild();
+  else $('#uploadLine').textContent = s.rec === 'saved' ? 'Your recording is saved ✓' : '';
   if (key !== lastState || force) { lastState = key; wsSend({ t: 'state', state: s }); }
 }
 setInterval(() => sendState(), 1000);
@@ -1038,7 +1070,7 @@ $('#leaveBtn').onclick = async () => {
   if (recording) stopLocal(recording);
   if (screenStream) stopScreen();
   left = true; joined = false;
-  try { ws.close(); } catch {}
+  try { ws.close(); } catch (e) { quiet('close connection')(e); }
   for (const p of [...peers.values()]) removePeer(p.id);
   stream.getVideoTracks().forEach(t => t.stop());
   finishScreen();

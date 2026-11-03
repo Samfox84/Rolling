@@ -1,0 +1,104 @@
+role: implementation-architect
+review: Rolling v1.3.0 → v1.3.1 deep audit (no-orphans-no-dual-paths | golden-plan guardrails | architecture-review gates)
+date: 2026-11-03
+reviewer: Claude (Anthropic) — model claude-opus-5-5 — directed by Sam Fox
+format: TOON
+ctx_files_read: 13 | server.js post.js transcribe.js log.js proc.js install.sh public/{room.js room.html index.html manage.html recorder-worklet.js common.js style.css}
+
+summary: |
+  v1.3.0 worked end to end but had silent failure paths, untimed network requests, two ways to run
+  external programs, duplicated helpers across pages and server/page, three unused exports and no
+  automated tests in the repo. v1.3.1 fixes all of these, adds a 44-test suite (unit + server
+  integration + real-browser) and proves the tests bite with mutation checks.
+
+rules_checked:
+  [3]{rule|source|result}:
+  R1 No orphaned code          | no-orphans-no-dual-paths.md | PASS after fixes — 0 functions without a caller (scanner: 232 declarations)
+  R2 No dual paths             | no-orphans-no-dual-paths.md | PASS after fixes — one runner, one logger, one API client, one verdict, one time formatter per runtime
+  R3 Deferred work tracked     | no-orphans-no-dual-paths.md | 2 items need owner confirmation (see deferred)
+
+findings:
+  [21]{id|severity|area|finding|fix|status}:
+  F01 | HIGH   | uploads    | upload fetch had no timeout — a half-open connection could freeze an upload lane forever, silently | AbortController timeout 45 s audio / 180 s video, then retry | FIXED
+  F02 | HIGH   | studio     | WebSocket half-open link not detected (only server-side ping) | client watchdog: no pong for 15 s → close → auto-reconnect | FIXED
+  F03 | HIGH   | studio     | browser autoplay block left a guest silent with no sign (play().catch(()=>{})) | "Click to hear everyone" button appears | FIXED
+  F04 | HIGH   | files      | readJSON swallowed corrupt take.json → a take would vanish silently | logged as error, copy kept as take.json.corrupt-<time> | FIXED
+  F05 | MED    | recordings | docs-only rebuild deleted documents before rewriting → download could 404 mid-update (found by the new integration test) | write-to-temp + rename; stale docs removed after | FIXED
+  F06 | MED    | studio     | mic auto-reconnect: if sending the new mic failed, others couldn't hear and nobody was told | logged + on-screen warning to rejoin | FIXED
+  F07 | MED    | levels     | measureLoudness returning null skipped normalising without an error | throws; error listed on the take | FIXED
+  F08 | MED    | backup     | marker renames (docs-only) never reached the backup drive | backup runs after docs updates; unchanged media skipped | FIXED
+  F09 | MED    | dual path  | 6 spawn() sites across 2 modules with different error/timeout handling | proc.js run() — the only spawn, every call timed | FIXED
+  F10 | MED    | dual path  | level verdict implemented twice (post.js + manage.html) | server computes {level,text}; page only displays it | FIXED
+  F11 | MED    | dual path  | $, esc, toast, fmtMB copied into 3 pages; raw fetch in 25 places | public/common.js + api() with timeouts | FIXED
+  F12 | LOW    | dual path  | server hms() and post.hms() both formatted times | post.hms only | FIXED
+  F13 | LOW    | orphans    | unused exports post.verdict (now used), transcriber.BIN/MODELS | removed / wired | FIXED
+  F14 | LOW    | logging    | 26 console.* calls, 13 empty catches on server, 26 in studio page | log.js everywhere; every catch logs (expected cases at debug via log.ignore / quiet) | FIXED
+  F15 | LOW    | tracing    | no ENTER/EXIT/EXCEPTION on pipeline steps | log.trace on processTake buildDocs backupTake compactTake notifyReady alignVideo measureLoudness finishTake | FIXED
+  F16 | LOW    | external   | no NO_EXTERNAL_CALLS guard (Cloudflare TURN API, SMTP) | guard added; tests run with it set | FIXED
+  F17 | LOW    | email      | SMTP only had a connect timeout | greeting + socket timeouts | FIXED
+  F18 | LOW    | episodes   | suggested next episode number went stale after a take | server sends nextEpisode with each recording start | FIXED
+  F19 | LOW    | studio     | host's "take ready" line was overwritten a second later | build status kept until the next recording | FIXED
+  F20 | LOW    | security   | intro/outro DELETE accepted any name (basename-safe, but unvalidated) | only intro|outro | FIXED
+  F21 | INFO   | meters     | guests saw loudness only in the lobby | live LUFS badge on tiles: host sees everyone, guests their own | ADDED
+
+tests:
+  run: npm test   (+ npm run test:e2e with Playwright)
+  [5]{file|count|type|covers}:
+  tests/post.test.js        | 13 | unit         | transcript TXT/SRT/VTT, chapters + intro offset, verdicts, level report, sesx/FCP XML well-formed, CSV markers
+  tests/meter.test.js       | 7  | unit         | EBU R128 reference tone -23.01 LUFS (48k + 44.1k), true-peak inter-sample, gating, silence, lossless copy, glitch fill
+  tests/proc-log.test.js    | 9  | unit         | runner success/failure/timeout/missing program/streaming/binary; trace rethrows; ignore never throws
+  tests/transcribe.test.js  | 8  | unit+ffmpeg  | live chunking, quiet-point cuts, silence skipping, hallucination filter, timeline offset, progress, engine failure recorded
+  tests/server.test.js      | 7  | integration  | real server: auth, caching headers, full take over WebSocket + HTTP uploads (out of order), guest can't record, bad token 403, bad chunk 400, all outputs, normalised -16/-23 measured by ffmpeg, transcript, session XML, episode download names, zip, docs-only marker rename, compaction, corrupt file kept, asset validation
+  tests/e2e/studio.e2e.js   | 3  | real browser | waiting room, live LUFS on tiles + Health panel, control room not recorded, zero page errors
+  totals: 44 pass / 0 fail (+3 e2e pass)
+  mutation_check:
+    [3]{mutation|result}:
+    remove whisper hallucination filter | transcribe tests FAIL (1) — caught
+    break K-weighting high-pass         | meter tests FAIL (3) — caught
+    chapters ignore intro offset        | post tests FAIL (1) — caught
+
+gates:
+  [8]{gate|description|status|notes}:
+  A  | Call graph completeness  | PASS | every cross-file call checked: server→post/transcribe/log/proc, pages→common.js
+  B  | Dependency inventory     | PASS | no new packages (node:test is built in; Playwright optional for e2e only)
+  C  | Interface preservation   | PASS | all HTTP/WS endpoints unchanged; verdict shape changed in one place and its only consumer updated
+  D  | Evidence lock            | PASS | whisper-cli flags and JSON shape read from whisper.cpp source (examples/cli/cli.cpp)
+  D2 | Data flow integrity      | PASS | browser PCM → upload → audio.pcm → WAV → levels/normalised/transcript/docs → zip/backup/email; every stage has a consumer (integration test walks it)
+  E  | Pre-generation master    | PASS |
+  F  | Per-file                 | PASS | node --check on all JS; scanner: 0 empty catches, 0 console.* on server, 1 spawn site
+  G  | Final validation         | PASS | 44/44 + 3/3 e2e
+
+not_applicable:
+  [4]:
+  Python-specific standards (type hints, pathlib, pytest) — this is a JavaScript project; JS equivalents used (JSDoc on public helpers, path module, node:test)
+  "encoding=utf-8 on all file I/O" — Node text writes default to UTF-8; binary audio/video is written as Buffers
+  git-ship.sh workflow — not part of this repo; commits go straight to main on GitHub
+  kiro-cli / code tool — not available here; grep + node --check + tests used instead
+
+deferred:
+  [3]{item|why|where|needs_confirmation}:
+  ENTER/EXIT trace on EVERY function >5 lines | applied to the 8 pipeline steps; adding it to audio-thread and per-chunk upload code would flood the log hundreds of times a second | owner decision | YES — Sam to confirm (asked twice per R3)
+  Real Audition opening the .sesx            | needs Adobe Audition; file validated as XML and against a known-working session | Sam's next real take | YES
+  Real whisper.cpp engine                     | build of external code is blocked in the review sandbox; integration tested with a stand-in that matches whisper-cli's JSON | first update on the MacBook | YES
+
+scorecard:
+  [5]{dimension|score|notes}:
+  Call Graph Accuracy     | 24/25 | scanner + manual trace; catchUp exported for tests (test caller counts)
+  Signature Fidelity      | 25/25 | whisper-cli args verified against source
+  Regression Preservation | 24/25 | all endpoints kept; verdict object shape changed (single consumer updated)
+  Test Coverage Quality   | 23/25 | outcomes asserted (ffmpeg-measured levels, real files); browser tests need Playwright
+  TOTAL                   | 96/100 |
+
+change_summary:
+  [11]{file|action|notes}:
+  log.js                    | NEW    | the one logger + trace + ignore
+  proc.js                   | NEW    | the one program runner with timeouts
+  public/common.js          | NEW    | shared page helpers + api() with timeouts
+  tests/*                   | NEW    | 44 tests + fake whisper fixture + e2e
+  server.js                 | MODIFY | F04-F10 F12-F20
+  transcribe.js             | MODIFY | runner/logger, no unused exports, failures recorded
+  post.js                   | MODIFY | verdict returns {level,text}
+  public/room.js            | MODIFY | F01-F03 F06 F11 F14 F18 F19 F21
+  public/index.html         | MODIFY | api() everywhere, shared helpers
+  public/manage.html        | MODIFY | api() everywhere, server verdict
+  install.sh / README / CHANGELOG | MODIFY | tests not installed; docs

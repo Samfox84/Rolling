@@ -98,6 +98,16 @@ Without a relay, a guest on a locked-down network (some offices/hotels) may not 
 ## Admin password
 Each install gets its own random password, shown at the end of the install. Change it any time in **Studio settings → Admin password** (it's stored hashed). Forgot it? Run `sudo podcast-studio-reset-password` on the server.
 
+## Tests
+```bash
+npm test            # 44 tests: loudness meter accuracy, transcripts, documents, a full recording through the real server
+npm run test:e2e    # real browsers (needs: npm i -g playwright && npx playwright install chromium)
+```
+Tests never touch the internet (`NO_EXTERNAL_CALLS=1`) and use a stand-in for whisper.cpp.
+
+## Logs
+Everything is logged to the system journal: `journalctl -u podcast-studio -f`. Set `LOG_LEVEL=debug` in `.env` to also see every step start and finish with timings.
+
 ## Looking after it
 - Status: `systemctl status podcast-studio`
 - Live log: `journalctl -u podcast-studio -f`

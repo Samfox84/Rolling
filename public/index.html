@@ -91,20 +91,23 @@
     <p class="muted small-text" style="text-align:center; margin-top:20px" id="ver"></p>
   </div>
 </div>
+<script src="/common.js"></script>
 <script>
-const $ = s => document.querySelector(s);
-const esc = s => String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+const { $, esc, toast, api } = window.Rolling;
 const gb = b => (b / 1073741824).toFixed(1) + ' GB';
-function toast(t) { const d = document.createElement('div'); d.className = 'toast'; d.textContent = t; document.body.appendChild(d); setTimeout(() => d.remove(), 2200); }
 function copy(text, label) { navigator.clipboard.writeText(text).then(() => toast(label + ' copied'), () => prompt('Copy this link:', text)); }
 
 async function load() {
-  const info = await fetch('/api/info').then(r => r.json());
+  const ir = await api('/api/info');
+  if (!ir.ok) { $('#login').classList.remove('hidden'); $('#loginErr').textContent = ir.error + ' — retrying…'; setTimeout(load, 5000); return; }
+  const info = ir.data;
   document.querySelectorAll('.studio-name').forEach(e => e.textContent = info.name);
   document.title = info.name;
   if (!info.admin) { $('#login').classList.remove('hidden'); $('#dash').classList.add('hidden'); $('#pw').focus(); return; }
   $('#login').classList.add('hidden'); $('#dash').classList.remove('hidden'); $('#logoutBtn').classList.remove('hidden');
-  const { rooms, disk, version } = await fetch('/api/rooms').then(r => r.json());
+  const rr = await api('/api/rooms');
+  if (!rr.ok) { toast(rr.error); return; }
+  const { rooms, disk, version } = rr.data;
   $('#ver').textContent = 'Podcast Studio v' + version;
   if (disk) $('#disk').textContent = `${gb(disk.free)} free of ${gb(disk.total)}`;
   $('#rooms').innerHTML = rooms.length ? '' : '<div class="card muted">No rooms yet — make one above.</div>';
@@ -138,23 +141,25 @@ document.addEventListener('click', async e => {
   if (b.dataset.copy) copy(b.dataset.copy, b.dataset.label);
   if (b.dataset.del) {
     if (prompt(`This deletes the room "${b.dataset.name}" AND all its recordings. Type DELETE to confirm.`) !== 'DELETE') return;
-    const res = await fetch('/api/rooms/' + b.dataset.del, { method: 'DELETE' });
-    if (!res.ok) toast((await res.json()).error || 'Could not delete'); load();
+    const r = await api('/api/rooms/' + b.dataset.del, { method: 'DELETE' });
+    if (!r.ok) toast(r.error || 'Could not delete'); load();
   }
 });
 $('#loginForm').onsubmit = async e => {
   e.preventDefault();
-  const res = await fetch('/api/login', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ password: $('#pw').value }) });
-  if (res.ok) load(); else $('#loginErr').textContent = 'Wrong password — try again.';
+  const r = await api('/api/login', { json: { password: $('#pw').value } });
+  if (r.ok) load(); else $('#loginErr').textContent = r.status === 401 ? 'Wrong password — try again.' : r.error;
 };
 $('#newForm').onsubmit = async e => {
   e.preventDefault();
-  const res = await fetch('/api/rooms', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: $('#newName').value || 'My show' }) });
+  const res = await api('/api/rooms', { json: { name: $('#newName').value || 'My show' } });
   if (!res.ok) { toast('Could not create the room — are you still logged in?'); return; }
   $('#newName').value = ''; toast('Room created ✓'); load();
 };
 async function loadSettings() {
-  const s = await fetch('/api/settings').then(r => r.json());
+  const sr = await api('/api/settings');
+  if (!sr.ok) { toast(sr.error); return; }
+  const s = sr.data;
   $('#sHost').value = s.smtp.host; $('#sPort').value = s.smtp.port; $('#sUser').value = s.smtp.user; $('#sPass').value = s.smtp.pass; $('#sFrom').value = s.smtp.from;
   $('#sBackup').value = s.backupDir; $('#tKey').value = s.turn.keyId; $('#tTok').value = s.turn.token; $('#sUrl').value = s.publicUrl;
   showBackup(s.backup);
@@ -179,9 +184,9 @@ function settingsBody() {
     transcribe: { enabled: $('#txOn').checked, model: $('#txModel').value, language: $('#txLang').value }, autoCompact: $('#autoCompact').checked };
 }
 async function saveSettings() {
-  const res = await fetch('/api/settings', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(settingsBody()) });
-  const j = await res.json();
-  if (!res.ok) { $('#saveStatus').innerHTML = `<span style="color:var(--rec)">${esc(j.error)}</span>`; return false; }
+  const res = await api('/api/settings', { json: settingsBody() });
+  const j = res.data;
+  if (!res.ok) { $('#saveStatus').innerHTML = `<span style="color:var(--rec)">${esc(res.error)}</span>`; return false; }
   showBackup(j.backup); $('#saveStatus').innerHTML = '<span style="color:var(--ok)">Saved ✓</span>'; setTimeout(() => $('#saveStatus').textContent = '', 3000);
   return true;
 }
@@ -189,24 +194,23 @@ $('#saveSettings').onclick = saveSettings;
 $('#testEmail').onclick = async () => {
   if (!(await saveSettings())) return;
   $('#testEmail').disabled = true;
-  const res = await fetch('/api/settings/test-email', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ to: $('#sTestTo').value }) });
-  const j = await res.json(); $('#testEmail').disabled = false;
-  toast(res.ok ? 'Test email sent ✓ — check your inbox' : 'Email failed: ' + j.error);
+  const res = await api('/api/settings/test-email', { json: { to: $('#sTestTo').value }, timeout: 60000 });
+  $('#testEmail').disabled = false;
+  toast(res.ok ? 'Test email sent ✓ — check your inbox' : 'Email failed: ' + res.error, 6000);
 };
 $('#testTurn').onclick = async () => {
   if (!(await saveSettings())) return;
   $('#turnStatus').textContent = 'Testing…';
-  const res = await fetch('/api/settings/test-turn', { method: 'POST' }); const j = await res.json();
-  $('#turnStatus').innerHTML = res.ok ? `<span style="color:var(--ok)">✓ Relay working (${j.servers} addresses)</span>` : `<span style="color:var(--rec)">${esc(j.error)}</span>`;
+  const res = await api('/api/settings/test-turn', { method: 'POST' });
+  $('#turnStatus').innerHTML = res.ok ? `<span style="color:var(--ok)">✓ Relay working (${res.data.servers} addresses)</span>` : `<span style="color:var(--rec)">${esc(res.error)}</span>`;
 };
 $('#pwBtn').onclick = async () => {
-  const res = await fetch('/api/settings/password', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ current: $('#pwCur').value, next: $('#pwNew').value }) });
-  const j = await res.json();
-  $('#pwStatus').innerHTML = res.ok ? '<span style="color:var(--ok)">✓ Password changed</span>' : `<span style="color:var(--rec)">${esc(j.error)}</span>`;
+  const res = await api('/api/settings/password', { json: { current: $('#pwCur').value, next: $('#pwNew').value } });
+  $('#pwStatus').innerHTML = res.ok ? '<span style="color:var(--ok)">✓ Password changed</span>' : `<span style="color:var(--rec)">${esc(res.error)}</span>`;
   if (res.ok) { $('#pwCur').value = $('#pwNew').value = ''; }
 };
 $('#settingsCard').addEventListener('toggle', () => { if ($('#settingsCard').open) loadSettings(); });
-$('#logoutBtn').onclick = async () => { await fetch('/api/logout', { method: 'POST' }); location.reload(); };
+$('#logoutBtn').onclick = async () => { await api('/api/logout', { method: 'POST' }); location.reload(); };
 load();
 setInterval(() => { if (!$('#dash').classList.contains('hidden') && !document.activeElement.matches('input') && !$('#settingsCard').open) load(); }, 10000);
 </script>

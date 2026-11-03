@@ -11,7 +11,8 @@ const fs = require('fs');
 const fsp = fs.promises;
 const os = require('os');
 const path = require('path');
-const { spawn } = require('child_process');
+const log = require('./log');
+const { run } = require('./proc');
 
 const HALLUCINATION = /^\s*(\[.*\]|\(.*\)|♪+|thank you\.?|thanks for watching!?|you\.?|bye\.?|\.+)\s*$/i;
 
@@ -30,7 +31,7 @@ module.exports = function createTranscriber({ settings, FFMPEG, takeDir, saveTak
 
   // one whisper job at a time, so live recording always has CPU to spare
   let chain = Promise.resolve();
-  const run = fn => (chain = chain.then(fn, fn));
+  const queueJob = fn => (chain = chain.then(fn, fn));
   const scheduled = new Set();
 
   const pcmFile = (t, s) => path.join(takeDir(t.room, t.id), 'segs', s.id, 'audio.pcm');
@@ -54,21 +55,11 @@ module.exports = function createTranscriber({ settings, FFMPEG, takeDir, saveTak
   function whisper(wav, prefix) {
     const m = cfg().model, lang = /\.en$/.test(m) ? 'en' : (cfg().language || 'auto');
     const args = ['-m', modelPath(m), '-f', wav, '-oj', '-of', prefix, '-t', String(threads), '-l', lang, '-np', '-nth', '0.6'];
-    const useNice = fs.existsSync('/usr/bin/nice');
-    return new Promise((resolve, reject) => {
-      const p = spawn(useNice ? '/usr/bin/nice' : BIN, useNice ? ['-n', '10', BIN, ...args] : args);
-      let err = ''; p.stderr.on('data', d => { err = (err + d).slice(-3000); });
-      p.on('error', reject);
-      p.on('close', code => (code === 0 ? resolve() : reject(new Error(err.trim() || 'whisper exit ' + code))));
-    });
+    return run(BIN, args, { stdout: 'ignore', timeoutMs: 20 * 60 * 1000, nice: fs.existsSync('/usr/bin/nice') });
   }
   function ffExtract(file, rate, from, to, wav) {
-    return new Promise((resolve, reject) => {
-      const p = spawn(FFMPEG, ['-hide_banner', '-loglevel', 'error', '-nostdin', '-y', '-f', 's24le', '-ar', String(rate), '-ac', '1',
-        '-ss', (from / rate).toFixed(4), '-t', ((to - from) / rate).toFixed(4), '-i', file, '-ar', '16000', '-ac', '1', '-c:a', 'pcm_s16le', wav]);
-      let err = ''; p.stderr.on('data', d => { err += d; });
-      p.on('error', reject); p.on('close', c => (c === 0 ? resolve() : reject(new Error(err || 'ffmpeg ' + c))));
-    });
+    return run(FFMPEG, ['-hide_banner', '-loglevel', 'error', '-nostdin', '-y', '-f', 's24le', '-ar', String(rate), '-ac', '1',
+      '-ss', (from / rate).toFixed(4), '-t', ((to - from) / rate).toFixed(4), '-i', file, '-ar', '16000', '-ac', '1', '-c:a', 'pcm_s16le', wav], { stdout: 'ignore', timeoutMs: 120000 });
   }
 
   // transcribe whatever new audio this person has (all of it if final)
@@ -96,8 +87,8 @@ module.exports = function createTranscriber({ settings, FFMPEG, takeDir, saveTak
             if (!text || HALLUCINATION.test(text)) continue;
             s.tx.parts.push({ from: +(segOffset + start / rate + seg.offsets.from / 1000).toFixed(2), to: +(segOffset + start / rate + seg.offsets.to / 1000).toFixed(2), text });
           }
-        } catch (err) { s.tx.error = String(err.message).slice(0, 300); console.warn('[transcribe]', s.name, s.tx.error); }
-        finally { fsp.rm(wav, { force: true }).catch(() => {}); fsp.rm(prefix + '.json', { force: true }).catch(() => {}); }
+        } catch (err) { s.tx.error = String(err.message).slice(0, 300); log.warn('transcribe', `${s.name}: ${s.tx.error}`); }
+        finally { fsp.rm(wav, { force: true }).catch(log.ignore('transcribe', 'remove temp wav')); fsp.rm(prefix + '.json', { force: true }).catch(log.ignore('transcribe', 'remove temp json')); }
       }
       s.tx.done = end;
       saveTake(t);
@@ -111,7 +102,7 @@ module.exports = function createTranscriber({ settings, FFMPEG, takeDir, saveTak
       const k = t.id + '/' + s.id;
       if (scheduled.has(k) || !s.audio) continue;
       scheduled.add(k);
-      run(() => catchUp(t, s, false)).finally(() => scheduled.delete(k));
+      queueJob(() => catchUp(t, s, false)).catch(e => log.warn('transcribe', `live chunk for ${s.name} failed`, e)).finally(() => scheduled.delete(k));
     }
   }
   // after Stop: finish everyone's transcript (onProgress gets 0..1)
@@ -123,7 +114,7 @@ module.exports = function createTranscriber({ settings, FFMPEG, takeDir, saveTak
     for (const s of segs) {
       const before = (s.tx && s.tx.done) || 0;
       const timer = setInterval(() => onProgress && onProgress(Math.min(1, (did + ((s.tx && s.tx.done) || 0) - before) / total)), 1000);
-      try { await run(() => catchUp(t, s, true)); } finally { clearInterval(timer); }
+      try { await queueJob(() => catchUp(t, s, true)); } finally { clearInterval(timer); }
       did += s.audio.end - before;
       if (onProgress) onProgress(Math.min(1, did / total));
     }
@@ -135,5 +126,5 @@ module.exports = function createTranscriber({ settings, FFMPEG, takeDir, saveTak
     for (const s of Object.values(t.segs)) if (s.audio && s.audio.end) { total += s.audio.end; done += Math.min(s.audio.end, (s.tx && s.tx.done) || 0); }
     return total ? Math.round((100 * done) / total) : 0;
   }
-  return { available, enabled, installedModels, tickLive, finishTake, progress, BIN, MODELS };
+  return { available, enabled, installedModels, tickLive, finishTake: log.trace('transcribe', finishTake), progress, catchUp };
 };

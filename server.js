@@ -11,7 +11,8 @@ const fsp = fs.promises;
 const path = require('path');
 const http = require('http');
 const crypto = require('crypto');
-const { spawn } = require('child_process');
+const log = require('./log');
+const { run } = require('./proc');
 const express = require('express');
 const { WebSocketServer } = require('ws');
 const archiver = require('archiver');
@@ -20,7 +21,7 @@ const createTranscriber = require('./transcribe');
 let nodemailer = null;
 try { nodemailer = require('nodemailer'); } catch { /* email optional */ }
 
-const VERSION = '1.3.0';
+const VERSION = '1.3.1';
 
 // ---------- settings (from .env next to this file) ----------
 (function loadEnv() {
@@ -46,8 +47,8 @@ const MIN_FREE_GB = parseFloat(process.env.MIN_FREE_GB || '2');
 const LATE_REBUILD_SECONDS = parseInt(process.env.LATE_REBUILD_SECONDS || '90', 10);
 let ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || '';
 let SECRET = process.env.SECRET || '';
-if (!SECRET) { SECRET = crypto.randomBytes(32).toString('hex'); console.warn('[warn] SECRET not set in .env — logins reset on restart'); }
-if (!ADMIN_PASSWORD) { ADMIN_PASSWORD = crypto.randomBytes(6).toString('hex'); console.warn('[warn] ADMIN_PASSWORD not set — temporary password: ' + ADMIN_PASSWORD); }
+if (!SECRET) { SECRET = crypto.randomBytes(32).toString('hex'); log.warn('config', 'SECRET not set in .env — logins reset on restart'); }
+if (!ADMIN_PASSWORD) { ADMIN_PASSWORD = crypto.randomBytes(6).toString('hex'); log.warn('config', 'ADMIN_PASSWORD not set — temporary password: ' + ADMIN_PASSWORD); }
 
 const STUN = (process.env.STUN_URLS || 'stun:stun.l.google.com:19302,stun:stun.cloudflare.com:3478').split(',').map(s => s.trim()).filter(Boolean);
 const TURN_URLS = (process.env.TURN_URLS || '').split(',').map(s => s.trim()).filter(Boolean);
@@ -65,12 +66,20 @@ const validStreamId = s => (typeof s === 'string' && /^[\w{}-]{1,80}$/.test(s) ?
 const cleanName = s => String(s || '').replace(/[\u0000-\u001f<>:"/\\|?*]/g, '').replace(/\s+/g, ' ').trim().slice(0, 40) || 'Guest';
 const cleanText = (s, n) => String(s || '').replace(/[\u0000-\u0008\u000b-\u001f]/g, '').trim().slice(0, n);
 const fileSafe = s => cleanName(s).replace(/[^a-zA-Z0-9 _().-]/g, '').trim() || 'Guest';
-const hms = ms => { const s = Math.max(0, Math.floor(ms / 1000)); return [s / 3600, (s % 3600) / 60, s % 60].map(x => String(Math.floor(x)).padStart(2, '0')).join(':'); };
 
 const roomDir = id => path.join(ROOMS_DIR, id);
 const takeDir = (room, take) => path.join(roomDir(room), 'takes', take);
 
-function readJSON(p, fallback = null) { try { return JSON.parse(fs.readFileSync(p, 'utf8')); } catch { return fallback; } }
+function readJSON(p, fallback = null) {
+  let text;
+  try { text = fs.readFileSync(p, 'utf8'); } catch (e) { if (e.code !== 'ENOENT') log.warn('files', `can't read ${p}:`, e); return fallback; }
+  try { return JSON.parse(text); } catch (e) {
+    const bad = `${p}.corrupt-${Date.now()}`;
+    log.error('files', `${p} is damaged (${e.message}) — keeping a copy at ${bad}`);
+    try { fs.copyFileSync(p, bad); } catch (e2) { log.warn('files', 'could not keep a copy of the damaged file', e2); }
+    return fallback;
+  }
+}
 function writeJSON(p, obj) { const tmp = p + '.tmp'; fs.writeFileSync(tmp, JSON.stringify(obj, (k, v) => (k.startsWith('_') ? undefined : v), 2)); fs.renameSync(tmp, p); }
 
 function loadRoom(id) { return validId(id) ? readJSON(path.join(roomDir(id), 'room.json')) : null; }
@@ -91,7 +100,7 @@ const settings = (() => {
     sessionGen: s.sessionGen || 0,  // bumped on password change so old logins stop working
   };
 })();
-function saveSettings() { writeJSON(SETTINGS_FILE, settings); try { fs.chmodSync(SETTINGS_FILE, 0o600); } catch {} }
+function saveSettings() { writeJSON(SETTINGS_FILE, settings); try { fs.chmodSync(SETTINGS_FILE, 0o600); } catch (e) { log.warn('settings', 'could not make settings.json private', e); } }
 
 const transcriber = createTranscriber({ settings, FFMPEG, takeDir: (r, t) => takeDir(r, t), saveTake: (t, now) => saveTake(t, now) });
 
@@ -108,7 +117,7 @@ function setPassword(pw) { settings.adminHash = hashPassword(pw); settings.sessi
 if (process.argv.includes('--reset-password')) {
   const pw = crypto.randomBytes(9).toString('base64url').replace(/[^a-zA-Z0-9]/g, '').slice(0, 12);
   setPassword(pw);
-  console.log(`New admin password: ${pw}\n(Restart the studio so it takes effect: sudo systemctl restart podcast-studio)`);
+  process.stdout.write(`New admin password: ${pw}\n(Restart the studio so it takes effect: sudo systemctl restart podcast-studio)\n`);
   process.exit(0);
 }
 
@@ -126,7 +135,7 @@ const saveTimers = new Map();
 function saveTake(t, now = false) {
   const k = t.room + '/' + t.id;
   takeCache.set(k, t);
-  const write = () => { saveTimers.delete(k); try { fs.mkdirSync(takeDir(t.room, t.id), { recursive: true }); writeJSON(path.join(takeDir(t.room, t.id), 'take.json'), t); } catch (e) { console.error('save take', e); } };
+  const write = () => { saveTimers.delete(k); try { fs.mkdirSync(takeDir(t.room, t.id), { recursive: true }); writeJSON(path.join(takeDir(t.room, t.id), 'take.json'), t); } catch (e) { log.error('takes', `could not save take ${t.id}`, e); } };
   if (now) { clearTimeout(saveTimers.get(k)); write(); return; }
   if (!saveTimers.has(k)) saveTimers.set(k, setTimeout(write, 1000));
 }
@@ -144,6 +153,7 @@ async function cloudflareIce(force) {
   if (!keyId || !token) return null;
   if (!force && cfIce.list && Date.now() - cfIce.at < 3600e3) return cfIce.list;
   try {
+    if (process.env.NO_EXTERNAL_CALLS) throw new Error('External calls blocked by NO_EXTERNAL_CALLS');
     const r = await fetch(`https://rtc.live.cloudflare.com/v1/turn/keys/${encodeURIComponent(keyId)}/credentials/generate-ice-servers`, {
       method: 'POST', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
       body: JSON.stringify({ ttl: 86400 }), signal: AbortSignal.timeout(6000) });
@@ -152,7 +162,7 @@ async function cloudflareIce(force) {
     let s = j.iceServers; if (!Array.isArray(s)) s = [s];
     const list = s.filter(Boolean).map(x => ({ ...x, urls: (Array.isArray(x.urls) ? x.urls : [x.urls]).filter(u => u && !/:53(\?|$)/.test(u)) })).filter(x => x.urls.length);
     cfIce = { at: Date.now(), list, error: '' };
-  } catch (e) { cfIce.error = e.message; console.warn('[turn]', e.message); if (force) throw e; }
+  } catch (e) { cfIce.error = e.message; log.warn('turn', e.message); if (force) throw e; }
   return cfIce.list;
 }
 async function iceServers() {
@@ -192,7 +202,7 @@ function liveRoom(id) {
 function admit(roomId, lr, clientId) {
   if (lr.admitted.has(clientId)) return;
   lr.admitted.add(clientId);
-  try { const f = path.join(roomDir(roomId), 'admitted.json'); const saved = readJSON(f, {}) || {}; saved[clientId] = Date.now(); writeJSON(f, saved); } catch {}
+  try { const f = path.join(roomDir(roomId), 'admitted.json'); const saved = readJSON(f, {}) || {}; saved[clientId] = Date.now(); writeJSON(f, saved); } catch (e) { log.warn('rooms', 'could not remember an admitted guest', e); }
 }
 function send(ws, msg) { if (ws && ws.readyState === 1) ws.send(JSON.stringify(msg)); }
 function broadcast(lr, msg, exceptId) { for (const p of lr.peers.values()) if (p.id !== exceptId) send(p.ws, msg); }
@@ -222,9 +232,9 @@ function startRecording(roomId, lr, roomTone, episode) {
   saveTake(t, true);
   lr.take = t.id;
   for (const p of lr.peers.values()) { if (p.control) continue; const seg = newSeg(t, p); p.seg = seg; send(p.ws, startMsg(t, seg)); }
-  broadcast(lr, { t: 'recording', on: true, take: t.id, started: t.started, n, roomTone: !!roomTone });
+  broadcast(lr, { t: 'recording', on: true, take: t.id, started: t.started, n, roomTone: !!roomTone, nextEpisode: ((room && room.lastEpisode) || 0) + 1 });
   if (roomTone) beginRoomTone(t, lr, 1500);
-  console.log(`[rec] ${room && room.name} take ${n} started`);
+  log.info('rec', `${room && room.name} take ${n} started`);
 }
 // room tone: everyone stays silent for a short time so editors get a clean noise print
 function beginRoomTone(t, lr, delay = 1000) {
@@ -279,42 +289,35 @@ function queueProcess(room, take, opts = {}) {
   queued.set(k, opts);
   const t = loadTake(room, take);
   if (t && t.status !== 'processing') { t.status = 'queued'; t.progress = 'Waiting to start'; t.pct = 0; saveTake(t, true); announce(room, t); }
-  queue = queue.then(() => processTake(room, take, opts)).catch(e => console.error(e)).finally(() => {
+  queue = queue.then(() => processTake(room, take, opts)).catch(e => log.error('build', `take ${take} failed:`, e)).finally(() => {
     queued.delete(k);
     if (again.has(k)) { const o = again.get(k); again.delete(k); queueProcess(room, take, o); }
   });
 }
 function ff(args, onProgress, durationSecs) {
-  return new Promise((resolve, reject) => {
-    const prog = onProgress && durationSecs ? ['-progress', 'pipe:1', '-nostats'] : [];
-    const p = spawn(FFMPEG, ['-hide_banner', '-loglevel', 'error', '-nostdin', '-y', ...prog, ...args]);
-    let err = '';
-    if (prog.length) p.stdout.on('data', d => { const m = String(d).match(/out_time_us=(\d+)/g); if (m) onProgress(parseInt(m[m.length - 1].split('=')[1], 10) / 1e6 / durationSecs); });
-    p.stderr.on('data', d => { err += d; if (err.length > 8000) err = err.slice(-8000); });
-    p.on('error', reject);
-    p.on('close', code => (code === 0 ? resolve() : reject(new Error(err.trim() || 'ffmpeg exit ' + code))));
+  const prog = onProgress && durationSecs ? ['-progress', 'pipe:1', '-nostats'] : [];
+  return run(FFMPEG, ['-hide_banner', '-loglevel', 'error', '-nostdin', '-y', ...prog, ...args], {
+    stdout: 'ignore',
+    onStdout: prog.length ? d => { const m = String(d).match(/out_time_us=(\d+)/g); if (m) onProgress(parseInt(m[m.length - 1].split('=')[1], 10) / 1e6 / durationSecs); } : undefined,
   });
 }
-function probe(file, entries, stream) {
-  return new Promise(res => {
-    const p = spawn(FFPROBE, ['-v', 'error', ...(stream ? ['-select_streams', stream] : []), '-show_entries', entries, '-of', 'csv=p=0', file]);
-    let o = ''; p.stdout.on('data', d => { o += d; }); p.on('error', () => res('')); p.on('close', () => res(o.trim()));
-  });
+async function probe(file, entries, stream) {
+  try {
+    const r = await run(FFPROBE, ['-v', 'error', ...(stream ? ['-select_streams', stream] : []), '-show_entries', entries, '-of', 'csv=p=0', file], { timeoutMs: 60000 });
+    return r.stdout.trim();
+  } catch (e) { log.warn('probe', `could not read ${path.basename(file)}`, e); return ''; }
 }
 // decode some audio to a 500 Hz loudness envelope (for lining video up against the lossless audio)
-function envelope(args) {
-  return new Promise(resolve => {
-    const p = spawn(FFMPEG, ['-hide_banner', '-loglevel', 'error', '-nostdin', ...args, '-vn', '-ac', '1', '-ar', '8000', '-f', 's16le', 'pipe:1']);
-    const bufs = []; p.stdout.on('data', d => bufs.push(d)); p.on('error', () => resolve(null));
-    p.on('close', () => {
-      const b = Buffer.concat(bufs), n = Math.floor(b.length / 32), env = new Float32Array(n);
-      for (let i = 0; i < n; i++) { let a = 0; for (let j = 0; j < 16; j++) a += Math.abs(b.readInt16LE((i * 16 + j) * 2)); env[i] = a / 16; }
-      resolve(env);
-    });
-  });
+async function envelope(args) {
+  let b;
+  try { b = (await run(FFMPEG, ['-hide_banner', '-loglevel', 'error', '-nostdin', ...args, '-vn', '-ac', '1', '-ar', '8000', '-f', 's16le', 'pipe:1'], { stdout: 'buffer', timeoutMs: 600000 })).stdout; }
+  catch (e) { log.warn('align', 'could not decode audio for lining up video', e); return null; }
+  const n = Math.floor(b.length / 32), env = new Float32Array(n);
+  for (let i = 0; i < n; i++) { let a = 0; for (let j = 0; j < 16; j++) a += Math.abs(b.readInt16LE((i * 16 + j) * 2)); env[i] = a / 16; }
+  return env;
 }
 // find where the camera file's own (compressed) sound best matches the lossless WAV; null if unsure
-async function alignVideo(videoFile, wavFile, estimate) {
+async function alignVideoUntraced(videoFile, wavFile, estimate) {
   const from = Math.max(0, estimate - 1.5), K = 1500; // search ±1.5 s around the clock estimate
   const v = await envelope(['-i', videoFile, '-t', '150']);
   const w = await envelope(['-ss', from.toFixed(3), '-t', '160', '-i', wavFile]);
@@ -360,15 +363,13 @@ function roomAssets(room) {
   return a;
 }
 // measure loudness (EBU R128 / BS.1770) with ffmpeg's ebur128 meter: integrated, range, true peak
-async function measureLoudness(file) {
-  const outp = await new Promise(res => {
-    const p = spawn(FFMPEG, ['-hide_banner', '-nostats', '-nostdin', '-i', file, '-af', 'ebur128=peak=true:framelog=quiet', '-f', 'null', '-']);
-    let e = ''; p.stderr.on('data', d => { e = (e + d).slice(-4000); }); p.on('error', () => res('')); p.on('close', () => res(e));
-  });
-  const sum = outp.slice(outp.lastIndexOf('Summary'));
+async function measureLoudnessUntraced(file) {
+  const r = await run(FFMPEG, ['-hide_banner', '-nostats', '-nostdin', '-i', file, '-af', 'ebur128=peak=true:framelog=quiet', '-f', 'null', '-'], { stdout: 'ignore', timeoutMs: 3 * 3600 * 1000 });
+  const sum = r.stderr.slice(r.stderr.lastIndexOf('Summary'));
   const num = re => { const m = sum.match(re); return m ? (/inf/.test(m[1]) ? -Infinity : parseFloat(m[1])) : NaN; };
   const L = { I: num(/I:\s+(-?[\d.]+|-inf)\s+LUFS/), LRA: num(/LRA:\s+(-?[\d.]+)\s+LU/), TP: num(/Peak:\s+(-?[\d.]+|-inf)\s+dBFS/) };
-  return Number.isFinite(L.I) || L.I === -Infinity ? L : null;
+  if (Number.isNaN(L.I)) throw new Error('loudness meter gave no reading');
+  return L;
 }
 // turn a recording up/down to a loudness target with a plain gain change; a gentle peak limiter
 // only steps in if the gain would push peaks above -1 dBTP
@@ -379,7 +380,7 @@ function normaliseFilter(L, target) {
 }
 const DOC_KINDS = new Set(['markers', 'chat', 'session', 'chapters', 'transcript', 'report']);
 
-async function processTake(roomId, takeId, opts = {}) {
+async function processTakeUntraced(roomId, takeId, opts = {}) {
   const t = loadTake(roomId, takeId);
   const room = loadRoom(roomId);
   if (!t || !room) return;
@@ -403,10 +404,11 @@ async function processTake(roomId, takeId, opts = {}) {
     await fsp.rm(out, { recursive: true, force: true });
     await fsp.mkdir(out, { recursive: true });
     t.outputs = []; t.levels = {};
-  } else {
-    for (const o of t.outputs.filter(o => DOC_KINDS.has(o.kind))) await fsp.rm(path.join(out, o.file), { force: true });
-    t.outputs = t.outputs.filter(o => !DOC_KINDS.has(o.kind));
   }
+  // documents are rewritten in place (write-then-rename), so a download never finds them missing;
+  // any document that isn't made again (e.g. all markers deleted) is removed afterwards
+  const oldDocs = (t.outputs || []).filter(o => DOC_KINDS.has(o.kind)).map(o => o.file);
+  if (docsOnly) t.outputs = t.outputs.filter(o => !DOC_KINDS.has(o.kind));
   const segs = Object.values(t.segs).sort((a, b) => a.created - b.created);
 
   // one name per person (clientId); repeated joins become "part 2", etc.
@@ -490,7 +492,8 @@ async function processTake(roomId, takeId, opts = {}) {
       const src = path.join(out, `${person}.wav`);
       if (!fs.existsSync(src)) { done += 4; continue; }
       begin(`Checking levels — ${person}`, 2);
-      const L = await measureLoudness(src);
+      let L = null;
+      try { L = await measureLoudness(src); L.verdict = post.verdict(L); } catch (e) { errors.push(`Level check ${person}: ${e.message}`); }
       t.levels[person] = L;
       finish();
       if (!L || !Number.isFinite(L.I)) { done += 2; continue; }
@@ -514,11 +517,14 @@ async function processTake(roomId, takeId, opts = {}) {
         try { await ff([...ins, '-filter_complex', `amix=inputs=${wavs.length}:duration=longest,volume=${wavs.length}`, '-c:a', 'pcm_f32le', path.join(out, file)]); }
         catch (e) { errors.push(`${file}: ${e.message}`); }
       }
-      if (fs.existsSync(path.join(out, file))) { add(file, 'mix', 'Everyone'); const L = await measureLoudness(path.join(out, file)); if (L) L.float = true; t.levels['Mix - all voices'] = L; }
+      if (fs.existsSync(path.join(out, file))) {
+        add(file, 'mix', 'Everyone');
+        try { const L = await measureLoudness(path.join(out, file)); L.float = true; L.verdict = post.verdict(L); t.levels['Mix - all voices'] = L; } catch (e) { errors.push(`Level check (mix): ${e.message}`); }
+      }
     }
     finish();
     begin('Rough mix with intro and outro', 1);
-    for (const k of ['intro', 'outro']) if (assets[k]) { const f = k === 'intro' ? 'Intro.wav' : 'Outro.wav'; try { await fsp.copyFile(assets[k].path, path.join(out, f)); add(f, k, 'Everyone'); } catch {} }
+    for (const k of ['intro', 'outro']) if (assets[k]) { const f = k === 'intro' ? 'Intro.wav' : 'Outro.wav'; try { await fsp.copyFile(assets[k].path, path.join(out, f)); add(f, k, 'Everyone'); } catch (e) { errors.push(`${f}: ${e.message}`); } }
     const showFile = wavs.length > 1 ? 'Mix - all voices.wav' : wavs[0];
     if (showFile) {
       const parts = [assets.intro && assets.intro.path, path.join(out, showFile), assets.outro && assets.outro.path].filter(Boolean);
@@ -550,7 +556,7 @@ async function processTake(roomId, takeId, opts = {}) {
       if (fs.existsSync(wav)) {
         const exact = await alignVideo(path.join(out, orig), wav, padS).catch(() => null);
         if (exact !== null) padS = exact;
-        console.log(`[rec] ${s._label} video offset ${padS.toFixed(3)}s (${exact !== null ? 'matched to audio' : 'from clock'})`);
+        log.info('rec', `${s._label} video offset ${padS.toFixed(3)}s (${exact !== null ? 'matched to audio' : 'from clock'})`);
       }
       finish();
       begin(`Video ${i + 1} of ${videoSegs.length} — converting to MP4`, 6);
@@ -584,7 +590,7 @@ async function processTake(roomId, takeId, opts = {}) {
         } catch (e) {
           errors.push(`${file}: ${e.message.slice(0, 300)}`);
           const o = `${s._person} - screen share ${n} original.${ext}`;
-          try { await fsp.link(src, path.join(out, o)); add(o, 'screen', s._person); } catch {}
+          try { await fsp.link(src, path.join(out, o)); add(o, 'screen', s._person); } catch (e2) { log.warn('build', 'could not keep the original screen recording', e2); }
         }
       }
       finish();
@@ -600,28 +606,35 @@ async function processTake(roomId, takeId, opts = {}) {
 
   // --- documents: transcript, chapters, markers, level report, chat, session files ---
   begin('Making the transcript, chapters and session files', 1);
-  try { await buildDocs(t, room, out, add, assets); } catch (e) { errors.push('Documents: ' + e.message); console.error(e); }
+  try { await buildDocs(t, room, out, add, assets); } catch (e) { errors.push('Documents: ' + e.message); log.error('docs', 'could not make documents', e); }
+  for (const f of oldDocs) if (!t.outputs.some(o => o.file === f)) await fsp.rm(path.join(out, f), { force: true }).catch(e => log.warn('docs', `could not remove old ${f}`, e));
   finish();
 
   t.status = errors.length && !t.outputs.length ? 'error' : 'ready';
   t.error = errors.join('\n');
   t.progress = ''; t.pct = 100;
   saveTake(t, true); announce(roomId, t);
-  console.log(`[rec] take ${t.n} in ${roomId} ${docsOnly ? 'documents updated' : 'built'}: ${t.outputs.length} files${errors.length ? ', errors: ' + errors.length : ''}`);
-  if (t.outputs.length && !docsOnly) {
+  log.info('rec', `take ${t.n} in ${roomId} ${docsOnly ? 'documents updated' : 'built'}: ${t.outputs.length} files${errors.length ? ', errors: ' + errors.length : ''}`);
+  if (t.outputs.length) {
     t.progress = 'Backing up'; saveTake(t, true); announce(roomId, t);
     await backupTake(room, t, out);
-    if (settings.autoCompact && t.backup && t.backup.ok) await compactTake(roomId, t, 'rebuild-data').catch(() => {});
+    if (!docsOnly && settings.autoCompact && t.backup && t.backup.ok) await compactTake(roomId, t, 'rebuild-data').catch(e => log.warn('tidy', 'automatic tidy-up failed', e));
     t.progress = ''; saveTake(t, true); announce(roomId, t);
-    await notifyReady(room, t).catch(e => console.warn('[mail]', e.message));
+    if (!docsOnly) await notifyReady(room, t).catch(e => log.warn('mail', 'could not send the ready email', e));
   }
 }
 
-async function buildDocs(t, room, out, add, assets) {
+async function buildDocsUntraced(t, room, out, add, assets) {
   const title = takeLabel(room, t);
   const introLen = assets.intro ? assets.intro.dur : 0;
   const markers = (t.markers || []).slice().sort((a, b) => a.at - b.at).map((m, i) => ({ ...m, label: m.label || `Marker ${i + 1}` }));
-  const write = async (file, text, kind, person = 'Everyone') => { if (text) { await fsp.writeFile(path.join(out, file), text); add(file, kind, person); } };
+  const write = async (file, text, kind, person = 'Everyone') => {
+    if (!text) return;
+    const tmp = path.join(out, `.${file}.tmp`);
+    await fsp.writeFile(tmp, text, 'utf8');
+    await fsp.rename(tmp, path.join(out, file));
+    add(file, kind, person);
+  };
   // markers (times in the take) + Audition markers lined up with the session (after the intro)
   if (markers.length) {
     await write('Markers.txt', markers.map(m => `${post.hms(m.at / 1000)}  ${m.label}${m.by ? '  (' + m.by + ')' : ''}`).join('\r\n') + '\r\n', 'markers');
@@ -656,10 +669,10 @@ async function buildDocs(t, room, out, add, assets) {
 }
 
 // free up disk space on a finished take
-async function compactTake(roomId, t, what) {
+async function compactTakeUntraced(roomId, t, what) {
   const dir = takeDir(roomId, t.id);
   let freed = 0;
-  const rm = async f => { try { const st = await fsp.stat(f); await fsp.rm(f, { force: true }); if (st.nlink <= 1) freed += st.size; } catch {} };
+  const rm = async f => { try { const st = await fsp.stat(f); await fsp.rm(f, { force: true }); if (st.nlink <= 1) freed += st.size; } catch (e) { if (e.code !== 'ENOENT') log.warn('tidy', `could not delete ${f}`, e); } };
   if (what === 'camera-originals') {
     for (const o of t.outputs.filter(o => o.kind === 'video-original')) await rm(path.join(dir, 'out', o.file));
     t.outputs = t.outputs.filter(o => o.kind !== 'video-original');
@@ -677,7 +690,7 @@ async function compactTake(roomId, t, what) {
 }
 
 // copy finished files to a second disk (e.g. a USB drive) — refuses to "back up" onto the same disk
-async function backupTake(room, t, out) {
+async function backupTakeUntraced(room, t, out) {
   const dir = settings.backupDir;
   if (!dir) { t.backup = null; return; }
   try {
@@ -686,18 +699,23 @@ async function backupTake(room, t, out) {
     const stamp = new Date(t.started).toISOString().slice(0, 16).replace('T', ' ').replace(':', '-');
     const dest = path.join(dir, fileSafe(room.name), `Take ${t.n} - ${stamp}`);
     await fsp.mkdir(dest, { recursive: true });
-    for (const o of t.outputs) await fsp.copyFile(path.join(out, o.file), path.join(dest, o.file));
+    for (const o of t.outputs) {
+      const to = path.join(dest, o.file);
+      const same = await fsp.stat(to).then(st => st.size === o.size && !DOC_KINDS.has(o.kind), () => false);
+      if (!same) await fsp.copyFile(path.join(out, o.file), to);
+    }
     t.backup = { ok: true, at: Date.now(), path: dest };
-  } catch (e) { t.backup = { ok: false, at: Date.now(), error: e.message }; console.warn('[backup]', e.message); }
+  } catch (e) { t.backup = { ok: false, at: Date.now(), error: e.message }; log.warn('backup', e.message); }
 }
 
 function mailer() {
   const s = settings.smtp;
   if (!nodemailer || !s.host) return null;
   const local = /^(localhost|127\.|::1)/.test(s.host);
-  return nodemailer.createTransport({ host: s.host, port: +s.port || 587, secure: +s.port === 465, auth: s.user ? { user: s.user, pass: s.pass } : undefined, tls: local ? { rejectUnauthorized: false } : undefined, connectionTimeout: 15000 });
+  if (process.env.NO_EXTERNAL_CALLS && !local) return { sendMail: async () => { throw new Error('External calls blocked by NO_EXTERNAL_CALLS'); } };
+  return nodemailer.createTransport({ host: s.host, port: +s.port || 587, secure: +s.port === 465, auth: s.user ? { user: s.user, pass: s.pass } : undefined, tls: local ? { rejectUnauthorized: false } : undefined, connectionTimeout: 15000, greetingTimeout: 15000, socketTimeout: 60000 });
 }
-async function notifyReady(room, t) {
+async function notifyReadyUntraced(room, t) {
   const to = String(room.notifyEmail || '').split(/[,;\s]+/).filter(x => /@/.test(x));
   const tr = mailer();
   if (!to.length || !tr) return;
@@ -705,13 +723,22 @@ async function notifyReady(room, t) {
   const size = t.outputs.reduce((a, o) => a + o.size, 0);
   const people = [...new Set(Object.values(t.segs).map(s => s.name))].join(', ');
   const lines = [`Take ${t.n} of "${room.name}" is ready to download.`, '',
-    `Who: ${people}`, `Length: ${hms((t.stopped || t.started) - t.started)}`, `Files: ${t.outputs.length} (${(size / 1073741824).toFixed(2)} GB)`,
+    `Who: ${people}`, `Length: ${post.hms(((t.stopped || t.started) - t.started) / 1000)}`, `Files: ${t.outputs.length} (${(size / 1073741824).toFixed(2)} GB)`,
     (t.markers || []).length ? `Markers: ${t.markers.length}` : '', t.backup ? (t.backup.ok ? 'Backup: copied ✓' : `Backup: FAILED — ${t.backup.error}`) : '',
     t.error ? `\nSome files had problems:\n${t.error}` : '', '', link ? `Download: ${link}` : ''].filter(l => l !== null).join('\n');
   await tr.sendMail({ from: settings.smtp.from || settings.smtp.user, to: to.join(', '), subject: t.notified ? `🔄 ${takeLabel(room, t)} updated (late uploads arrived)` : `✅ ${takeLabel(room, t)} is ready`, text: lines });
   t.notified = true; saveTake(t, true);
-  console.log(`[mail] sent take ${t.n} ready to ${to.join(', ')}`);
+  log.info('mail', `sent take ${t.n} ready to ${to.join(', ')}`);
 }
+
+// every pipeline step logs ENTER / EXIT (with time taken) / EXCEPTION  (LOG_LEVEL=debug to see them)
+const processTake = log.trace('build', processTakeUntraced);
+const buildDocs = log.trace('docs', buildDocsUntraced);
+const backupTake = log.trace('backup', backupTakeUntraced);
+const compactTake = log.trace('tidy', compactTakeUntraced);
+const notifyReady = log.trace('mail', notifyReadyUntraced);
+const alignVideo = log.trace('align', alignVideoUntraced);
+const measureLoudness = log.trace('levels', measureLoudnessUntraced);
 
 // ---------- web server ----------
 const app = express();
@@ -765,7 +792,7 @@ async function backupStatus() {
   if (!dir) return { set: false };
   let p = dir; while (!fs.existsSync(p)) p = path.dirname(p);
   const same = fs.statSync(p).dev === fs.statSync(DATA_DIR).dev;
-  let free = null; try { const s = await fsp.statfs(p); free = s.bavail * s.bsize; } catch {}
+  let free = null; try { const s = await fsp.statfs(p); free = s.bavail * s.bsize; } catch (e) { log.warn('backup', `could not check free space on ${p}`, e); }
   return { set: true, ok: !same, free, msg: same ? 'That folder is on the same disk as the recordings — is the backup drive plugged in / mounted?' : '' };
 }
 app.post('/api/settings/password', needAdmin, express.json(), (req, res) => {
@@ -885,11 +912,12 @@ app.post('/api/rooms/:id/asset/:kind', express.raw({ type: () => true, limit: '5
     r.assets = r.assets || {}; r.assets[kind] = { name: cleanText(decodeURIComponent(req.headers['x-filename'] || kind), 120), dur };
     saveRoom(r); res.json(roomSummary(r));
   } catch (e) { res.status(400).json({ error: 'That file could not be read as audio.' }); }
-  finally { fsp.rm(tmp, { force: true }).catch(() => {}); }
+  finally { fsp.rm(tmp, { force: true }).catch(log.ignore('assets', 'remove upload temp file')); }
 });
 app.delete('/api/rooms/:id/asset/:kind', async (req, res) => {
   const r = loadRoom(req.params.id);
   if (!canManage(req, r)) return res.status(403).json({ error: 'Not allowed' });
+  if (!['intro', 'outro'].includes(req.params.kind)) return res.status(400).json({ error: 'Unknown file' });
   if (r.assets) delete r.assets[req.params.kind];
   await fsp.rm(path.join(roomDir(r.id), 'assets', path.basename(req.params.kind) + '.wav'), { force: true });
   saveRoom(r); res.json(roomSummary(r));
@@ -933,7 +961,7 @@ app.get('/zip/:room/:take', (req, res) => {
   const base = takeLabel(r, t);
   res.attachment(base + '.zip');
   const z = archiver('zip', { store: true });
-  z.on('error', e => { console.error(e); res.destroy(); });
+  z.on('error', e => { log.error('zip', 'zip download failed', e); res.destroy(); });
   z.pipe(res);
   for (const o of t.outputs) z.file(path.join(takeDir(r.id, t.id), 'out', o.file), { name: `${base}/${o.file}` });
   z.finalize();
@@ -941,7 +969,7 @@ app.get('/zip/:room/:take', (req, res) => {
 
 // uploads from browsers while recording
 const fileLocks = new Map();
-function withLock(key, fn) { const prev = fileLocks.get(key) || Promise.resolve(); const next = prev.then(fn, fn); fileLocks.set(key, next.catch(() => {})); return next; }
+function withLock(key, fn) { const prev = fileLocks.get(key) || Promise.resolve(); const next = prev.then(fn, fn); fileLocks.set(key, next.catch(log.ignore('files', 'lock chain (the caller sees the real error)'))); return next; }
 function segFromReq(req, res) {
   const { room, take, seg } = req.params;
   if (!validId(room) || !validId(take) || !validId(seg) || !safeEq(String(req.query.tok || ''), segToken(room, take, seg))) { res.status(403).json({ error: 'bad token' }); return null; }
@@ -970,7 +998,7 @@ app.post('/up/:room/:take/:seg/audio', raw, async (req, res) => {
     saveTake(x.t);
     lateUpload(req.params.room, x.t);
     res.json({ ok: true });
-  } catch (e) { console.error(e); res.status(500).json({ error: 'write failed' }); }
+  } catch (e) { log.error('upload', 'could not save an uploaded piece', e); res.status(500).json({ error: 'write failed' }); }
 });
 app.post('/up/:room/:take/:seg/video', raw, async (req, res) => {
   const x = segFromReq(req, res); if (!x) return;
@@ -989,7 +1017,7 @@ app.post('/up/:room/:take/:seg/video', raw, async (req, res) => {
     saveTake(x.t);
     lateUpload(req.params.room, x.t);
     res.json({ ok: true });
-  } catch (e) { console.error(e); res.status(500).json({ error: 'write failed' }); }
+  } catch (e) { log.error('upload', 'could not save an uploaded piece', e); res.status(500).json({ error: 'write failed' }); }
 });
 app.post('/up/:room/:take/:seg/done', (req, res) => {
   const x = segFromReq(req, res); if (!x) return;
@@ -1009,7 +1037,7 @@ wss.on('connection', ws => {
 
   async function doJoin(room, info) {
     // same browser reconnecting: drop its old connection
-    for (const p of lr.peers.values()) if (p.clientId === info.clientId) { lr.peers.delete(p.id); broadcast(lr, { t: 'peer-left', id: p.id }); try { p.ws.close(); } catch {} }
+    for (const p of lr.peers.values()) if (p.clientId === info.clientId) { lr.peers.delete(p.id); broadcast(lr, { t: 'peer-left', id: p.id }); try { p.ws.close(); } catch (e) { log.ignore('ws', 'close old connection')(e); } }
     if (!info.control && [...lr.peers.values()].filter(p => !p.control).length >= MAX_PEOPLE) { send(ws, { t: 'error', code: 'full', msg: `This studio is full (max ${MAX_PEOPLE} people).` }); return; }
     peer = { id: rid(8), ws, ...info, state: {}, screenId: null };
     lr.peers.set(peer.id, peer);
@@ -1032,7 +1060,7 @@ wss.on('connection', ws => {
       if (!existing) send(ws, startMsg(t, peer.seg));
     }
     if (peer.isHost) { const last = listTakes(roomId)[0]; if (last && ['waiting', 'queued', 'processing'].includes(last.status)) send(ws, { t: 'build', take: last.id, n: last.n, status: last.status, pct: last.pct || 0, step: last.progress }); }
-    console.log(`[room] ${peer.name}${peer.isHost ? ' (host)' : ''} joined "${room.name}" (${lr.peers.size} in room)`);
+    log.info('room', `${peer.name}${peer.isHost ? ' (host)' : ''} joined "${room.name}" (${lr.peers.size} in room)`);
   }
 
   ws.on('message', async buf => {
@@ -1095,10 +1123,10 @@ wss.on('connection', ws => {
         lr.waiting.delete(m.id);
         toHosts(lr, { t: 'knock-gone', id: m.id });
         if (m.allow) w.go();
-        else { send(w.ws, { t: 'error', code: 'denied', msg: 'The host didn\'t let you in this time.' }); try { w.ws.close(); } catch {} }
+        else { send(w.ws, { t: 'error', code: 'denied', msg: 'The host didn\'t let you in this time.' }); try { w.ws.close(); } catch (e) { log.ignore('ws', 'close denied guest')(e); } }
         return;
       }
-      case 'kick': { const p = lr.peers.get(m.id); if (p && p !== peer) { lr.admitted.delete(p.clientId); try { const f = path.join(roomDir(roomId), 'admitted.json'); const sv = readJSON(f, {}) || {}; delete sv[p.clientId]; writeJSON(f, sv); } catch {} send(p.ws, { t: 'error', code: 'kicked', msg: 'The host removed you from the studio.' }); p.ws.close(); } return; }
+      case 'kick': { const p = lr.peers.get(m.id); if (p && p !== peer) { lr.admitted.delete(p.clientId); try { const f = path.join(roomDir(roomId), 'admitted.json'); const sv = readJSON(f, {}) || {}; delete sv[p.clientId]; writeJSON(f, sv); } catch (e) { log.warn('rooms', 'could not forget a removed guest', e); } send(p.ws, { t: 'error', code: 'kicked', msg: 'The host removed you from the studio.' }); p.ws.close(); } return; }
     }
   });
   ws.on('close', () => {
@@ -1107,7 +1135,7 @@ wss.on('connection', ws => {
     if (lr.peers.get(peer.id) === peer) {
       lr.peers.delete(peer.id);
       broadcast(lr, { t: 'peer-left', id: peer.id });
-      console.log(`[room] ${peer.name} left (${lr.peers.size} in room)`);
+      log.info('room', `${peer.name} left (${lr.peers.size} in room)`);
     }
     for (const t of listTakes(roomId)) if (t.status === 'waiting') setTimeout(() => checkTakeReady(roomId, t.id), 60 * 1000);
     if (lr.peers.size === 0 && lr.take) scheduleEmptyStop(roomId, lr, 5);
@@ -1115,9 +1143,9 @@ wss.on('connection', ws => {
 });
 function scheduleEmptyStop(roomId, lr, minutes) {
   const take = lr.take;
-  setTimeout(() => { if (lr.peers.size === 0 && lr.take === take) { console.log('[rec] nobody came back — stopping take'); stopRecording(roomId, lr); } }, minutes * 60 * 1000);
+  setTimeout(() => { if (lr.peers.size === 0 && lr.take === take) { log.info('rec', 'nobody came back — stopping take'); stopRecording(roomId, lr); } }, minutes * 60 * 1000);
 }
-setInterval(() => { for (const ws of wss.clients) { if (!ws.isAlive) { ws.terminate(); continue; } ws.isAlive = false; try { ws.ping(); } catch {} } }, 20000);
+setInterval(() => { for (const ws of wss.clients) { if (!ws.isAlive) { ws.terminate(); continue; } ws.isAlive = false; try { ws.ping(); } catch (e) { log.ignore('ws', 'ping')(e); } } }, 20000);
 // live transcription: every 20 s, transcribe new audio from takes that are recording
 setInterval(() => { const takes = []; for (const [id, lr] of live) if (lr.take) { const t = loadTake(id, lr.take); if (t) takes.push(t); } transcriber.tickLive(takes); }, 20000);
 // hosts get server health every 30 s
@@ -1130,10 +1158,10 @@ for (const id of fs.readdirSync(ROOMS_DIR)) {
     if (t.status === 'recording') {
       // the take was still running: keep it open so everyone's browser reconnects and carries on
       const lr = liveRoom(id);
-      if (!lr.take) { lr.take = t.id; console.log(`[rec] resuming take ${t.n} in "${id}" after restart`); scheduleEmptyStop(id, lr, 10); }
+      if (!lr.take) { lr.take = t.id; log.info('rec', `resuming take ${t.n} in "${id}" after restart`); scheduleEmptyStop(id, lr, 10); }
       else { t.status = 'waiting'; t.stopped = t.stopped || Date.now(); saveTake(t, true); queueProcess(id, t.id); }
     } else if (['waiting', 'queued', 'processing'].includes(t.status)) queueProcess(id, t.id);
   }
 }
 
-server.listen(PORT, BIND, () => console.log(`${STUDIO_NAME} v${VERSION} running on http://${BIND}:${PORT}  (recordings in ${DATA_DIR})`));
+server.listen(PORT, BIND, () => log.info('server', `${STUDIO_NAME} v${VERSION} running on http://${BIND}:${PORT}  (recordings in ${DATA_DIR})`));

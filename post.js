@@ -55,25 +55,26 @@ function chapters(t, introLen) {
 }
 
 // ---------- level report ----------
+/** One verdict for a loudness measurement — used by the level report AND shown on the Recordings page. */
 function verdict(l) {
-  if (!l || !Number.isFinite(l.I)) return 'no speech measured';
-  const notes = [];
-  if (l.TP >= -0.1 && !l.float) notes.push('CLIPPING — the recording hit full scale');
-  else if (l.TP >= -0.1) notes.push('peaks over 0 dBTP (fine in this 32-bit float file — turn it down when mastering)');
-  else if (l.TP > -1) notes.push('very hot peaks (above -1 dBTP)');
-  if (l.I < -35) notes.push('very quiet');
-  else if (l.I < -28) notes.push('quiet');
-  else if (l.I > -12) notes.push('very loud');
-  return notes.length ? notes.join('; ') : 'good';
+  if (!l || !Number.isFinite(l.I)) return { level: 'none', text: 'no speech measured' };
+  const notes = []; let level = 'good';
+  if (l.TP >= -0.1 && !l.float) { notes.push('CLIPPING — the recording hit full scale'); level = 'bad'; }
+  else if (l.TP >= -0.1) { notes.push('peaks over 0 dBTP (fine in this 32-bit float file — turn it down when mastering)'); level = 'warn'; }
+  else if (l.TP > -1) { notes.push('very hot peaks (above -1 dBTP)'); level = 'warn'; }
+  if (l.I < -35) { notes.push('very quiet'); if (level === 'good') level = 'warn'; }
+  else if (l.I < -28) { notes.push('quiet'); if (level === 'good') level = 'warn'; }
+  else if (l.I > -12) { notes.push('very loud'); if (level === 'good') level = 'warn'; }
+  return { level, text: notes.length ? notes.join('; ') : 'good' };
 }
 function levelReport(t, title) {
-  const rows = Object.entries(t.levels || {});
+  const rows = Object.entries(t.levels || {}).filter(([, l]) => l);
   if (!rows.length) return null;
   const f = v => (Number.isFinite(v) ? v.toFixed(1).padStart(6) : '     —');
   return [`${title} — level report (EBU R128 / ITU-R BS.1770)`, '',
     'Person                     Loudness   True peak   Range   Verdict',
     '                           (LUFS)     (dBTP)      (LU)', '',
-    ...rows.map(([who, l]) => `${who.padEnd(26).slice(0, 26)} ${f(l.I)}     ${f(l.TP)}      ${f(l.LRA)}   ${verdict(l)}`), '',
+    ...rows.map(([who, l]) => `${who.padEnd(26).slice(0, 26)} ${f(l.I)}     ${f(l.TP)}      ${f(l.LRA)}   ${verdict(l).text}`), '',
     'Targets: podcasts usually -16 LUFS (Apple, Spotify); broadcast EBU R128 is -23 LUFS; keep true peak below -1 dBTP.',
     'The "normalised" files are these same recordings turned up or down to each target. The originals are untouched.', ''].join('\r\n');
 }

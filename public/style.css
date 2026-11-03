@@ -173,3 +173,9 @@ code { background: var(--panel2); padding: 1px 5px; border-radius: 5px; font-siz
 .mklist .mk { flex-wrap: nowrap; }
 .mono { font-family: ui-monospace, Menlo, monospace; }
 @media (max-width: 760px) { .assets { grid-template-columns: 1fr; } }
+
+/* ---- v1.3.1 ---- */
+.tloud { position: absolute; right: 8px; bottom: 8px; font-size: 12px; font-weight: 700; padding: 3px 8px; border-radius: 8px; background: #000b; font-variant-numeric: tabular-nums; }
+.tloud:empty { display: none; }
+.tloud.goodc { color: var(--ok); } .tloud.warnc { color: var(--warn); } .tloud.bad { color: var(--rec); }
+.sound-gate { position: fixed; left: 50%; top: 80px; transform: translateX(-50%); z-index: 70; padding: 14px 22px; font-size: 16px; box-shadow: 0 8px 30px #000a; }
