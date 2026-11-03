@@ -9,7 +9,7 @@
 <body>
 <div class="wrap">
   <div class="topbar">
-    <div class="brand"><span class="dot"></span><span class="studio-name">Podcast Studio</span></div>
+    <div class="brand"><span class="dot"></span><span class="studio-name">Rolling</span></div>
     <a href="/" class="small-text muted" id="adminLink">All rooms</a>
   </div>
   <div id="err" class="card hidden"><h1>Link not valid</h1><p class="muted">Ask the studio owner for a new host link.</p></div>
@@ -22,8 +22,14 @@
       <label style="margin-top:0">Guest link — send this to guests</label>
       <div class="linkbox"><input type="text" readonly id="guestLink"><button class="small" id="copyGuest">Copy</button></div>
       <details style="margin-top:14px">
-        <summary><b>Room settings</b></summary>
-        <label class="check" style="margin-top:12px"><input type="checkbox" id="waitingRoom"> <span>Waiting room<br><span class="muted small-text">Guests wait until the host lets them in. Once let in, they can reconnect without asking again.</span></span></label>
+        <summary><b>Show settings</b> <span class="muted small-text">— intro &amp; outro, waiting room, email</span></summary>
+        <label style="margin-top:14px">Intro and outro audio</label>
+        <p class="muted small-text" style="margin:0 0 8px">Added to the session files and the rough mix of every take (the individual recordings stay untouched). Any audio file up to 100 MB.</p>
+        <div class="assets">
+          <div class="asset" data-kind="intro"><b>Intro</b> <span class="aname muted small-text">none</span><div class="row" style="margin-top:6px"><label class="small upl"><input type="file" accept="audio/*,video/*" hidden><span class="btnlike">Upload</span></label><button class="small ghost adel hidden">Remove</button></div></div>
+          <div class="asset" data-kind="outro"><b>Outro</b> <span class="aname muted small-text">none</span><div class="row" style="margin-top:6px"><label class="small upl"><input type="file" accept="audio/*,video/*" hidden><span class="btnlike">Upload</span></label><button class="small ghost adel hidden">Remove</button></div></div>
+        </div>
+        <label class="check" style="margin-top:16px"><input type="checkbox" id="waitingRoom"> <span>Waiting room<br><span class="muted small-text">Guests wait until the host lets them in. Once let in, they can reconnect without asking again.</span></span></label>
         <label>Email me when a take is ready</label>
         <div class="linkbox"><input type="text" id="notifyEmail" placeholder="you@example.com (separate several with commas)"><button class="small" id="saveRoom">Save</button></div>
         <div class="small-text muted" id="emailNote" style="margin-top:6px"></div>
@@ -31,12 +37,18 @@
     </div>
     <div class="card">
       <h2>Takes</h2>
-      <p class="muted small-text" style="margin-top:0">
-        <b>Audio</b> = each person's lossless 24-bit WAV, all lined up so you can drop them straight onto separate tracks.
-        <b>Room tone</b> = the quiet section for noise reduction.
-        <b>Video</b> = each person's camera as an MP4, lined up the same way.
-        <b>Session</b> = open in Audition (File › Open) or Premiere/Resolve (Import) to get every file on its own track with markers — if it asks where the files are, point it at the first one.
-      </p>
+      <details class="small-text muted" style="margin-bottom:6px"><summary>What are all these files?</summary>
+        <ul class="steps" style="margin-top:6px">
+          <li><b>Audio</b> — each person's untouched lossless 24-bit WAV, all lined up to start together.</li>
+          <li><b>Normalised</b> — the same, turned up/down to −16 LUFS (podcasts) or −23 LUFS (EBU R128 broadcast).</li>
+          <li><b>Room tone</b> — the quiet section, for noise reduction.</li>
+          <li><b>Rough mix</b> — everyone together with your intro and outro, at −16 LUFS. Handy for a quick listen.</li>
+          <li><b>Video</b> — each camera as an MP4, lined up the same way. "Camera original" is the untouched file.</li>
+          <li><b>Session</b> — the <b>.sesx</b> opens straight in Audition (beta); the <b>.xml</b> opens in Premiere, Resolve and Audition. Everything on its own track, with markers. Keep them in the same folder as the audio.</li>
+          <li><b>Transcript</b> — who said what: .txt to read, .srt / .vtt subtitles for Premiere or YouTube.</li>
+          <li><b>Chapters</b> — from your markers: .json for podcast apps, and a YouTube description list.</li>
+        </ul>
+      </details>
       <div id="takes"></div>
     </div>
   </div>
@@ -50,14 +62,19 @@ const esc = s => String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;'
 const mb = b => b > 1073741824 ? (b / 1073741824).toFixed(2) + ' GB' : b > 1048576 ? (b / 1048576).toFixed(1) + ' MB' : Math.max(1, Math.round(b / 1024)) + ' KB';
 const dur = (a, b) => { const s = Math.round((b - a) / 1000); return `${Math.floor(s / 3600) ? Math.floor(s / 3600) + 'h ' : ''}${Math.floor(s % 3600 / 60)}m ${s % 60}s`; };
 const hms = ms => { const s = Math.floor(ms / 1000); return [s / 3600, (s % 3600) / 60, s % 60].map(x => String(Math.floor(x)).padStart(2, '0')).join(':'); };
+const secs = s => `${Math.floor(s / 60)}:${String(Math.round(s % 60)).padStart(2, '0')}`;
 function toast(t) { const d = document.createElement('div'); d.className = 'toast'; d.textContent = t; document.body.appendChild(d); setTimeout(() => d.remove(), 2500); }
-const KIND = { audio: ['Audio', 'Lossless WAV'], roomtone: ['Room tone', 'Noise print WAV'], mix: ['Mix', 'All voices together (WAV)'], video: ['Video', 'MP4 (H.264)'],
-  'video-original': ['Video', 'Camera original'], screen: ['Screen share', 'MP4'], session: ['Session', 'Audition / Premiere / Resolve'], markers: ['Markers', ''], chat: ['Chat', 'Messages during the take'] };
-const ORDER = { audio: 0, roomtone: 1, video: 2, 'video-original': 3, screen: 4, session: 5, markers: 6, mix: 7, chat: 8 };
+const KIND = { audio: ['Audio', 'Lossless WAV (untouched)'], normalised: ['Normalised', ''], roomtone: ['Room tone', 'Noise print WAV'], mix: ['Mix', 'All voices together'],
+  roughmix: ['Rough mix', ''], intro: ['Intro', ''], outro: ['Outro', ''], video: ['Video', 'MP4 (H.264)'], 'video-original': ['Video', 'Camera original'], screen: ['Screen share', 'MP4'],
+  session: ['Session', ''], transcript: ['Transcript', ''], chapters: ['Chapters', ''], markers: ['Markers', ''], report: ['Level report', ''], chat: ['Chat', 'Messages during the take'] };
+const ORDER = { audio: 0, normalised: 1, roomtone: 2, video: 3, 'video-original': 4, screen: 5, roughmix: 6, mix: 7, intro: 8, outro: 9, session: 10, transcript: 11, chapters: 12, markers: 13, report: 14, chat: 15 };
 const STATUS = { recording: ['rec', '● Recording'], waiting: ['warn', 'Waiting for uploads to finish'], queued: ['warn', 'In the queue'], processing: ['warn', 'Building files'], ready: ['ok', '✓ Ready'], error: ['rec', 'Problem'] };
-let lastJson = '', settingsLoaded = false;
+const verdict = l => !l || l.I == null || !isFinite(l.I) ? ['', 'no speech'] : l.TP >= -0.1 && l.float ? ['warnc', 'over 0 dB (32-bit float — fine)'] : l.TP >= -0.1 ? ['bad', 'clipping'] : l.TP > -1 ? ['warnc', 'hot peaks'] : l.I < -35 ? ['warnc', 'very quiet'] : l.I < -28 ? ['warnc', 'quiet'] : l.I > -12 ? ['warnc', 'very loud'] : ['goodc', 'good'];
+const f1 = v => v == null || !isFinite(v) ? '—' : v.toFixed(1);
+let lastJson = '', settingsLoaded = false, editing = false;
 
 async function load() {
+  if (editing) return;
   const res = await fetch(`/api/rooms/${roomId}${q}`);
   if (!res.ok) { $('#err').classList.remove('hidden'); return; }
   const r = await res.json();
@@ -65,6 +82,12 @@ async function load() {
     settingsLoaded = true;
     $('#waitingRoom').checked = r.waitingRoom; $('#notifyEmail').value = r.notifyEmail;
     $('#emailNote').textContent = r.emailReady ? '' : 'Email isn\'t set up on this studio yet (Studio settings on the main page), so nothing will be sent until it is.';
+  }
+  for (const el of document.querySelectorAll('.asset')) {
+    const a = (r.assets || {})[el.dataset.kind];
+    el.querySelector('.aname').textContent = a ? `${a.name} (${secs(a.dur)})` : 'none';
+    el.querySelector('.adel').classList.toggle('hidden', !a);
+    el.querySelector('.btnlike').textContent = a ? 'Replace' : 'Upload';
   }
   delete r.disk;
   const json = JSON.stringify(r);
@@ -79,23 +102,32 @@ async function load() {
     const [cls, label] = STATUS[t.status] || ['', t.status];
     const el = document.createElement('div'); el.className = 'take';
     const when = new Date(t.started).toLocaleString([], { weekday: 'short', day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' });
+    const name = t.episode && t.episode.n ? `Episode ${esc(t.episode.n)}${t.episode.title ? ' — ' + esc(t.episode.title) : ''} <span class="muted small-text">(take ${t.n})</span>` : `Take ${t.n}`;
     const outs = [...t.outputs].sort((a, b) => (a.person === 'Everyone') - (b.person === 'Everyone') || a.person.localeCompare(b.person) || ORDER[a.kind] - ORDER[b.kind]);
     const backup = t.backup ? (t.backup.ok ? '<span class="pill ok">💾 Backed up</span>' : `<span class="pill warn" title="${esc(t.backup.error)}">💾 Backup failed</span>`) : '';
+    const busy = ['queued', 'processing', 'waiting'].includes(t.status);
+    const levels = Object.entries(t.levels || {}).filter(([, l]) => l);
     el.innerHTML = `
       <div class="row spread">
-        <div><b>Take ${t.n}</b> <span class="muted small-text">· ${when}${t.stopped ? ' · ' + dur(t.started, t.stopped) : ''} · ${esc(t.people.join(', ') || 'nobody')}</span></div>
-        <div class="row"><span class="pill ${cls}">${label}${t.progress ? ' — ' + esc(t.progress) : ''}</span>${backup}
+        <div><b>${name}</b> <span class="muted small-text">· ${when}${t.stopped ? ' · ' + dur(t.started, t.stopped) : ''} · ${esc(t.people.join(', ') || 'nobody')}</span></div>
+        <div class="row"><span class="pill ${cls}">${label}</span>${backup}
           ${t.outputs.length ? `<a href="/zip/${roomId}/${t.id}${q}"><button class="small primary">⬇ Download everything (${mb(t.totalSize)})</button></a>` : ''}</div>
       </div>
+      ${busy ? `<div class="small-text muted" style="margin-top:6px">${esc(t.progress || label)} — ${t.pct || 0}%</div><div class="pbar big"><span style="width:${t.pct || 0}%"></span></div>` : ''}
+      ${t.status === 'recording' && t.transcript != null ? `<div class="small-text muted" style="margin-top:6px">📝 Live transcript: ${t.transcript}% done so far</div>` : ''}
       ${t.error ? `<p class="small-text" style="color:var(--rec);white-space:pre-wrap">${esc(t.error)}</p>` : ''}
       ${t.backup && !t.backup.ok ? `<p class="small-text" style="color:var(--warn)">Backup: ${esc(t.backup.error)}</p>` : ''}
-      ${t.markers.length ? `<p class="small-text muted">📍 ${t.markers.map(m => `${hms(m.at)} ${esc(m.label)}`).join(' · ')}</p>` : ''}
+      ${levels.length ? `<table class="levels"><tr><th>Levels (EBU R128)</th><th>Loudness</th><th>True peak</th><th>Range</th><th></th></tr>${levels.map(([who, l]) => { const [c, v] = verdict(l); return `<tr><td>${esc(who)}</td><td>${f1(l.I)} LUFS</td><td>${f1(l.TP)} dBTP</td><td>${f1(l.LRA)} LU</td><td class="${c}">${v}</td></tr>`; }).join('')}</table>` : ''}
+      ${t.markers.length ? `<details class="markers"><summary class="small-text">📍 ${t.markers.length} marker${t.markers.length > 1 ? 's' : ''} — ${t.markers.map(m => `${hms(m.at)} ${esc(m.label)}`).join(' · ')}</summary>
+        <div class="mklist" data-take="${t.id}">${t.markers.map(m => `<div class="row mk" data-at="${m.at}" data-by="${esc(m.by || '')}"><span class="small-text muted mono">${hms(m.at)}</span><input type="text" value="${esc(m.label)}" maxlength="80"><button class="small ghost mkdel" title="Delete">✕</button></div>`).join('')}
+        <div class="row" style="justify-content:flex-end"><button class="small primary mksave" data-take="${t.id}">Save marker names</button></div><p class="small-text muted">Names are used for chapters and in the session files. Saving updates those files in a few seconds.</p></div></details>` : ''}
       ${outs.length ? `<table class="files">${outs.map(o => `<tr>
-          <td><b>${esc(o.person)}</b></td><td>${KIND[o.kind] ? KIND[o.kind][0] : o.kind} <span class="muted small-text">${KIND[o.kind] ? KIND[o.kind][1] || esc(o.file) : ''}</span></td>
+          <td><b>${esc(o.person)}</b></td><td>${KIND[o.kind] ? KIND[o.kind][0] : o.kind} <span class="muted small-text">${(KIND[o.kind] && KIND[o.kind][1]) || esc(o.file)}</span></td>
           <td class="muted small-text">${mb(o.size)}</td>
           <td><a href="/dl/${roomId}/${t.id}/${encodeURIComponent(o.file)}${q}"><button class="small">⬇ Download</button></a></td></tr>`).join('')}</table>` : ''}
       <div class="row" style="justify-content:flex-end; margin-top:8px">
-        ${['ready', 'error', 'waiting'].includes(t.status) ? `<button class="small ghost" data-rebuild="${t.id}">Rebuild files</button>` : ''}
+        ${t.status === 'ready' && !t.compacted ? `<button class="small ghost" data-compact="${t.id}" data-what="camera-originals">Free space: delete camera originals</button><button class="small ghost" data-compact="${t.id}" data-what="rebuild-data">Free space: delete rebuild data</button>` : ''}
+        ${['ready', 'error', 'waiting'].includes(t.status) ? `<button class="small ghost" data-rebuild="${t.id}">${t.compacted ? 'Update documents' : 'Rebuild files'}</button>` : ''}
         ${!['recording', 'processing', 'queued'].includes(t.status) ? `<button class="small ghost" data-del="${t.id}" data-n="${t.n}">Delete take</button>` : ''}
       </div>`;
     box.appendChild(el);
@@ -106,11 +138,39 @@ async function saveRoom(body) {
   toast(res.ok ? 'Saved ✓' : 'Could not save');
 }
 $('#waitingRoom').onchange = () => saveRoom({ waitingRoom: $('#waitingRoom').checked });
+for (const el of document.querySelectorAll('.asset')) {
+  const kind = el.dataset.kind, input = el.querySelector('input[type=file]');
+  input.onchange = async () => {
+    const f = input.files[0]; if (!f) return;
+    if (f.size > 100 * 1048576) { toast('That file is over 100 MB'); return; }
+    el.querySelector('.aname').textContent = 'Uploading…';
+    const res = await fetch(`/api/rooms/${roomId}/asset/${kind}${q}`, { method: 'POST', body: f, headers: { 'x-filename': encodeURIComponent(f.name) } });
+    const j = await res.json().catch(() => ({}));
+    toast(res.ok ? `${kind === 'intro' ? 'Intro' : 'Outro'} saved ✓ — used from the next take (or press Rebuild)` : (j.error || 'Upload failed'));
+    input.value = ''; lastJson = ''; load();
+  };
+  el.querySelector('.adel').onclick = async () => { await fetch(`/api/rooms/${roomId}/asset/${kind}${q}`, { method: 'DELETE' }); lastJson = ''; load(); };
+}
+document.addEventListener('focusin', e => { if (e.target.closest('.mklist')) editing = true; });
 document.addEventListener('click', async e => {
   const b = e.target.closest('button'); if (!b) return;
   if (b.id === 'saveRoom') saveRoom({ notifyEmail: $('#notifyEmail').value });
   if (b.id === 'copyGuest') navigator.clipboard.writeText($('#guestLink').value).then(() => toast('Guest link copied'), () => $('#guestLink').select());
+  if (b.classList.contains('mkdel')) { editing = true; b.closest('.mk').remove(); }
+  if (b.classList.contains('mksave')) {
+    const list = b.closest('.mklist');
+    const markers = [...list.querySelectorAll('.mk')].map(r => ({ at: +r.dataset.at, by: r.dataset.by, label: r.querySelector('input').value }));
+    const res = await fetch(`/api/rooms/${roomId}/takes/${b.dataset.take}/markers${q}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ markers }) });
+    toast(res.ok ? 'Markers saved — updating files…' : 'Could not save'); editing = false; lastJson = ''; load();
+  }
   if (b.dataset.rebuild) { await fetch(`/api/rooms/${roomId}/takes/${b.dataset.rebuild}/rebuild${q}`, { method: 'POST' }); lastJson = ''; load(); }
+  if (b.dataset.compact) {
+    const what = b.dataset.what;
+    const msg = what === 'camera-originals' ? 'Delete the untouched camera files for this take? The MP4 videos are kept.' : 'Delete the raw upload data for this take? All finished files are kept, but you won\'t be able to fully rebuild this take afterwards.';
+    if (!confirm(msg)) return;
+    const res = await fetch(`/api/rooms/${roomId}/takes/${b.dataset.compact}/compact${q}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ what }) });
+    const j = await res.json(); toast(res.ok ? `Freed ${mb(j.freed || 0)}` : j.error); lastJson = ''; load();
+  }
   if (b.dataset.del) {
     if (!confirm(`Delete take ${b.dataset.n} and all its files? This can't be undone.`)) return;
     const res = await fetch(`/api/rooms/${roomId}/takes/${b.dataset.del}${q}`, { method: 'DELETE' });
@@ -118,7 +178,7 @@ document.addEventListener('click', async e => {
   }
 });
 fetch('/api/info').then(r => r.json()).then(i => { document.querySelectorAll('.studio-name').forEach(e => e.textContent = i.name); if (!i.admin) $('#adminLink').classList.add('hidden'); });
-load(); setInterval(load, 3000);
+load(); setInterval(load, 2000);
 </script>
 </body>
 </html>

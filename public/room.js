@@ -24,6 +24,11 @@ let screenStream = null;
 let net = null;                     // connection test result
 let videoBps = 4000000;
 let serverDisk = null, gbPerPersonHour = 4;
+let controlMode = false;            // host running the show with no camera/mic (not recorded)
+let myLoud = null;                  // my own loudness (EBU R128) from the audio engine
+let nextEpisode = 1;
+let build = null;                   // progress of the take being built (host)
+let uploadPeak = 0;                 // for the upload progress bar
 const markers = [];
 let clockOffset = Date.now() - performance.now();
 const syncSamples = [];
@@ -159,7 +164,7 @@ function updateUploadUI() {
 $('#nameInput').value = LS.get('ps_name') || '';
 $('#headphones').checked = LS.get('ps_headphones') === '1';
 if (LS.get('ps_reccam') === '0') $('#recordCam').checked = false;
-if (hostKey) { $('#roleBadge').textContent = 'Host'; $('#roleBadge').classList.add('ok'); }
+if (hostKey) { $('#roleBadge').textContent = 'Host'; $('#roleBadge').classList.add('ok'); document.querySelector('.hostonly-lobby').classList.remove('hidden'); }
 fetch('/api/info').then(r => r.json()).then(i => { document.querySelectorAll('.studio-name').forEach(e => e.textContent = i.name); document.title = i.name; }).catch(() => {});
 if (navigator.mediaDevices && navigator.mediaDevices.getDisplayMedia && !/Mobi|Android/i.test(navigator.userAgent)) $('#screenBtn').classList.remove('hidden');
 
@@ -237,6 +242,7 @@ async function startMedia() {
     connectMic();
     await fillDevices();
     canJoin();
+    $('#soundBtn').disabled = false;
     if (!net) netTest();
   } catch (e) {
     console.error(e);
@@ -291,6 +297,24 @@ async function netTest() {
   $('#netBtn').disabled = false;
 }
 $('#netBtn').onclick = netTest;
+// sound check: record 5 seconds, then play it back
+$('#soundBtn').onclick = async () => {
+  if (!stream || !stream.getAudioTracks().length) return toast('Turn on your mic first');
+  const btn = $('#soundBtn'); btn.disabled = true;
+  try {
+    const mime = ['audio/webm;codecs=opus', 'audio/mp4', 'audio/webm'].find(t => MediaRecorder.isTypeSupported(t)) || '';
+    const rec = new MediaRecorder(new MediaStream(stream.getAudioTracks()), mime ? { mimeType: mime } : {});
+    const parts = []; rec.ondataavailable = e => parts.push(e.data);
+    const stopped = new Promise(r => { rec.onstop = r; });
+    rec.start();
+    for (let i = 5; i > 0; i--) { btn.textContent = `🔴 Recording… speak now (${i})`; await new Promise(r => setTimeout(r, 1000)); }
+    rec.stop(); await stopped;
+    btn.textContent = '🔊 Playing back…';
+    const audio = new Audio(URL.createObjectURL(new Blob(parts, { type: rec.mimeType })));
+    await audio.play(); await new Promise(r => { audio.onended = r; setTimeout(r, 7000); });
+  } catch (e) { toast('Sound check didn\'t work in this browser'); }
+  btn.textContent = '🎧 Sound check (5 s)'; btn.disabled = false;
+};
 
 // =====================================================================
 // 3. Levels + problem detection (mic silent / unplugged / distorting / glitches / connection)
@@ -324,6 +348,7 @@ const clipTimes = [], glitchTimes = [];
 let glitches = 0;
 function onWorklet(e) {
   const m = e.data;
+  if (m.type === 'loud') { myLoud = m; showLobbyLoud(); return; }
   if (m.type === 'level') {
     localPeak = Math.max(localPeak * 0.6, m.peak);
     if (m.peak > 0.0003) lastSoundAt = performance.now();
@@ -397,6 +422,15 @@ setInterval(async () => {
 }, 3000);
 const myNet = { loss: 0, relay: false };
 
+const fmtL = v => (Number.isFinite(v) ? v.toFixed(1) : '—');
+function loudClass(S) { return !Number.isFinite(S) || S < -40 ? '' : S < -30 ? 'warnc' : S > -10 ? 'bad' : 'goodc'; }
+function showLobbyLoud() {
+  const el = $('#lobbyLoud'); if (!el || !myLoud) return;
+  el.innerHTML = `Loudness <b class="${loudClass(myLoud.S)}">${fmtL(myLoud.S)} LUFS</b> · peak <b class="${myLoud.TP > -1 ? 'bad' : ''}">${fmtL(myLoud.TP)} dBTP</b> <span class="muted">— aim for about −20 LUFS while talking</span>`;
+}
+// send my meters to the host ~5 times a second (only while in the studio)
+setInterval(() => { if (joined && myLoud && !controlMode) wsSend({ t: 'meter', m: { M: r1(myLoud.M), S: r1(myLoud.S), I: r1(myLoud.I), TP: r1(myLoud.TP), TPmax: r1(myLoud.TPmax) } }); }, 200);
+function r1(v) { return Number.isFinite(v) ? Math.round(v * 10) / 10 : null; }
 function levelLoop() {
   const pct = Math.min(100, Math.sqrt(localPeak) * 110);
   $('#lobbyMeter').style.width = pct + '%';
@@ -417,6 +451,16 @@ requestAnimationFrame(levelLoop);
 // =====================================================================
 // 4. Joining + messages from the server
 // =====================================================================
+$('#controlBtn').onclick = async () => {
+  const name = $('#nameInput').value.trim() || 'Host';
+  $('#nameInput').value = name; LS.set('ps_name', name);
+  controlMode = true;
+  try { await ensureAudioGraph(); await ctx.resume(); } catch {}
+  if (stream) stream.getTracks().forEach(t => t.stop());
+  stream = new MediaStream();
+  micOn = false; camOn = false;
+  connect();
+};
 $('#joinBtn').onclick = () => {
   const name = $('#nameInput').value.trim();
   if (!name || !stream) return;
@@ -431,7 +475,7 @@ function connect() {
   left = false;
   ws = new WebSocket((location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/ws');
   ws.onopen = () => {
-    wsSend({ t: 'join', room: roomId, key: hostKey, name: $('#nameInput').value.trim(), clientId, recSeg: recording ? recording.seg : null, camId: stream.id });
+    wsSend({ t: 'join', room: roomId, key: hostKey, name: $('#nameInput').value.trim(), clientId, recSeg: recording ? recording.seg : null, camId: stream.id, control: controlMode });
     for (let i = 0; i < 8; i++) setTimeout(() => wsSend({ t: 'ping', c: performance.now() }), i * 250);
   };
   ws.onmessage = e => { let m; try { m = JSON.parse(e.data); } catch { return; } onMsg(m); };
@@ -465,7 +509,8 @@ function onMsg(m) {
       $('#roomTitle').textContent = m.roomName; document.title = m.roomName + ' — ' + m.studio;
       document.querySelectorAll('.hostonly').forEach(e => e.classList.toggle('hidden', !isHost));
       $('#recordingsLink').href = `/m/${roomId}?k=${encodeURIComponent(hostKey)}`;
-      if (!joined) { joined = true; show('studio'); addMyTile(); if (screenStream) showScreenTile('me', screenStream, 'Your screen'); (m.chat || []).forEach(c => addChat(c, true)); }
+      if (m.nextEpisode) nextEpisode = m.nextEpisode;
+      if (!joined) { joined = true; show('studio'); if (controlMode) enterControlMode(); else addMyTile(); if (screenStream) showScreenTile('me', screenStream, 'Your screen'); (m.chat || []).forEach(c => addChat(c, true)); }
       $('#uploadLine').textContent = '';
       for (const p of m.peers) addPeer(p, true);
       for (const w of m.waiting || []) showKnock(w);
@@ -488,7 +533,7 @@ function onMsg(m) {
     case 'peer-state': { const p = peers.get(m.id); if (p) { const before = new Set((p.state && p.state.warnings) || []); p.state = m.state; renderStatus(p); if (isHost) for (const w of p.state.warnings || []) if (!before.has(w)) { toast(`⚠ ${p.name}: ${WARN_TEXT[w] ? WARN_TEXT[w][1] : w}`, 5000); } } break; }
     case 'screen': { const p = peers.get(m.id); if (p) { p.screenId = m.on ? m.streamId : null; if (!m.on) removeScreenTile(p.id); else attachScreenIfReady(p); } break; }
     case 'signal': onSignal(m.from, m.data); break;
-    case 'recording': recStartedAt = m.on ? m.started : null; updateRecUI(); if (m.on) { toast(`Recording started (take ${m.n})`); markers.length = 0; } else toast('Recording stopped — finishing uploads…', 3500); break;
+    case 'recording': recStartedAt = m.on ? m.started : null; updateRecUI(); if (m.on) { toast(`Recording started (take ${m.n})`); markers.length = 0; if (!m.roomTone) countdown(); recNode.port.postMessage({ cmd: 'resetLoud' }); } else { toast('Recording stopped — finishing uploads…', 3500); uploadPeak = 0; } break;
     case 'record-start': startLocal(m); break;
     case 'record-stop': if (recording && recording.take === m.take) stopLocal(recording); stopToneOverlay(true); break;
     case 'roomtone': startToneOverlay(m); break;
@@ -497,6 +542,8 @@ function onMsg(m) {
     case 'knock': showKnock(m); chime(); break;
     case 'knock-gone': { const k = document.getElementById('knock-' + m.id); if (k) k.remove(); break; }
     case 'server': serverDisk = m.disk; break;
+    case 'meter': { const p = peers.get(m.id); if (p) p.loud = m.m; break; }
+    case 'build': build = m; renderBuild(); break;
   }
 }
 
@@ -510,7 +557,9 @@ function addPeer(info, initiator) {
   const p = { id: info.id, name: info.name, isHost: info.isHost, state: info.state || {}, camId: info.camId, screenId: info.screenId, pc,
     polite: myId > info.id, canOffer: !!initiator, makingOffer: false, ignoreOffer: false, chain: Promise.resolve(), streams: new Map(), tile: null };
   peers.set(p.id, p);
+  p.control = !!info.control;
   p.tile = makeTile(p.id, p.name, false);
+  if (p.control) p.tile.classList.add('hidden'); // the control room isn't on camera
   if (isHost) {
     const k = document.createElement('button'); k.className = 'small ghost kick'; k.textContent = 'Remove';
     k.onclick = async () => { if (await ask(`Remove ${esc(p.name)}?`, 'They will be taken out of the studio. Their recording so far is kept.', 'Remove')) wsSend({ t: 'kick', id: p.id }); };
@@ -518,6 +567,7 @@ function addPeer(info, initiator) {
   }
   renderStatus(p);
   for (const tr of stream.getTracks()) pc.addTrack(tr, stream);
+  if (!stream.getAudioTracks().length) pc.addTransceiver('audio', { direction: 'recvonly' });
   if (!stream.getVideoTracks().length) pc.addTransceiver('video', { direction: 'recvonly' });
   if (screenStream) p.screenSender = pc.addTrack(screenStream.getVideoTracks()[0], screenStream);
   pc.ontrack = e => {
@@ -603,6 +653,12 @@ function makeTile(id, name, isMe) {
   $('#grid').appendChild(el);
   return el;
 }
+function enterControlMode() {
+  document.body.classList.add('control-mode');
+  ['#micBtn', '#camBtn', '#screenBtn'].forEach(q => $(q).classList.add('hidden'));
+  $('#roomTitle').textContent += ' — control room';
+  openDrawer('health');
+}
 function addMyTile() {
   const el = makeTile('me', $('#nameInput').value.trim(), true);
   el.querySelector('video').srcObject = stream;
@@ -623,7 +679,7 @@ function showScreenTile(id, st, label) {
 function attachScreenIfReady(p) { const st = p.screenId && p.streams.get(p.screenId); if (st) showScreenTile(p.id, st, `${p.name}'s screen`); }
 function removeScreenTile(id) { const el = document.getElementById('screen-' + id); if (el) { el.remove(); layout(); } }
 function layout() {
-  const grid = $('#grid'), tiles = grid.children.length;
+  const grid = $('#grid'), tiles = grid.querySelectorAll('.tile:not(.hidden)').length;
   if (!tiles) return;
   const W = grid.clientWidth - 24, H = grid.clientHeight - 24, gap = 10;
   let best = 0, bestCols = 1;
@@ -705,11 +761,14 @@ $('#recBtn').onclick = async () => {
       disk = `<p class="small-text" style="margin-top:12px">Studio server: <b>${gb.toFixed(0)} GB free</b> — room for about <b>${hrs >= 10 ? Math.floor(hrs) : hrs.toFixed(1)} hours</b> with ${people} ${people === 1 ? 'person' : 'people'}.</p>`;
     }
     const a = await ask('Start recording',
-      `Record <b>${roomToneSeconds} seconds of room tone</b> first? Everyone gets a "Quiet please" countdown, then you're live. ` +
+      `<div class="grid2" style="margin-bottom:10px"><div><label style="margin-top:0">Episode number</label><input type="text" id="epNum" value="${nextEpisode}"></div>` +
+      `<div><label style="margin-top:0">Episode title (optional)</label><input type="text" id="epTitle" maxlength="80" placeholder="e.g. The Keyword Era"></div></div>` +
+      `Record <b>${roomToneSeconds} seconds of room tone</b> first? Everyone gets a "Quiet please" countdown, then a 3-2-1 and you're live. ` +
       `It's saved as a separate noise-print file for each person (and is also at the start of their main track).${disk}`,
       'Room tone, then record', 'Cancel', 'Record without room tone');
     if (!a) return;
-    wsSend({ t: 'record', on: true, roomTone: a === 'yes' });
+    const episode = { n: ($('#epNum') && $('#epNum').value.trim()) || '', title: ($('#epTitle') && $('#epTitle').value.trim()) || '' };
+    wsSend({ t: 'record', on: true, roomTone: a === 'yes', episode });
   } else {
     if (await ask('Stop recording?', 'Everyone\'s files will finish uploading, then they\'ll be ready on the Recordings page.', 'Stop recording')) wsSend({ t: 'record', on: false });
   }
@@ -772,13 +831,23 @@ function showKnock(k) {
 }
 
 // health panel (host): everyone's mic, connection, uploads and problems at a glance
+// EBU R128 meter: bar shows short-term loudness on a -50…0 LUFS scale with -23 and -16 marks
+function loudMeter(L, muted) {
+  if (!L) return '<div class="small-text muted">No meter yet</div>';
+  const pos = v => Math.max(0, Math.min(100, ((v + 50) / 50) * 100));
+  const S = muted ? -Infinity : L.S;
+  const tpBad = L.TPmax != null && L.TPmax > -1;
+  return `<div class="lmeter"><div class="lbar ${loudClass(S)}" style="width:${Number.isFinite(S) && S !== null ? pos(S) : 0}%"></div>
+      <div class="lmark" style="left:${pos(-23)}%" title="-23 LUFS (EBU R128)"></div><div class="lmark" style="left:${pos(-16)}%" title="-16 LUFS (podcast)"></div></div>
+    <div class="lnums">M <b>${fmtL(L.M)}</b> · S <b class="${loudClass(L.S)}">${fmtL(L.S)}</b> · I <b>${fmtL(L.I)}</b> LUFS · TP <b class="${tpBad ? 'bad' : ''}">${fmtL(L.TPmax)}</b> dBTP${tpBad ? ' ⚠ too hot' : ''}</div>`;
+}
 function renderHealth() {
   let totalWarn = warns.size;
   for (const p of peers.values()) totalWarn += ((p.state && p.state.warnings) || []).length;
   $('#healthBadge').textContent = totalWarn; $('#healthBadge').classList.toggle('hidden', !totalWarn);
   if (drawerTab !== 'health') return;
-  const rows = [{ name: $('#nameInput').value.trim() + ' (you)', s: myState(), level: localPeak }];
-  for (const p of peers.values()) rows.push({ name: p.name, s: p.state || {}, level: p.level || 0, conn: p.pc.connectionState });
+  const rows = controlMode ? [] : [{ name: $('#nameInput').value.trim() + ' (you)', s: myState(), level: localPeak, loud: myLoud }];
+  for (const p of peers.values()) if (!p.control) rows.push({ name: p.name, s: p.state || {}, level: p.level || 0, conn: p.pc.connectionState, loud: p.loud });
   const people = rows.length;
   if (serverDisk) {
     const gb = serverDisk.free / 1073741824, hrs = gb / (people * gbPerPersonHour);
@@ -793,14 +862,14 @@ function renderHealth() {
     const behind = s.pendingAudio > 1048576 ? ` · audio ${fmtMB(s.pendingAudio)} behind` : '';
     return `<div class="hrow ${ws.length ? 'has-warn' : ''}">
       <div class="row spread"><b>${esc(r.name)}</b>${rec}</div>
-      <div class="meter small"><div style="width:${s.mic === false ? 0 : lvl}%"></div></div>
+      ${loudMeter(r.loud, s.mic === false)}
       <div class="small-text muted">${s.mic === false ? '🔇 muted · ' : ''}${n.up ? `up ${n.up} Mbps · ` : ''}${s.rtt ? `ping ${s.rtt} ms · ` : ''}loss ${Math.round((s.loss || 0) * 100)}%${s.relay ? ' · via relay' : ''}${s.glitches ? ` · ${s.glitches} glitch${s.glitches > 1 ? 'es' : ''}` : ''}${behind}${s.durable === false ? ' · ⚠ not saving to disk' : ''}</div>
       ${ws.map(w => `<div class="hwarn">⚠ ${esc(WARN_TEXT[w] ? WARN_TEXT[w][1] : w)}</div>`).join('')}
     </div>`;
   }).join('');
   $('#healthMarkers').innerHTML = markers.length ? '<b>Markers this take</b><br>' + markers.map(m => `📍 ${fmtTime(m.at)} — ${esc(m.label)}`).join('<br>') : (recStartedAt ? 'Press <b>M</b> or 📍 to drop a marker for editing.' : '');
 }
-setInterval(renderHealth, 1000);
+setInterval(renderHealth, 250);
 
 // =====================================================================
 // 8. Local recording: lossless audio + camera + screen, saved to disk then uploaded
@@ -884,10 +953,18 @@ function onPcm(m) {
   r.samples += f.length;
 }
 
+// host: progress of the take being built on the server
+function renderBuild() {
+  if (!isHost || !build) return;
+  const done = build.status === 'ready' || build.status === 'error';
+  $('#uploadLine').innerHTML = done
+    ? (build.status === 'ready' ? `✓ Take ${build.n} is ready — <a href="/m/${roomId}?k=${encodeURIComponent(hostKey)}" target="_blank">open Recordings</a>` : `⚠ Take ${build.n} had a problem — see Recordings`)
+    : `Building take ${build.n}: ${esc(build.step || build.status)} <span class="pbar"><span style="width:${build.pct || 0}%"></span></span> ${build.pct || 0}%`;
+}
 // what this person's browser reports to everyone (the host sees it in the Health panel)
 let lastState = '';
 function myState() {
-  return { mic: micOn, cam: camOn && !!stream && !!stream.getVideoTracks().length,
+  return { control: controlMode, mic: micOn && !controlMode, cam: camOn && !controlMode && !!stream && !!stream.getVideoTracks().length,
     rec: recording ? 'recording' : up.items.size ? 'uploading' : lastTakeSaved ? 'saved' : '',
     pending: up.pending, pendingAudio: up.pendingAudio, warnings: [...warns], glitches, net, loss: myNet.loss, relay: myNet.relay, rtt: myNet.serverRtt, durable: store.durable };
 }
@@ -897,7 +974,11 @@ function sendState(force) {
   const s = myState(), key = JSON.stringify({ ...s, pending: Math.round(s.pending / 524288), pendingAudio: Math.round(s.pendingAudio / 262144), loss: Math.round(s.loss * 50), rtt: Math.round((s.rtt || 0) / 25) });
   const meTile = document.getElementById('tile-me');
   if (meTile) meTile.querySelector('.status').innerHTML = statusPills(s);
-  $('#uploadLine').textContent = s.rec === 'uploading' ? `Uploading your recording… ${fmtMB(s.pending)} left — keep this tab open` : s.rec === 'saved' ? 'Your recording is saved ✓' : '';
+  if (s.rec === 'uploading') {
+    uploadPeak = Math.max(uploadPeak, s.pending);
+    const pct = uploadPeak ? Math.round(100 * (1 - s.pending / uploadPeak)) : 0;
+    $('#uploadLine').innerHTML = `Uploading your recording… ${fmtMB(s.pending)} left <span class="pbar"><span style="width:${pct}%"></span></span>`;
+  } else if (!build || build.status === 'ready') $('#uploadLine').textContent = s.rec === 'saved' ? 'Your recording is saved ✓' : '';
   if (key !== lastState || force) { lastState = key; wsSend({ t: 'state', state: s }); }
 }
 setInterval(() => sendState(), 1000);
@@ -924,6 +1005,17 @@ function startToneOverlay(rt) {
   };
   tick(); toneTimer = setInterval(tick, 200);
 }
+// 3-2-1 "you're live" cue for everyone
+function countdown() {
+  const el = $('#countdown'); let n = 3;
+  el.classList.remove('hidden'); el.textContent = n;
+  const t = setInterval(() => {
+    n--;
+    if (n > 0) el.textContent = n;
+    else if (n === 0) { el.textContent = '🔴 You\'re live'; el.classList.add('live'); }
+    else { clearInterval(t); el.classList.add('hidden'); el.classList.remove('live'); }
+  }, 900);
+}
 function stopToneOverlay(silent) {
   clearInterval(toneTimer); toneTimer = null;
   if (!roomTone) return;
@@ -934,7 +1026,7 @@ function stopToneOverlay(silent) {
   $('#toneCount').textContent = '✓';
   $('#toneText').textContent = isHost ? 'You\'re live — start the show whenever you\'re ready.' : 'Thanks! The show is about to start.';
   $('#toneHostTips').classList.add('hidden'); $('#toneMuted').classList.add('hidden');
-  setTimeout(() => { if (!roomTone) $('#tone').classList.add('hidden'); }, 2500);
+  setTimeout(() => { if (!roomTone) { $('#tone').classList.add('hidden'); countdown(); } }, 1500);
 }
 $('#toneUnmute').onclick = () => { if (!micOn) toggleMic(); };
 

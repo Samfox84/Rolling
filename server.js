@@ -15,10 +15,12 @@ const { spawn } = require('child_process');
 const express = require('express');
 const { WebSocketServer } = require('ws');
 const archiver = require('archiver');
+const post = require('./post');
+const createTranscriber = require('./transcribe');
 let nodemailer = null;
 try { nodemailer = require('nodemailer'); } catch { /* email optional */ }
 
-const VERSION = '1.2.0';
+const VERSION = '1.3.0';
 
 // ---------- settings (from .env next to this file) ----------
 (function loadEnv() {
@@ -83,11 +85,15 @@ const settings = (() => {
     turn: Object.assign({ keyId: process.env.CF_TURN_KEY_ID || '', token: process.env.CF_TURN_API_TOKEN || '' }, s.turn),
     backupDir: s.backupDir !== undefined ? s.backupDir : (process.env.BACKUP_DIR || ''),
     publicUrl: s.publicUrl || process.env.PUBLIC_URL || '',
+    transcribe: Object.assign({ enabled: true, model: process.env.WHISPER_MODEL || 'base.en', language: 'auto' }, s.transcribe),
+    autoCompact: !!s.autoCompact,
     adminHash: s.adminHash || '',   // set once the password is changed from the dashboard (scrypt, never stored in plain text)
     sessionGen: s.sessionGen || 0,  // bumped on password change so old logins stop working
   };
 })();
 function saveSettings() { writeJSON(SETTINGS_FILE, settings); try { fs.chmodSync(SETTINGS_FILE, 0o600); } catch {} }
+
+const transcriber = createTranscriber({ settings, FFMPEG, takeDir: (r, t) => takeDir(r, t), saveTake: (t, now) => saveTake(t, now) });
 
 // ---------- admin password ----------
 function hashPassword(pw) { const salt = crypto.randomBytes(16); return `scrypt:${salt.toString('hex')}:${crypto.scryptSync(pw, salt, 64).toString('hex')}`; }
@@ -191,7 +197,7 @@ function admit(roomId, lr, clientId) {
 function send(ws, msg) { if (ws && ws.readyState === 1) ws.send(JSON.stringify(msg)); }
 function broadcast(lr, msg, exceptId) { for (const p of lr.peers.values()) if (p.id !== exceptId) send(p.ws, msg); }
 function toHosts(lr, msg) { for (const p of lr.peers.values()) if (p.isHost) send(p.ws, msg); }
-const peerInfo = p => ({ id: p.id, name: p.name, isHost: p.isHost, state: p.state || {}, camId: p.camId, screenId: p.screenId || null });
+const peerInfo = p => ({ id: p.id, name: p.name, isHost: p.isHost, control: !!p.control, state: p.state || {}, camId: p.camId, screenId: p.screenId || null });
 
 function newSeg(t, peer) {
   const segId = rid(10);
@@ -202,16 +208,21 @@ function newSeg(t, peer) {
 }
 function startMsg(t, segId) { return { t: 'record-start', take: t.id, started: t.started, seg: segId, tok: segToken(t.room, t.id, segId) }; }
 
-function startRecording(roomId, lr, roomTone) {
+function startRecording(roomId, lr, roomTone, episode) {
   const room = loadRoom(roomId);
   const n = listTakes(roomId).reduce((a, t) => Math.max(a, t.n), 0) + 1;
   const t = { id: rid(10), room: roomId, n, started: Date.now(), stopped: null, status: 'recording', progress: '', error: '',
-    segs: {}, outputs: [], roomTones: [], markers: [], chat: [], backup: null };
+    segs: {}, outputs: [], roomTones: [], markers: [], chat: [], backup: null, levels: {}, episode: null };
+  if (episode && (episode.n || episode.title)) {
+    t.episode = { n: cleanText(episode.n, 12), title: cleanText(episode.title, 80) };
+    const num = parseInt(t.episode.n, 10);
+    if (room && Number.isFinite(num) && num > (room.lastEpisode || 0)) { room.lastEpisode = num; saveRoom(room); }
+  }
   fs.mkdirSync(path.join(takeDir(roomId, t.id), 'segs'), { recursive: true });
   saveTake(t, true);
   lr.take = t.id;
-  for (const p of lr.peers.values()) { const seg = newSeg(t, p); p.seg = seg; send(p.ws, startMsg(t, seg)); }
-  broadcast(lr, { t: 'recording', on: true, take: t.id, started: t.started, n });
+  for (const p of lr.peers.values()) { if (p.control) continue; const seg = newSeg(t, p); p.seg = seg; send(p.ws, startMsg(t, seg)); }
+  broadcast(lr, { t: 'recording', on: true, take: t.id, started: t.started, n, roomTone: !!roomTone });
   if (roomTone) beginRoomTone(t, lr, 1500);
   console.log(`[rec] ${room && room.name} take ${n} started`);
 }
@@ -260,22 +271,25 @@ function lateUpload(roomId, t) {
 
 // ---------- processing (ffmpeg) ----------
 let queue = Promise.resolve();
-const queued = new Set(), again = new Set();
-function queueProcess(room, take) {
+const queued = new Map(), again = new Map();
+function queueProcess(room, take, opts = {}) {
   const k = room + '/' + take;
-  if (queued.has(k)) { again.add(k); return; }
-  queued.add(k);
+  const merge = (a, b) => ({ docsOnly: !!(a && a.docsOnly && b.docsOnly) });
+  if (queued.has(k)) { again.set(k, again.has(k) ? merge(again.get(k), opts) : opts); return; }
+  queued.set(k, opts);
   const t = loadTake(room, take);
-  if (t && t.status !== 'processing') { t.status = 'queued'; t.progress = 'Waiting to start'; saveTake(t, true); }
-  queue = queue.then(() => processTake(room, take)).catch(e => console.error(e)).finally(() => {
+  if (t && t.status !== 'processing') { t.status = 'queued'; t.progress = 'Waiting to start'; t.pct = 0; saveTake(t, true); announce(room, t); }
+  queue = queue.then(() => processTake(room, take, opts)).catch(e => console.error(e)).finally(() => {
     queued.delete(k);
-    if (again.delete(k)) queueProcess(room, take);
+    if (again.has(k)) { const o = again.get(k); again.delete(k); queueProcess(room, take, o); }
   });
 }
-function ff(args) {
+function ff(args, onProgress, durationSecs) {
   return new Promise((resolve, reject) => {
-    const p = spawn(FFMPEG, ['-hide_banner', '-loglevel', 'error', '-nostdin', '-y', ...args]);
+    const prog = onProgress && durationSecs ? ['-progress', 'pipe:1', '-nostats'] : [];
+    const p = spawn(FFMPEG, ['-hide_banner', '-loglevel', 'error', '-nostdin', '-y', ...prog, ...args]);
     let err = '';
+    if (prog.length) p.stdout.on('data', d => { const m = String(d).match(/out_time_us=(\d+)/g); if (m) onProgress(parseInt(m[m.length - 1].split('=')[1], 10) / 1e6 / durationSecs); });
     p.stderr.on('data', d => { err += d; if (err.length > 8000) err = err.slice(-8000); });
     p.on('error', reject);
     p.on('close', code => (code === 0 ? resolve() : reject(new Error(err.trim() || 'ffmpeg exit ' + code))));
@@ -329,24 +343,75 @@ async function joinParts(dir, prefix, dest) {
   await new Promise(r => ws.end(r));
   for (const p of parts) await fsp.rm(path.join(dir, p), { force: true });
 }
-const xmlEsc = s => String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&apos;' }[c]));
-function auditionTime(ms) { const s = ms / 1000, h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), sec = (s % 60).toFixed(3).padStart(6, '0'); return h ? `${h}:${String(m).padStart(2, '0')}:${sec}` : `${m}:${sec}`; }
 
-async function processTake(roomId, takeId) {
+// tell hosts in the studio how the build is going
+function announce(roomId, t) { const lr = live.get(roomId); if (lr) toHosts(lr, { t: 'build', take: t.id, n: t.n, status: t.status, pct: t.pct || 0, step: t.progress }); }
+// the name used for downloads: "AOL Underground - Ep 42 - Title" or "AOL Underground - Take 3"
+function takeLabel(room, t) {
+  const e = t.episode || {};
+  return e.n ? `${fileSafe(room.name)} - Ep ${fileSafe(String(e.n))}${e.title ? ' - ' + fileSafe(e.title) : ''}` : `${fileSafe(room.name)} - Take ${t.n}`;
+}
+function roomAssets(room) {
+  const a = {};
+  for (const k of ['intro', 'outro']) {
+    const f = path.join(roomDir(room.id), 'assets', k + '.wav');
+    if (room.assets && room.assets[k] && fs.existsSync(f)) a[k] = { ...room.assets[k], path: f };
+  }
+  return a;
+}
+// measure loudness (EBU R128 / BS.1770) with ffmpeg's ebur128 meter: integrated, range, true peak
+async function measureLoudness(file) {
+  const outp = await new Promise(res => {
+    const p = spawn(FFMPEG, ['-hide_banner', '-nostats', '-nostdin', '-i', file, '-af', 'ebur128=peak=true:framelog=quiet', '-f', 'null', '-']);
+    let e = ''; p.stderr.on('data', d => { e = (e + d).slice(-4000); }); p.on('error', () => res('')); p.on('close', () => res(e));
+  });
+  const sum = outp.slice(outp.lastIndexOf('Summary'));
+  const num = re => { const m = sum.match(re); return m ? (/inf/.test(m[1]) ? -Infinity : parseFloat(m[1])) : NaN; };
+  const L = { I: num(/I:\s+(-?[\d.]+|-inf)\s+LUFS/), LRA: num(/LRA:\s+(-?[\d.]+)\s+LU/), TP: num(/Peak:\s+(-?[\d.]+|-inf)\s+dBFS/) };
+  return Number.isFinite(L.I) || L.I === -Infinity ? L : null;
+}
+// turn a recording up/down to a loudness target with a plain gain change; a gentle peak limiter
+// only steps in if the gain would push peaks above -1 dBTP
+function normaliseFilter(L, target) {
+  const gain = target - L.I;
+  const limit = Number.isFinite(L.TP) && L.TP + gain > -1;
+  return `volume=${gain.toFixed(2)}dB${limit ? ',alimiter=limit=0.85:level=false:attack=5:release=50' : ''}`;
+}
+const DOC_KINDS = new Set(['markers', 'chat', 'session', 'chapters', 'transcript', 'report']);
+
+async function processTake(roomId, takeId, opts = {}) {
   const t = loadTake(roomId, takeId);
   const room = loadRoom(roomId);
   if (!t || !room) return;
   const dir = takeDir(roomId, takeId);
   const out = path.join(dir, 'out');
-  await fsp.rm(out, { recursive: true, force: true });
-  await fsp.mkdir(out, { recursive: true });
-  t.status = 'processing'; t.error = ''; t.outputs = [];
-  const set = p => { t.progress = p; saveTake(t, true); };
+  const docsOnly = (opts.docsOnly || t.compacted) && (t.outputs || []).length > 0;
+  t.status = 'processing'; t.error = ''; t.pct = 0;
+
+  // ---- progress: every step has a weight; the bar shows the share done ----
+  let total = 0, done = 0, curW = 0, lastSave = 0;
+  const report = f => {
+    t.pct = Math.min(99, Math.round((100 * (done + Math.max(0, Math.min(1, f)) * curW)) / Math.max(1, total)));
+    const now = Date.now();
+    if (now - lastSave > 700 || f === 0) { lastSave = now; saveTake(t, true); announce(roomId, t); }
+  };
+  const begin = (label, w) => { curW = w; t.progress = label; report(0); };
+  const finish = () => { done += curW; curW = 0; };
+  const takeSecs = Math.max(1, ((t.stopped || Date.now()) - t.started) / 1000);
+
+  if (!docsOnly) {
+    await fsp.rm(out, { recursive: true, force: true });
+    await fsp.mkdir(out, { recursive: true });
+    t.outputs = []; t.levels = {};
+  } else {
+    for (const o of t.outputs.filter(o => DOC_KINDS.has(o.kind))) await fsp.rm(path.join(out, o.file), { force: true });
+    t.outputs = t.outputs.filter(o => !DOC_KINDS.has(o.kind));
+  }
   const segs = Object.values(t.segs).sort((a, b) => a.created - b.created);
 
   // one name per person (clientId); repeated joins become "part 2", etc.
   const people = new Map();
-  const usedNames = new Set(['mix - all voices', 'chat', 'markers']);
+  const usedNames = new Set(['mix - all voices', 'chat', 'markers', 'intro', 'outro', 'transcript']);
   for (const s of segs) {
     if (!people.has(s.clientId)) {
       let base = fileSafe(s.name), name = base, i = 2;
@@ -359,185 +424,256 @@ async function processTake(roomId, takeId) {
     s._label = p.name + (p.parts++ ? ` (part ${p.parts})` : '');
   }
   const errors = [];
-  const add = (file, kind, person) => { const st = fs.statSync(path.join(out, file)); t.outputs.push({ file, kind, person, size: st.size }); };
+  const add = (file, kind, person) => { const st = fs.statSync(path.join(out, file)); t.outputs = t.outputs.filter(o => o.file !== file); t.outputs.push({ file, kind, person, size: st.size }); };
+  const assets = roomAssets(room);
 
-  // --- audio: lossless 24-bit WAV per person, lined up to the start of the take ---
   const audioSegs = segs.filter(s => s.audio && s.audio.end > 0);
-  const byPerson = new Map(); // person name -> [{ file, from, to }]
-  for (let i = 0; i < audioSegs.length; i++) {
-    const s = audioSegs[i], a = s.audio;
-    set(`Audio ${i + 1} of ${audioSegs.length}`);
-    const nominal = a.rate || 48000;
-    let rate = nominal;
-    if (a.last && a.first && a.last.s - a.first.s > nominal * 300) {
-      const measured = (a.last.s - a.first.s) / ((a.last.t - a.first.t) / 1000);
-      if (Math.abs(measured / nominal - 1) < 0.002) rate = Math.round(measured); // corrects clock drift over long takes
-    }
-    const t0 = a.first.t - (a.first.s / nominal) * 1000;
-    const pad = Math.max(0, Math.round(((t0 - t.started) / 1000) * 48000));
-    const tmp = `_seg_${s.id}.wav`;
-    try {
-      await ff(['-f', 's24le', '-ar', String(rate), '-ac', '1', '-i', path.join(dir, 'segs', s.id, 'audio.pcm'),
-        '-af', `aresample=48000${pad ? `,adelay=${pad}S:all=1` : ''}`, '-ar', '48000', '-c:a', 'pcm_s24le', path.join(out, tmp)]);
-      if (!byPerson.has(s._person)) byPerson.set(s._person, []);
-      byPerson.get(s._person).push({ file: tmp, from: pad / 48000, to: pad / 48000 + a.end / nominal });
-    } catch (e) { errors.push(`${s._label}: ${e.message}`); }
-  }
-  // someone who dropped out and came back gets their parts joined into one file
-  const wavs = [];
-  for (const [person, parts] of byPerson) {
-    const file = `${person}.wav`;
-    try {
-      if (parts.length === 1) await fsp.rename(path.join(out, parts[0].file), path.join(out, file));
-      else {
-        set(`Joining ${person}'s parts`);
-        const ins = parts.flatMap(p => ['-i', path.join(out, p.file)]);
-        await ff([...ins, '-filter_complex', `amix=inputs=${parts.length}:duration=longest:normalize=0`, '-c:a', 'pcm_s24le', path.join(out, file)])
-          .catch(() => ff([...ins, '-filter_complex', `amix=inputs=${parts.length}:duration=longest,volume=${parts.length}`, '-c:a', 'pcm_s24le', path.join(out, file)]));
-        for (const p of parts) await fsp.rm(path.join(out, p.file), { force: true });
-      }
-      add(file, 'audio', person); wavs.push(file);
-    } catch (e) { errors.push(`${file}: ${e.message}`); }
-  }
-  // separate room-tone (noise print) file per person, cut from their lined-up track
-  const tones = t.roomTones || [];
-  for (let r = 0; r < tones.length; r++) {
-    const rt = tones[r];
-    const from = Math.max(0, (rt.start - t.started) / 1000), dur = (rt.end - rt.start) / 1000;
-    for (const [person, parts] of byPerson) {
-      if (!parts.some(p => p.from <= from + dur * 0.1 && p.to >= from + dur * 0.9)) continue; // only if they were there for it
-      const file = `${person} - room tone${tones.length > 1 ? ' ' + (r + 1) : ''}.wav`;
-      set('Room tone files');
-      try { await ff(['-ss', from.toFixed(3), '-t', dur.toFixed(3), '-i', path.join(out, `${person}.wav`), '-c:a', 'pcm_s24le', path.join(out, file)]); add(file, 'roomtone', person); }
-      catch (e) { errors.push(`${file}: ${e.message}`); }
-    }
-  }
-  if (wavs.length > 1) {
-    set('Mixing all voices');
-    const file = 'Mix - all voices.wav';
-    const ins = wavs.flatMap(w => ['-i', path.join(out, w)]);
-    try { await ff([...ins, '-filter_complex', `amix=inputs=${wavs.length}:duration=longest:normalize=0`, '-c:a', 'pcm_s24le', path.join(out, file)]); }
-    catch {
-      try { await ff([...ins, '-filter_complex', `amix=inputs=${wavs.length}:duration=longest,volume=${wavs.length}`, '-c:a', 'pcm_s24le', path.join(out, file)]); }
-      catch (e) { errors.push(`${file}: ${e.message}`); }
-    }
-    if (fs.existsSync(path.join(out, file))) add(file, 'mix', 'Everyone');
-  }
-
-  // --- camera video: original file + an editor-friendly H.264 MP4 lined up to the take ---
   const videoSegs = segs.filter(s => s.video && s.video.chunks > 0);
-  for (let i = 0; i < videoSegs.length; i++) {
-    const s = videoSegs[i], v = s.video;
-    const ext = /mp4/.test(v.mime || '') ? 'mp4' : 'webm';
-    const camFile = path.join(dir, 'segs', s.id, 'camera.' + ext);
-    set(`Video ${i + 1} of ${videoSegs.length} (joining)`);
-    await joinParts(path.join(dir, 'segs', s.id, 'video'), '', camFile);
-    if (!fs.existsSync(camFile)) continue;
-    const orig = `${s._label} - camera original.${ext}`;
-    try { await fsp.link(camFile, path.join(out, orig)); } catch { await fsp.copyFile(camFile, path.join(out, orig)); }
-    add(orig, 'video-original', s._label);
-    let padS = Math.max(0, ((v.st || t.started) - t.started) / 1000);
-    const wav = path.join(out, `${s._person}.wav`);
-    if (fs.existsSync(wav)) {
-      set(`Video ${i + 1} of ${videoSegs.length} (lining up with audio)`);
-      const exact = await alignVideo(path.join(out, orig), wav, padS).catch(() => null);
-      if (exact !== null) padS = exact;
-      console.log(`[rec] ${s._label} video offset ${padS.toFixed(3)}s (${exact !== null ? 'matched to audio' : 'from clock'})`);
-    }
-    set(`Video ${i + 1} of ${videoSegs.length} (converting to MP4 — this can take a while)`);
-    const file = `${s._label} - video.mp4`;
-    try {
-      await ff(['-fflags', '+genpts', '-i', path.join(out, orig),
-        '-vf', `fps=30,${padS > 0.01 ? `tpad=start_duration=${padS.toFixed(3)}:color=black,` : ''}scale=trunc(iw/2)*2:trunc(ih/2)*2,format=yuv420p`,
-        '-af', padS > 0.01 ? `adelay=${Math.round(padS * 1000)}:all=1` : 'anull',
-        '-c:v', 'libx264', '-preset', VIDEO_PRESET, '-crf', '20', '-c:a', 'aac', '-b:a', '160k', '-movflags', '+faststart', path.join(out, file)]);
-      add(file, 'video', s._label);
-    } catch (e) { errors.push(`${file}: ${e.message.slice(0, 300)}`); }
-  }
-
-  // --- screen shares: one MP4 per share, lined up to the take ---
   const shares = [];
   for (const s of segs) for (const [r, sc] of Object.entries(s.screens || {})) if (sc.chunks > 0) shares.push({ s, r, sc });
-  for (let i = 0; i < shares.length; i++) {
-    const { s, r, sc } = shares[i];
-    const ext = /mp4/.test(sc.mime || '') ? 'mp4' : 'webm';
-    const src = path.join(dir, 'segs', s.id, `screen-${r}.${ext}`);
-    set(`Screen share ${i + 1} of ${shares.length}`);
-    await joinParts(path.join(dir, 'segs', s.id, 'screen'), String(r).padStart(3, '0') + '-', src);
-    if (!fs.existsSync(src)) continue;
-    const n = shares.filter((x, j) => j <= i && x.s._person === s._person).length;
-    const file = `${s._person} - screen share ${n}.mp4`;
-    const padS = Math.max(0, ((sc.st || t.started) - t.started) / 1000);
-    try {
-      await ff(['-fflags', '+genpts', '-i', src, '-an',
-        '-vf', `fps=30,${padS > 0.01 ? `tpad=start_duration=${padS.toFixed(3)}:color=black,` : ''}scale=trunc(iw/2)*2:trunc(ih/2)*2,format=yuv420p`,
-        '-c:v', 'libx264', '-preset', VIDEO_PRESET, '-crf', '20', '-movflags', '+faststart', path.join(out, file)]);
-      add(file, 'screen', s._person);
-    } catch (e) {
-      errors.push(`${file}: ${e.message.slice(0, 300)}`);
-      const o = `${s._person} - screen share ${n} original.${ext}`;
-      try { await fsp.link(src, path.join(out, o)); add(o, 'screen', s._person); } catch {}
+  const nPeople = new Set(audioSegs.map(s => s.clientId)).size;
+  if (!docsOnly) total += audioSegs.length + nPeople * 4 + 2 + videoSegs.length * 8 + shares.length * 4 + (transcriber.enabled() ? 4 : 0);
+  total += 1;
+
+  if (!docsOnly) {
+    // --- audio: lossless 24-bit WAV per person, lined up to the start of the take ---
+    const byPerson = new Map(); // person name -> [{ file, from, to }]
+    for (let i = 0; i < audioSegs.length; i++) {
+      const s = audioSegs[i], a = s.audio;
+      begin(`Audio ${i + 1} of ${audioSegs.length}`, 1);
+      const nominal = a.rate || 48000;
+      let rate = nominal;
+      if (a.last && a.first && a.last.s - a.first.s > nominal * 300) {
+        const measured = (a.last.s - a.first.s) / ((a.last.t - a.first.t) / 1000);
+        if (Math.abs(measured / nominal - 1) < 0.002) rate = Math.round(measured); // corrects clock drift over long takes
+      }
+      const t0 = a.first.t - (a.first.s / nominal) * 1000;
+      const pad = Math.max(0, Math.round(((t0 - t.started) / 1000) * 48000));
+      const tmp = `_seg_${s.id}.wav`;
+      try {
+        await ff(['-f', 's24le', '-ar', String(rate), '-ac', '1', '-i', path.join(dir, 'segs', s.id, 'audio.pcm'),
+          '-af', `aresample=48000${pad ? `,adelay=${pad}S:all=1` : ''}`, '-ar', '48000', '-c:a', 'pcm_s24le', path.join(out, tmp)], report, a.end / nominal);
+        if (!byPerson.has(s._person)) byPerson.set(s._person, []);
+        byPerson.get(s._person).push({ file: tmp, from: pad / 48000, to: pad / 48000 + a.end / nominal });
+      } catch (e) { errors.push(`${s._label}: ${e.message}`); }
+      finish();
+    }
+    // someone who dropped out and came back gets their parts joined into one file
+    const wavs = [];
+    for (const [person, parts] of byPerson) {
+      const file = `${person}.wav`;
+      try {
+        if (parts.length === 1) await fsp.rename(path.join(out, parts[0].file), path.join(out, file));
+        else {
+          const ins = parts.flatMap(p => ['-i', path.join(out, p.file)]);
+          await ff([...ins, '-filter_complex', `amix=inputs=${parts.length}:duration=longest:normalize=0`, '-c:a', 'pcm_s24le', path.join(out, file)])
+            .catch(() => ff([...ins, '-filter_complex', `amix=inputs=${parts.length}:duration=longest,volume=${parts.length}`, '-c:a', 'pcm_s24le', path.join(out, file)]));
+          for (const p of parts) await fsp.rm(path.join(out, p.file), { force: true });
+        }
+        add(file, 'audio', person); wavs.push(file);
+      } catch (e) { errors.push(`${file}: ${e.message}`); }
+    }
+    // separate room-tone (noise print) file per person, cut from their lined-up track
+    const tones = t.roomTones || [];
+    for (let r = 0; r < tones.length; r++) {
+      const rt = tones[r];
+      const from = Math.max(0, (rt.start - t.started) / 1000), dur = (rt.end - rt.start) / 1000;
+      for (const [person, parts] of byPerson) {
+        if (!parts.some(p => p.from <= from + dur * 0.1 && p.to >= from + dur * 0.9)) continue; // only if they were there for it
+        const file = `${person} - room tone${tones.length > 1 ? ' ' + (r + 1) : ''}.wav`;
+        try { await ff(['-ss', from.toFixed(3), '-t', dur.toFixed(3), '-i', path.join(out, `${person}.wav`), '-c:a', 'pcm_s24le', path.join(out, file)]); add(file, 'roomtone', person); }
+        catch (e) { errors.push(`${file}: ${e.message}`); }
+      }
+    }
+    // --- level check (EBU R128) + normalised copies at -16 and -23 LUFS; originals untouched ---
+    for (const person of byPerson.keys()) {
+      const src = path.join(out, `${person}.wav`);
+      if (!fs.existsSync(src)) { done += 4; continue; }
+      begin(`Checking levels — ${person}`, 2);
+      const L = await measureLoudness(src);
+      t.levels[person] = L;
+      finish();
+      if (!L || !Number.isFinite(L.I)) { done += 2; continue; }
+      for (const target of [-16, -23]) {
+        begin(`Normalising ${person} to ${target} LUFS`, 1);
+        const file = `${person} - normalised ${target} LUFS.wav`;
+        try {
+          await ff(['-i', src, '-af', normaliseFilter(L, target), '-ar', '48000', '-c:a', 'pcm_s24le', path.join(out, file)], report, takeSecs);
+          add(file, 'normalised', person);
+        } catch (e) { errors.push(`${file}: ${e.message}`); }
+        finish();
+      }
+    }
+    // --- mix of everyone + a rough mix with intro/outro, normalised to -16 LUFS ---
+    begin('Mixing all voices', 1);
+    if (wavs.length > 1) {
+      const file = 'Mix - all voices.wav';
+      const ins = wavs.flatMap(w => ['-i', path.join(out, w)]);
+      try { await ff([...ins, '-filter_complex', `amix=inputs=${wavs.length}:duration=longest:normalize=0`, '-c:a', 'pcm_f32le', path.join(out, file)], report, takeSecs); }
+      catch {
+        try { await ff([...ins, '-filter_complex', `amix=inputs=${wavs.length}:duration=longest,volume=${wavs.length}`, '-c:a', 'pcm_f32le', path.join(out, file)]); }
+        catch (e) { errors.push(`${file}: ${e.message}`); }
+      }
+      if (fs.existsSync(path.join(out, file))) { add(file, 'mix', 'Everyone'); const L = await measureLoudness(path.join(out, file)); if (L) L.float = true; t.levels['Mix - all voices'] = L; }
+    }
+    finish();
+    begin('Rough mix with intro and outro', 1);
+    for (const k of ['intro', 'outro']) if (assets[k]) { const f = k === 'intro' ? 'Intro.wav' : 'Outro.wav'; try { await fsp.copyFile(assets[k].path, path.join(out, f)); add(f, k, 'Everyone'); } catch {} }
+    const showFile = wavs.length > 1 ? 'Mix - all voices.wav' : wavs[0];
+    if (showFile) {
+      const parts = [assets.intro && assets.intro.path, path.join(out, showFile), assets.outro && assets.outro.path].filter(Boolean);
+      const file = `Rough mix${assets.intro || assets.outro ? ' (intro + show + outro)' : ''} -16 LUFS.wav`;
+      const fc = parts.map((_, i) => `[${i}:a]aformat=sample_rates=48000:channel_layouts=stereo[a${i}]`).join(';') + ';' +
+        parts.map((_, i) => `[a${i}]`).join('') + `concat=n=${parts.length}:v=0:a=1,loudnorm=I=-16:TP=-1:LRA=11,aresample=48000[out]`;
+      try {
+        await ff([...parts.flatMap(p => ['-i', p]), '-filter_complex', fc, '-map', '[out]', '-ar', '48000', '-c:a', 'pcm_s24le', path.join(out, file)], report, takeSecs + (assets.intro ? assets.intro.dur : 0) + (assets.outro ? assets.outro.dur : 0));
+        add(file, 'roughmix', 'Everyone');
+      } catch (e) { errors.push(`${file}: ${e.message.slice(0, 300)}`); }
+    }
+    finish();
+
+    // --- camera video: original file + an editor-friendly H.264 MP4 lined up to the take ---
+    for (let i = 0; i < videoSegs.length; i++) {
+      const s = videoSegs[i], v = s.video;
+      const ext = /mp4/.test(v.mime || '') ? 'mp4' : 'webm';
+      const camFile = path.join(dir, 'segs', s.id, 'camera.' + ext);
+      begin(`Video ${i + 1} of ${videoSegs.length} — joining`, 1);
+      await joinParts(path.join(dir, 'segs', s.id, 'video'), '', camFile);
+      finish();
+      if (!fs.existsSync(camFile)) { done += 7; continue; }
+      const orig = `${s._label} - camera original.${ext}`;
+      try { await fsp.link(camFile, path.join(out, orig)); } catch { await fsp.copyFile(camFile, path.join(out, orig)); }
+      add(orig, 'video-original', s._label);
+      let padS = Math.max(0, ((v.st || t.started) - t.started) / 1000);
+      const wav = path.join(out, `${s._person}.wav`);
+      begin(`Video ${i + 1} of ${videoSegs.length} — lining up with audio`, 1);
+      if (fs.existsSync(wav)) {
+        const exact = await alignVideo(path.join(out, orig), wav, padS).catch(() => null);
+        if (exact !== null) padS = exact;
+        console.log(`[rec] ${s._label} video offset ${padS.toFixed(3)}s (${exact !== null ? 'matched to audio' : 'from clock'})`);
+      }
+      finish();
+      begin(`Video ${i + 1} of ${videoSegs.length} — converting to MP4`, 6);
+      const file = `${s._label} - video.mp4`;
+      try {
+        await ff(['-fflags', '+genpts', '-i', path.join(out, orig),
+          '-vf', `fps=30,${padS > 0.01 ? `tpad=start_duration=${padS.toFixed(3)}:color=black,` : ''}scale=trunc(iw/2)*2:trunc(ih/2)*2,format=yuv420p`,
+          '-af', padS > 0.01 ? `adelay=${Math.round(padS * 1000)}:all=1` : 'anull',
+          '-c:v', 'libx264', '-preset', VIDEO_PRESET, '-crf', '20', '-c:a', 'aac', '-b:a', '160k', '-movflags', '+faststart', path.join(out, file)], report, takeSecs);
+        add(file, 'video', s._label);
+      } catch (e) { errors.push(`${file}: ${e.message.slice(0, 300)}`); }
+      finish();
+    }
+
+    // --- screen shares: one MP4 per share, lined up to the take ---
+    for (let i = 0; i < shares.length; i++) {
+      const { s, r, sc } = shares[i];
+      const ext = /mp4/.test(sc.mime || '') ? 'mp4' : 'webm';
+      const src = path.join(dir, 'segs', s.id, `screen-${r}.${ext}`);
+      begin(`Screen share ${i + 1} of ${shares.length}`, 4);
+      await joinParts(path.join(dir, 'segs', s.id, 'screen'), String(r).padStart(3, '0') + '-', src);
+      if (fs.existsSync(src)) {
+        const n = shares.filter((x, j) => j <= i && x.s._person === s._person).length;
+        const file = `${s._person} - screen share ${n}.mp4`;
+        const padS = Math.max(0, ((sc.st || t.started) - t.started) / 1000);
+        try {
+          await ff(['-fflags', '+genpts', '-i', src, '-an',
+            '-vf', `fps=30,${padS > 0.01 ? `tpad=start_duration=${padS.toFixed(3)}:color=black,` : ''}scale=trunc(iw/2)*2:trunc(ih/2)*2,format=yuv420p`,
+            '-c:v', 'libx264', '-preset', VIDEO_PRESET, '-crf', '20', '-movflags', '+faststart', path.join(out, file)], report, takeSecs);
+          add(file, 'screen', s._person);
+        } catch (e) {
+          errors.push(`${file}: ${e.message.slice(0, 300)}`);
+          const o = `${s._person} - screen share ${n} original.${ext}`;
+          try { await fsp.link(src, path.join(out, o)); add(o, 'screen', s._person); } catch {}
+        }
+      }
+      finish();
+    }
+
+    // --- finish the transcript (most of it was done live while recording) ---
+    if (transcriber.enabled()) {
+      begin('Finishing the transcript', 4);
+      try { await transcriber.finishTake(t, report); } catch (e) { errors.push('Transcript: ' + e.message); }
+      finish();
     }
   }
 
-  // --- markers, chat log, and a session file for Audition / Premiere / Resolve ---
-  const markers = (t.markers || []).slice().sort((a, b) => a.at - b.at);
-  if (markers.length) {
-    await fsp.writeFile(path.join(out, 'Markers.txt'), markers.map((m, i) => `${hms(m.at)}  ${m.label || 'Marker ' + (i + 1)}${m.by ? '  (' + m.by + ')' : ''}`).join('\r\n') + '\r\n');
-    add('Markers.txt', 'markers', 'Everyone');
-    await fsp.writeFile(path.join(out, 'Markers (Audition).csv'), 'Name\tStart\tDuration\tTime Format\tType\tDescription\r\n' +
-      markers.map((m, i) => `${(m.label || 'Marker ' + (i + 1)).replace(/\t/g, ' ')}\t${auditionTime(m.at)}\t0:00.000\tdecimal\tCue\t`).join('\r\n') + '\r\n');
-    add('Markers (Audition).csv', 'markers', 'Everyone');
-  }
-  if ((t.chat || []).length) {
-    await fsp.writeFile(path.join(out, 'Chat.txt'), t.chat.map(c => `[${hms(c.at)}] ${c.from}: ${c.text}`).join('\r\n') + '\r\n');
-    add('Chat.txt', 'chat', 'Everyone');
-  }
-  try {
-    set('Making the session file');
-    const xml = await sessionXml(t, room, out);
-    if (xml) { await fsp.writeFile(path.join(out, 'Session - open in Audition or Premiere.xml'), xml); add('Session - open in Audition or Premiere.xml', 'session', 'Everyone'); }
-  } catch (e) { errors.push('Session file: ' + e.message); }
+  // --- documents: transcript, chapters, markers, level report, chat, session files ---
+  begin('Making the transcript, chapters and session files', 1);
+  try { await buildDocs(t, room, out, add, assets); } catch (e) { errors.push('Documents: ' + e.message); console.error(e); }
+  finish();
 
   t.status = errors.length && !t.outputs.length ? 'error' : 'ready';
   t.error = errors.join('\n');
-  t.progress = '';
-  saveTake(t, true);
-  console.log(`[rec] take ${t.n} in ${roomId} built: ${t.outputs.length} files${errors.length ? ', errors: ' + errors.length : ''}`);
-  if (t.outputs.length) {
-    set('Backing up'); await backupTake(room, t, out); t.progress = ''; saveTake(t, true);
+  t.progress = ''; t.pct = 100;
+  saveTake(t, true); announce(roomId, t);
+  console.log(`[rec] take ${t.n} in ${roomId} ${docsOnly ? 'documents updated' : 'built'}: ${t.outputs.length} files${errors.length ? ', errors: ' + errors.length : ''}`);
+  if (t.outputs.length && !docsOnly) {
+    t.progress = 'Backing up'; saveTake(t, true); announce(roomId, t);
+    await backupTake(room, t, out);
+    if (settings.autoCompact && t.backup && t.backup.ok) await compactTake(roomId, t, 'rebuild-data').catch(() => {});
+    t.progress = ''; saveTake(t, true); announce(roomId, t);
     await notifyReady(room, t).catch(e => console.warn('[mail]', e.message));
   }
 }
 
-// FCP7-style XML: Audition (File > Open), Premiere and Resolve all import it as a multitrack session
-async function sessionXml(t, room, out) {
-  const fps = 30, fr = s => Math.max(1, Math.round(s * fps));
-  const rate = `<rate><timebase>${fps}</timebase><ntsc>FALSE</ntsc></rate>`;
-  const url = f => 'file://localhost/' + encodeURIComponent(f);
-  const audios = t.outputs.filter(o => o.kind === 'audio');
-  const videos = t.outputs.filter(o => o.kind === 'video' || (o.kind === 'screen' && o.file.endsWith('.mp4')));
-  if (!audios.length && !videos.length) return null;
-  let max = 0, n = 0;
-  const info = new Map();
-  for (const o of [...videos, ...audios]) {
-    const d = parseFloat(await probe(path.join(out, o.file), 'format=duration')) || 0;
-    const wh = o.kind === 'audio' ? null : (await probe(path.join(out, o.file), 'stream=width,height', 'v:0')).split(',').map(Number);
-    info.set(o.file, { d, wh: wh && wh[0] ? wh : [1280, 720] });
-    max = Math.max(max, d);
+async function buildDocs(t, room, out, add, assets) {
+  const title = takeLabel(room, t);
+  const introLen = assets.intro ? assets.intro.dur : 0;
+  const markers = (t.markers || []).slice().sort((a, b) => a.at - b.at).map((m, i) => ({ ...m, label: m.label || `Marker ${i + 1}` }));
+  const write = async (file, text, kind, person = 'Everyone') => { if (text) { await fsp.writeFile(path.join(out, file), text); add(file, kind, person); } };
+  // markers (times in the take) + Audition markers lined up with the session (after the intro)
+  if (markers.length) {
+    await write('Markers.txt', markers.map(m => `${post.hms(m.at / 1000)}  ${m.label}${m.by ? '  (' + m.by + ')' : ''}`).join('\r\n') + '\r\n', 'markers');
+    await write('Markers (Audition).csv', post.auditionMarkersCsv(markers.map(m => ({ ...m, at: introLen + m.at / 1000 }))), 'markers');
+    const ch = post.chapters(t, introLen);
+    if (ch) { await write('Chapters.json', ch.json, 'chapters'); await write('Chapters (YouTube).txt', ch.youtube, 'chapters'); }
   }
-  const clip = (o, media, extra = '') => {
-    const { d } = info.get(o.file); const f = fr(d); n++;
-    return `<clipitem id="clip-${n}"><name>${xmlEsc(o.file)}</name><enabled>TRUE</enabled><duration>${f}</duration>${rate}<start>0</start><end>${f}</end><in>0</in><out>${f}</out>` +
-      `<file id="file-${n}"><name>${xmlEsc(o.file)}</name><pathurl>${xmlEsc(url(o.file))}</pathurl>${rate}<duration>${f}</duration><media>${media}</media></file>${extra}</clipitem>`;
-  };
-  const aChars = '<samplecharacteristics><depth>24</depth><samplerate>48000</samplerate></samplecharacteristics>';
-  const vtracks = videos.map(o => { const [w, h] = info.get(o.file).wh; return `<track>${clip(o, `<video><samplecharacteristics>${rate}<width>${w}</width><height>${h}</height><pixelaspectratio>square</pixelaspectratio></samplecharacteristics></video>`)}</track>`; }).join('\n');
-  const atracks = audios.map(o => `<track>${clip(o, `<audio>${aChars}<channelcount>1</channelcount></audio>`, '<sourcetrack><mediatype>audio</mediatype><trackindex>1</trackindex></sourcetrack>')}</track>`).join('\n');
-  const marks = (t.markers || []).map((m, i) => `<marker><name>${xmlEsc(m.label || 'Marker ' + (i + 1))}</name><comment></comment><in>${fr(m.at / 1000)}</in><out>-1</out></marker>`).join('\n');
-  return `<?xml version="1.0" encoding="UTF-8"?>\n<!DOCTYPE xmeml>\n<xmeml version="5">\n<sequence id="sequence-1"><name>${xmlEsc(`${room.name} - Take ${t.n}`)}</name><duration>${fr(max)}</duration>${rate}\n` +
-    `<media>\n<video><format><samplecharacteristics>${rate}<width>1280</width><height>720</height><pixelaspectratio>square</pixelaspectratio></samplecharacteristics></format>\n${vtracks}\n</video>\n` +
-    `<audio><numOutputChannels>2</numOutputChannels><format>${aChars}</format>\n${atracks}\n</audio>\n</media>\n${marks}\n</sequence>\n</xmeml>\n`;
+  if ((t.chat || []).length) await write('Chat.txt', t.chat.map(c => `[${post.hms(c.at / 1000)}] ${c.from}: ${c.text}`).join('\r\n') + '\r\n', 'chat');
+  await write('Transcript.txt', post.transcriptTxt(t, title, introLen), 'transcript');
+  await write('Transcript.srt', post.transcriptSrt(t), 'transcript');
+  await write('Transcript.vtt', post.transcriptVtt(t), 'transcript');
+  await write('Level report.txt', post.levelReport(t, title), 'report');
+  // session files: intro, everyone (untouched recordings), outro, video — all lined up
+  const dur = async f => parseFloat(await probe(path.join(out, f), 'format=duration')) || 0;
+  const people = t.outputs.filter(o => o.kind === 'audio');
+  const audio = [];
+  let show = 0;
+  for (const o of people) { const d = await dur(o.file); show = Math.max(show, d); audio.push({ kind: 'audio', name: o.person, file: o.file, start: introLen, dur: d, channels: 1 }); }
+  const tracks = [];
+  if (assets.intro) tracks.push({ kind: 'audio', name: 'Intro', file: 'Intro.wav', start: 0, dur: assets.intro.dur, channels: 2 });
+  tracks.push(...audio);
+  if (assets.outro) tracks.push({ kind: 'audio', name: 'Outro', file: 'Outro.wav', start: introLen + show, dur: assets.outro.dur, channels: 2 });
+  if (!audio.length) return;
+  const sessMarkers = markers.map(m => ({ label: m.label, at: introLen + m.at / 1000 }));
+  await write(`${title} (Audition).sesx`, post.sesx(title, tracks, sessMarkers), 'session');
+  const videos = [];
+  for (const o of t.outputs.filter(o => o.kind === 'video' || (o.kind === 'screen' && o.file.endsWith('.mp4')))) {
+    const wh = (await probe(path.join(out, o.file), 'stream=width,height', 'v:0')).split(',').map(Number);
+    videos.push({ kind: 'video', file: o.file, start: introLen, dur: await dur(o.file), w: wh[0] || 1280, h: wh[1] || 720 });
+  }
+  await write(`${title} (Premiere, Resolve, Audition).xml`, post.fcpXml(title, [...videos, ...tracks], sessMarkers), 'session');
+}
+
+// free up disk space on a finished take
+async function compactTake(roomId, t, what) {
+  const dir = takeDir(roomId, t.id);
+  let freed = 0;
+  const rm = async f => { try { const st = await fsp.stat(f); await fsp.rm(f, { force: true }); if (st.nlink <= 1) freed += st.size; } catch {} };
+  if (what === 'camera-originals') {
+    for (const o of t.outputs.filter(o => o.kind === 'video-original')) await rm(path.join(dir, 'out', o.file));
+    t.outputs = t.outputs.filter(o => o.kind !== 'video-original');
+    for (const s of Object.values(t.segs)) for (const f of await fsp.readdir(path.join(dir, 'segs', s.id)).catch(() => [])) if (/^camera\./.test(f)) await rm(path.join(dir, 'segs', s.id, f));
+  } else {
+    for (const s of Object.values(t.segs)) {
+      const sd = path.join(dir, 'segs', s.id);
+      for (const f of await fsp.readdir(sd).catch(() => [])) if (/^(audio\.pcm|camera\.|screen-)/.test(f)) await rm(path.join(sd, f));
+      await fsp.rm(path.join(sd, 'video'), { recursive: true, force: true }); await fsp.rm(path.join(sd, 'screen'), { recursive: true, force: true });
+    }
+    t.compacted = true;
+  }
+  saveTake(t, true);
+  return freed;
 }
 
 // copy finished files to a second disk (e.g. a USB drive) — refuses to "back up" onto the same disk
@@ -572,7 +708,7 @@ async function notifyReady(room, t) {
     `Who: ${people}`, `Length: ${hms((t.stopped || t.started) - t.started)}`, `Files: ${t.outputs.length} (${(size / 1073741824).toFixed(2)} GB)`,
     (t.markers || []).length ? `Markers: ${t.markers.length}` : '', t.backup ? (t.backup.ok ? 'Backup: copied ✓' : `Backup: FAILED — ${t.backup.error}`) : '',
     t.error ? `\nSome files had problems:\n${t.error}` : '', '', link ? `Download: ${link}` : ''].filter(l => l !== null).join('\n');
-  await tr.sendMail({ from: settings.smtp.from || settings.smtp.user, to: to.join(', '), subject: t.notified ? `🔄 ${room.name} — Take ${t.n} updated (late uploads arrived)` : `✅ ${room.name} — Take ${t.n} is ready`, text: lines });
+  await tr.sendMail({ from: settings.smtp.from || settings.smtp.user, to: to.join(', '), subject: t.notified ? `🔄 ${takeLabel(room, t)} updated (late uploads arrived)` : `✅ ${takeLabel(room, t)} is ready`, text: lines });
   t.notified = true; saveTake(t, true);
   console.log(`[mail] sent take ${t.n} ready to ${to.join(', ')}`);
 }
@@ -642,7 +778,8 @@ app.post('/api/settings/password', needAdmin, express.json(), (req, res) => {
 });
 app.get('/api/settings', needAdmin, async (req, res) => {
   res.json({ smtp: { ...settings.smtp, pass: settings.smtp.pass ? MASK : '' }, turn: { keyId: settings.turn.keyId, token: settings.turn.token ? MASK : '' },
-    backupDir: settings.backupDir, publicUrl: settings.publicUrl, backup: await backupStatus(), emailAvailable: !!nodemailer, turnError: cfIce.error, passwordChanged: !!settings.adminHash });
+    backupDir: settings.backupDir, publicUrl: settings.publicUrl, backup: await backupStatus(), emailAvailable: !!nodemailer, turnError: cfIce.error, passwordChanged: !!settings.adminHash,
+    transcribe: { ...settings.transcribe, installed: transcriber.available(), models: transcriber.installedModels() }, autoCompact: settings.autoCompact });
 });
 app.post('/api/settings', needAdmin, express.json(), async (req, res) => {
   const b = req.body || {};
@@ -650,6 +787,8 @@ app.post('/api/settings', needAdmin, express.json(), async (req, res) => {
   if (b.turn) { if ('keyId' in b.turn) settings.turn.keyId = cleanText(b.turn.keyId, 200); if ('token' in b.turn && b.turn.token !== MASK) settings.turn.token = cleanText(b.turn.token, 400); cfIce = { at: 0, list: null, error: '' }; }
   if ('backupDir' in b) settings.backupDir = cleanText(b.backupDir, 300);
   if ('publicUrl' in b) settings.publicUrl = cleanText(b.publicUrl, 200).replace(/\/+$/, '');
+  if (b.transcribe) { settings.transcribe.enabled = !!b.transcribe.enabled; if (/^[a-z0-9.-]{2,40}$/.test(b.transcribe.model || '')) settings.transcribe.model = b.transcribe.model; if (/^[a-z]{2}$|^auto$/.test(b.transcribe.language || '')) settings.transcribe.language = b.transcribe.language; }
+  if ('autoCompact' in b) settings.autoCompact = !!b.autoCompact;
   if (settings.backupDir) { try { fs.mkdirSync(settings.backupDir, { recursive: true }); } catch (e) { return res.status(400).json({ error: `Can't use that backup folder: ${e.message}` }); } }
   saveSettings();
   res.json({ ok: true, backup: await backupStatus() });
@@ -669,11 +808,13 @@ app.post('/api/settings/test-turn', needAdmin, async (req, res) => {
 function takeSummary(t) {
   return { id: t.id, n: t.n, started: t.started, stopped: t.stopped, status: t.status, progress: t.progress, error: t.error,
     people: [...new Set(Object.values(t.segs).map(s => s.name))], outputs: t.outputs || [], markers: t.markers || [], backup: t.backup || null,
+    pct: t.pct || 0, levels: t.levels || {}, episode: t.episode || null, compacted: !!t.compacted,
+    transcript: transcriber.enabled() ? transcriber.progress(t) : null,
     totalSize: (t.outputs || []).reduce((a, o) => a + o.size, 0) };
 }
 function roomSummary(r) {
   const lr = live.get(r.id);
-  return { id: r.id, name: r.name, created: r.created, hostKey: r.hostKey, waitingRoom: r.waitingRoom !== false, notifyEmail: r.notifyEmail || '',
+  return { id: r.id, name: r.name, created: r.created, hostKey: r.hostKey, waitingRoom: r.waitingRoom !== false, notifyEmail: r.notifyEmail || '', assets: r.assets || {}, lastEpisode: r.lastEpisode || 0,
     online: lr ? [...lr.peers.values()].map(p => p.name) : [], recording: !!(lr && lr.take), takes: listTakes(r.id).map(takeSummary) };
 }
 
@@ -716,7 +857,7 @@ app.post('/api/rooms/:id/takes/:take/rebuild', (req, res) => {
   const t = loadTake(r.id, req.params.take);
   if (!t) return res.status(404).json({ error: 'Not found' });
   if (t.status === 'recording') return res.status(409).json({ error: 'Still recording' });
-  queueProcess(r.id, t.id);
+  queueProcess(r.id, t.id, { docsOnly: !!t.compacted });
   res.json({ ok: true });
 });
 app.delete('/api/rooms/:id/takes/:take', async (req, res) => {
@@ -730,6 +871,51 @@ app.delete('/api/rooms/:id/takes/:take', async (req, res) => {
   res.json({ ok: true });
 });
 
+// intro / outro audio for a show (converted to 48 kHz 24-bit stereo WAV)
+app.post('/api/rooms/:id/asset/:kind', express.raw({ type: () => true, limit: '500mb' }), async (req, res) => {
+  const r = loadRoom(req.params.id);
+  if (!canManage(req, r)) return res.status(403).json({ error: 'Not allowed' });
+  const kind = req.params.kind; if (!['intro', 'outro'].includes(kind) || !Buffer.isBuffer(req.body) || !req.body.length) return res.status(400).json({ error: 'No file' });
+  const adir = path.join(roomDir(r.id), 'assets'); await fsp.mkdir(adir, { recursive: true });
+  const tmp = path.join(adir, kind + '.upload'), dest = path.join(adir, kind + '.wav');
+  try {
+    await fsp.writeFile(tmp, req.body);
+    await ff(['-i', tmp, '-vn', '-ar', '48000', '-ac', '2', '-c:a', 'pcm_s24le', dest]);
+    const dur = parseFloat(await probe(dest, 'format=duration')) || 0;
+    r.assets = r.assets || {}; r.assets[kind] = { name: cleanText(decodeURIComponent(req.headers['x-filename'] || kind), 120), dur };
+    saveRoom(r); res.json(roomSummary(r));
+  } catch (e) { res.status(400).json({ error: 'That file could not be read as audio.' }); }
+  finally { fsp.rm(tmp, { force: true }).catch(() => {}); }
+});
+app.delete('/api/rooms/:id/asset/:kind', async (req, res) => {
+  const r = loadRoom(req.params.id);
+  if (!canManage(req, r)) return res.status(403).json({ error: 'Not allowed' });
+  if (r.assets) delete r.assets[req.params.kind];
+  await fsp.rm(path.join(roomDir(r.id), 'assets', path.basename(req.params.kind) + '.wav'), { force: true });
+  saveRoom(r); res.json(roomSummary(r));
+});
+// rename / delete markers, then rebuild only the documents (fast)
+app.post('/api/rooms/:id/takes/:take/markers', express.json(), (req, res) => {
+  const r = loadRoom(req.params.id);
+  if (!canManage(req, r)) return res.status(403).json({ error: 'Not allowed' });
+  const t = loadTake(r.id, req.params.take);
+  if (!t) return res.status(404).json({ error: 'Not found' });
+  const list = Array.isArray((req.body || {}).markers) ? req.body.markers : [];
+  t.markers = list.filter(m => Number.isFinite(+m.at)).map(m => ({ at: +m.at, label: cleanText(m.label, 80) || 'Marker', by: cleanText(m.by, 40) })).sort((a, b) => a.at - b.at);
+  saveTake(t, true);
+  if (t.status !== 'recording') queueProcess(r.id, t.id, { docsOnly: true });
+  res.json({ ok: true });
+});
+app.post('/api/rooms/:id/takes/:take/compact', express.json(), async (req, res) => {
+  const r = loadRoom(req.params.id);
+  if (!canManage(req, r)) return res.status(403).json({ error: 'Not allowed' });
+  const t = loadTake(r.id, req.params.take);
+  if (!t || t.status !== 'ready') return res.status(409).json({ error: 'Only finished takes can be tidied up' });
+  const what = (req.body || {}).what === 'camera-originals' ? 'camera-originals' : 'rebuild-data';
+  const freed = await compactTake(r.id, t, what);
+  res.json({ ok: true, freed });
+});
+
 // downloads
 app.get('/dl/:room/:take/:file', (req, res) => {
   const r = loadRoom(req.params.room);
@@ -737,14 +923,14 @@ app.get('/dl/:room/:take/:file', (req, res) => {
   const t = loadTake(r.id, req.params.take);
   const name = path.basename(req.params.file);
   if (!t || !(t.outputs || []).some(o => o.file === name)) return res.status(404).send('Not found');
-  res.download(path.join(takeDir(r.id, t.id), 'out', name), `${fileSafe(r.name)} - Take ${t.n} - ${name}`);
+  res.download(path.join(takeDir(r.id, t.id), 'out', name), name.startsWith(takeLabel(r, t)) ? name : `${takeLabel(r, t)} - ${name}`);
 });
 app.get('/zip/:room/:take', (req, res) => {
   const r = loadRoom(req.params.room);
   if (!canManage(req, r)) return res.status(403).send('Not allowed');
   const t = loadTake(r.id, req.params.take);
   if (!t || !t.outputs.length) return res.status(404).send('Nothing to download yet');
-  const base = `${fileSafe(r.name)} - Take ${t.n}`;
+  const base = takeLabel(r, t);
   res.attachment(base + '.zip');
   const z = archiver('zip', { store: true });
   z.on('error', e => { console.error(e); res.destroy(); });
@@ -824,7 +1010,7 @@ wss.on('connection', ws => {
   async function doJoin(room, info) {
     // same browser reconnecting: drop its old connection
     for (const p of lr.peers.values()) if (p.clientId === info.clientId) { lr.peers.delete(p.id); broadcast(lr, { t: 'peer-left', id: p.id }); try { p.ws.close(); } catch {} }
-    if (lr.peers.size >= MAX_PEOPLE) { send(ws, { t: 'error', code: 'full', msg: `This studio is full (max ${MAX_PEOPLE} people).` }); return; }
+    if (!info.control && [...lr.peers.values()].filter(p => !p.control).length >= MAX_PEOPLE) { send(ws, { t: 'error', code: 'full', msg: `This studio is full (max ${MAX_PEOPLE} people).` }); return; }
     peer = { id: rid(8), ws, ...info, state: {}, screenId: null };
     lr.peers.set(peer.id, peer);
     admit(roomId, lr, info.clientId);
@@ -834,17 +1020,18 @@ wss.on('connection', ws => {
     const t = lr.take ? loadTake(roomId, lr.take) : null;
     send(ws, { t: 'welcome', id: peer.id, isHost: peer.isHost, roomName: room.name, studio: STUDIO_NAME, ice, maxPeople: MAX_PEOPLE, version: VERSION,
       peers: [...lr.peers.values()].filter(p => p !== peer).map(peerInfo),
-      recording: t ? { take: t.id, started: t.started, n: t.n, markers: (t.markers || []).length } : null,
+      recording: t ? { take: t.id, started: t.started, n: t.n, markers: (t.markers || []).length } : null, nextEpisode: (room.lastEpisode || 0) + 1,
       roomToneSeconds: ROOM_TONE_SECONDS, roomTone: lr.roomTone && lr.roomTone.end > Date.now() ? lr.roomTone : null,
       chat: lr.chat.slice(-100), waiting: peer.isHost ? [...lr.waiting.values()].map(w => ({ id: w.id, name: w.name })) : [],
       disk: peer.isHost ? await diskInfo() : null, gbPerPersonHour: GB_PER_PERSON_HOUR, minFreeGB: MIN_FREE_GB });
-    if (t) {
+    if (t && !peer.control) {
       const existing = info.recSeg && t.segs[info.recSeg] && t.segs[info.recSeg].clientId === info.clientId ? info.recSeg : null;
       // a fresh page for the same person: their earlier part can't send any more, so stop waiting on it
       if (!existing) for (const sg of Object.values(t.segs)) if (sg.clientId === info.clientId && !sg.done) sg.done = true;
       peer.seg = existing || newSeg(t, peer);
       if (!existing) send(ws, startMsg(t, peer.seg));
     }
+    if (peer.isHost) { const last = listTakes(roomId)[0]; if (last && ['waiting', 'queued', 'processing'].includes(last.status)) send(ws, { t: 'build', take: last.id, n: last.n, status: last.status, pct: last.pct || 0, step: last.progress }); }
     console.log(`[room] ${peer.name}${peer.isHost ? ' (host)' : ''} joined "${room.name}" (${lr.peers.size} in room)`);
   }
 
@@ -856,6 +1043,7 @@ wss.on('connection', ws => {
       if (!room) return send(ws, { t: 'error', code: 'noroom', msg: 'This studio link is not valid.' });
       roomId = room.id; lr = liveRoom(roomId);
       const info = { clientId: validId(m.clientId) ? m.clientId : rid(12), name: cleanName(m.name), isHost: !!hostKeyOk(room, m.key), camId: validStreamId(m.camId), recSeg: m.recSeg };
+      info.control = !!(m.control && info.isHost);
       // people already in the current take (e.g. after a server restart) never get stuck in the waiting room
       const curTake = lr.take && loadTake(roomId, lr.take);
       if (curTake && Object.values(curTake.segs).some(sg => sg.clientId === info.clientId)) admit(roomId, lr, info.clientId);
@@ -873,6 +1061,7 @@ wss.on('connection', ws => {
       case 'signal': { const to = lr.peers.get(m.to); if (to) send(to.ws, { t: 'signal', from: peer.id, data: m.data }); return; }
       case 'state': peer.state = m.state || {}; broadcast(lr, { t: 'peer-state', id: peer.id, state: peer.state }, peer.id); return;
       case 'screen': peer.screenId = m.on ? validStreamId(m.streamId) : null; broadcast(lr, { t: 'screen', id: peer.id, on: !!m.on, streamId: peer.screenId }, peer.id); return;
+      case 'meter': if (m.m && typeof m.m === 'object') toHosts(lr, { t: 'meter', id: peer.id, m: m.m }); return;
       case 'chat': {
         const text = cleanText(m.text, 500); if (!text) return;
         const msg = { t: 'chat', id: rid(6), from: peer.name, pid: peer.id, text, ts: Date.now() };
@@ -889,7 +1078,7 @@ wss.on('connection', ws => {
         if (m.on && !lr.take) {
           const d = await diskInfo();
           if (d && d.free < MIN_FREE_GB * 1073741824) return send(ws, { t: 'notice', level: 'error', text: `Can't start: the studio server only has ${(d.free / 1073741824).toFixed(1)} GB free. Delete old takes first.` });
-          startRecording(roomId, lr, !!m.roomTone);
+          startRecording(roomId, lr, !!m.roomTone, m.episode);
         } else if (!m.on && lr.take) stopRecording(roomId, lr);
         return;
       case 'roomtone': if (lr.take && !(lr.roomTone && lr.roomTone.end > Date.now())) { const t = loadTake(roomId, lr.take); if (t) beginRoomTone(t, lr); } return;
@@ -929,6 +1118,8 @@ function scheduleEmptyStop(roomId, lr, minutes) {
   setTimeout(() => { if (lr.peers.size === 0 && lr.take === take) { console.log('[rec] nobody came back — stopping take'); stopRecording(roomId, lr); } }, minutes * 60 * 1000);
 }
 setInterval(() => { for (const ws of wss.clients) { if (!ws.isAlive) { ws.terminate(); continue; } ws.isAlive = false; try { ws.ping(); } catch {} } }, 20000);
+// live transcription: every 20 s, transcribe new audio from takes that are recording
+setInterval(() => { const takes = []; for (const [id, lr] of live) if (lr.take) { const t = loadTake(id, lr.take); if (t) takes.push(t); } transcriber.tickLive(takes); }, 20000);
 // hosts get server health every 30 s
 setInterval(async () => { const d = await diskInfo(); for (const lr of live.values()) if (lr.peers.size) toHosts(lr, { t: 'server', disk: d }); }, 30000);
 

@@ -145,3 +145,31 @@ code { background: var(--panel2); padding: 1px 5px; border-radius: 5px; font-siz
 
 #toasts { position: fixed; left: 50%; bottom: 96px; transform: translateX(-50%); display: flex; flex-direction: column; gap: 6px; align-items: center; z-index: 99; pointer-events: none; max-width: calc(100% - 32px); }
 #toasts .toast { position: static; transform: none; }
+
+/* ---- v1.3: loudness meters, countdown, progress bars, control room ---- */
+.lmeter { position: relative; height: 10px; border-radius: 5px; background: var(--panel2); overflow: hidden; }
+.lmeter .lbar { position: absolute; left: 0; top: 0; bottom: 0; background: var(--muted); transition: width 120ms linear; }
+.lmeter .lbar.goodc { background: var(--ok); } .lmeter .lbar.warnc { background: var(--warn); } .lmeter .lbar.bad { background: var(--rec); }
+.lmeter .lmark { position: absolute; top: 0; bottom: 0; width: 2px; background: #fff8; }
+.lnums { font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.lnums b { color: var(--text); font-weight: 600; }
+.lnums b.goodc { color: var(--ok); } .lnums b.warnc { color: var(--warn); } .lnums b.bad { color: var(--rec); }
+#lobbyLoud b.goodc { color: var(--ok); } #lobbyLoud b.warnc { color: var(--warn); } #lobbyLoud b.bad { color: var(--rec); }
+.countdown { position: fixed; inset: 0; display: grid; place-items: center; z-index: 42; font-size: 140px; font-weight: 800; color: #fff; background: #0008; pointer-events: none; }
+.countdown.live { font-size: 64px; color: var(--rec); }
+.pbar { display: inline-block; vertical-align: middle; width: 140px; height: 8px; border-radius: 4px; background: var(--panel2); overflow: hidden; margin: 0 6px; }
+.pbar > span { display: block; height: 100%; background: var(--accent); transition: width 300ms; }
+.pbar.big { width: 100%; height: 10px; margin: 8px 0 0; }
+.assets { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+.asset { border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; }
+.upl { display: inline-block; margin: 0; cursor: pointer; }
+.btnlike { display: inline-block; padding: 6px 10px; border-radius: 8px; background: var(--panel2); font-weight: 600; font-size: 13px; color: var(--text); }
+.levels { width: 100%; border-collapse: collapse; margin-top: 10px; font-size: 13px; font-variant-numeric: tabular-nums; }
+.levels th { text-align: left; color: var(--muted); font-weight: 600; padding: 4px 6px; }
+.levels td { padding: 4px 6px; border-top: 1px solid var(--line); }
+.levels .goodc { color: var(--ok); } .levels .warnc { color: var(--warn); } .levels .bad { color: var(--rec); font-weight: 700; }
+.markers { margin-top: 8px; }
+.mklist { display: grid; gap: 6px; margin-top: 8px; }
+.mklist .mk { flex-wrap: nowrap; }
+.mono { font-family: ui-monospace, Menlo, monospace; }
+@media (max-width: 760px) { .assets { grid-template-columns: 1fr; } }

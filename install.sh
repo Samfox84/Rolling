@@ -93,8 +93,47 @@ chown -R "$RUN_USER":"$(id -gn "$RUN_USER")" "$APP_DIR"
 chmod 600 "$APP_DIR/.env"
 
 # ---------- 6. node packages ----------
-say "Installing Node packages (express, ws, archiver, nodemailer)"
+say "Installing Node packages"
 sudo -u "$RUN_USER" -H bash -c "cd '$APP_DIR' && npm install --omit=dev --no-audit --no-fund --loglevel=error"
+
+# ---------- 6b. transcription engine (whisper.cpp) — skip with NO_TRANSCRIBE=1 ----------
+WHISPER_DIR=/opt/rolling-whisper
+WHISPER_BIN="$WHISPER_DIR/whisper.cpp/build/bin/whisper-cli"
+ensure_env() { grep -q "^$1=" "$APP_DIR/.env" || echo "$1=$2" >> "$APP_DIR/.env"; }
+get_model() {
+  local m="$1" f="$WHISPER_DIR/models/ggml-$1.bin"
+  [ -s "$f" ] && return 0
+  echo "Downloading speech model '$m'…"
+  curl -fL --retry 3 --progress-bar -o "$f.part" "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-$m.bin" && mv "$f.part" "$f"
+}
+if [ "${NO_TRANSCRIBE:-0}" != 1 ]; then
+  say "Setting up transcripts (the first time this builds the engine — a few minutes)"
+  apt-get install -y -qq git cmake build-essential >/dev/null
+  mkdir -p "$WHISPER_DIR/models"
+  if [ ! -x "$WHISPER_BIN" ]; then
+    rm -rf "$WHISPER_DIR/whisper.cpp"
+    if git clone -q --depth 1 https://github.com/ggml-org/whisper.cpp "$WHISPER_DIR/whisper.cpp" \
+       && cmake -S "$WHISPER_DIR/whisper.cpp" -B "$WHISPER_DIR/whisper.cpp/build" -DCMAKE_BUILD_TYPE=Release -DWHISPER_BUILD_TESTS=OFF >/dev/null \
+       && cmake --build "$WHISPER_DIR/whisper.cpp/build" -j"$(nproc)" --config Release --target whisper-cli >/dev/null; then
+      echo "Transcription engine built."
+    else
+      warn "Couldn't build the transcription engine — everything else works, transcripts are just off."
+    fi
+  fi
+  get_model "${WHISPER_MODEL:-base.en}" || warn "Couldn't download the speech model — run: sudo rolling-get-model base.en"
+  chown -R "$RUN_USER":"$(id -gn "$RUN_USER")" "$WHISPER_DIR"
+  ensure_env WHISPER_BIN "$WHISPER_BIN"
+  ensure_env WHISPER_MODELS "$WHISPER_DIR/models"
+  # extra models later:  sudo rolling-get-model small.en
+  cat > /usr/local/bin/rolling-get-model <<GETEOF
+#!/bin/sh
+set -e
+m="\${1:-base.en}"; f="$WHISPER_DIR/models/ggml-\$m.bin"
+curl -fL --retry 3 --progress-bar -o "\$f.part" "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-\$m.bin" && mv "\$f.part" "\$f"
+chown "$RUN_USER" "\$f"; echo "Model \$m ready — pick it in Studio settings > Transcripts."
+GETEOF
+  chmod 755 /usr/local/bin/rolling-get-model
+fi
 
 # ---------- 7. run as a service (starts on boot, restarts if it crashes) ----------
 say "Setting up the $SERVICE service"

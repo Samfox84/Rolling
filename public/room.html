@@ -32,6 +32,7 @@
       </div>
       <div class="row spread" style="margin-top:12px"><span class="small-text muted">Microphone level — speak normally, it should move into the green</span></div>
       <div class="meter"><div id="lobbyMeter"></div></div>
+      <div class="row spread" style="margin-top:8px"><span class="small-text" id="lobbyLoud"></span><button class="small ghost" id="soundBtn" disabled>🎧 Sound check (5 s)</button></div>
       <div class="card nettest" id="netCard" style="margin-top:16px">
         <div class="row spread">
           <b>Connection check</b>
@@ -52,6 +53,10 @@
       <label class="check" style="margin-top:10px"><input type="checkbox" id="recordCam" checked> <span>Record my camera<br><span class="muted small-text">Untick on a slow connection — your voice is always recorded in full quality</span></span></label>
       <div style="margin-top:20px"><button class="primary" id="joinBtn" style="width:100%" disabled>Join studio</button></div>
       <p class="small-text muted" id="lobbyHint" style="margin-bottom:0">Turn on your camera &amp; mic first.</p>
+      <div class="hostonly-lobby hidden" style="margin-top:16px; border-top:1px solid var(--line); padding-top:14px">
+        <button class="ghost" id="controlBtn" style="width:100%">🎛 Run the show from the control room</button>
+        <p class="small-text muted" style="margin:6px 0 0">No camera or mic needed and you won't be recorded — just start/stop, room tone, markers, meters and letting guests in.</p>
+      </div>
     </div>
   </div>
   <div class="card" style="margin-top:20px">
@@ -141,6 +146,8 @@
     </div>
   </div>
 </div>
+
+<div id="countdown" class="countdown hidden"></div>
 
 <!-- waiting-room knocks (host) -->
 <div id="knocks" class="knocks"></div>

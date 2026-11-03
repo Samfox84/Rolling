@@ -15,6 +15,15 @@ Version: see [CHANGELOG.md](CHANGELOG.md). Licence: [GNU AGPL-3.0](LICENSE) — 
 - **Markers** — host presses **M** (or 📍) to mark edit points.
 - **Session file** — open in Audition (File › Open), Premiere or Resolve to get every file on its own track, with markers. Plus an Audition markers CSV.
 
+**Post-production**
+- **Broadcast loudness meters** (EBU R128) for everyone, live in the host's Health panel.
+- **Level report + normalised copies** of every person at −16 LUFS (podcast) and −23 LUFS (broadcast), alongside the untouched recordings.
+- **Intro & outro** per show, added to the session files and a −16 LUFS rough mix.
+- **Native Audition session (.sesx)** plus XML for Premiere / Resolve.
+- **Transcripts** (TXT, SRT, VTT, with speaker names) made on your own server with [whisper.cpp](https://github.com/ggml-org/whisper.cpp), transcribed live in the background while you record.
+- **Chapters** from markers, **episode numbers and titles** in file names, progress bars for everything.
+- **Control room** — the host can run the show without being on camera.
+
 **Fail-safes**
 - **Crash-proof** — every piece is saved to the guest's own disk *before* uploading, and only deleted once the server has it. If a browser crashes, the laptop dies or the tab is closed, reopening the link carries on uploading; the take rebuilds itself automatically.
 - **Server restart / power cut** mid-show — the take carries on when the server is back; browsers keep recording and catch up.
@@ -46,6 +55,7 @@ The installer adds ffmpeg and Node.js if needed, sets up a service that starts o
 | Node.js 18 or newer (installer adds 22) | the app |
 | ffmpeg + ffprobe 4.4 or newer (from apt) | builds the WAV / MP4 / session files |
 | npm packages: express, ws, archiver, nodemailer | installed automatically |
+| whisper.cpp + a speech model (~150 MB), git, cmake, build-essential | transcripts — built by the installer (skip with `NO_TRANSCRIBE=1`; more models: `sudo rolling-get-model small.en`) |
 | HTTPS on a domain | browsers only allow camera/mic over HTTPS |
 | Disk space | about 4 GB per person per hour of recording (lossless audio + camera original + MP4). Delete old takes from the Recordings page once downloaded. |
 
