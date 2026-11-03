@@ -1,0 +1,162 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Studio</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+
+<!-- uploads left over from an earlier visit (e.g. the tab crashed) -->
+<div id="recoverBar" class="banner hidden"></div>
+
+<!-- 1. Lobby: check camera + mic + connection before joining -->
+<div id="lobby" class="wrap">
+  <div class="topbar">
+    <div class="brand"><span class="dot"></span><span class="studio-name">Podcast Studio</span></div>
+    <span class="pill" id="roleBadge">Guest</span>
+  </div>
+  <h1 id="lobbyTitle">Get ready</h1>
+  <p class="muted" style="margin-top:0">Check you can see and hear yourself, then join.</p>
+  <div class="lobby">
+    <div>
+      <div class="preview">
+        <video id="preview" autoplay muted playsinline></video>
+        <div class="placeholder" id="previewPlaceholder">
+          <div>
+            <p>Your browser will ask to use your camera and microphone.</p>
+            <button class="primary" id="enableBtn">Turn on camera &amp; mic</button>
+          </div>
+        </div>
+      </div>
+      <div class="row spread" style="margin-top:12px"><span class="small-text muted">Microphone level — speak normally, it should move into the green</span></div>
+      <div class="meter"><div id="lobbyMeter"></div></div>
+      <div class="card nettest" id="netCard" style="margin-top:16px">
+        <div class="row spread">
+          <b>Connection check</b>
+          <button class="small ghost" id="netBtn" disabled>Test again</button>
+        </div>
+        <div id="netResult" class="small-text muted" style="margin-top:6px">Runs automatically once your camera &amp; mic are on.</div>
+      </div>
+    </div>
+    <div class="card">
+      <label for="nameInput" style="margin-top:0">Your name</label>
+      <input type="text" id="nameInput" maxlength="40" placeholder="e.g. Steve" autocomplete="name">
+      <label for="micSelect">Microphone</label>
+      <select id="micSelect" disabled><option>—</option></select>
+      <label for="camSelect">Camera</label>
+      <select id="camSelect" disabled><option>—</option></select>
+      <label>&nbsp;</label>
+      <label class="check"><input type="checkbox" id="headphones"> <span>I'm wearing headphones<br><span class="muted small-text">Turns off echo cancelling for the cleanest sound</span></span></label>
+      <label class="check" style="margin-top:10px"><input type="checkbox" id="recordCam" checked> <span>Record my camera<br><span class="muted small-text">Untick on a slow connection — your voice is always recorded in full quality</span></span></label>
+      <div style="margin-top:20px"><button class="primary" id="joinBtn" style="width:100%" disabled>Join studio</button></div>
+      <p class="small-text muted" id="lobbyHint" style="margin-bottom:0">Turn on your camera &amp; mic first.</p>
+    </div>
+  </div>
+  <div class="card" style="margin-top:20px">
+    <h2>Good to know</h2>
+    <ul class="steps">
+      <li>Use Chrome, Edge or Safari on a laptop or desktop. Plug in to power if you can.</li>
+      <li>Your voice is recorded on <b>your</b> computer at full quality and saved to your disk as you go — a bad connection or even a crash won't lose it.</li>
+      <li>Keep this tab open until it says <b>Saved</b> after recording stops. If it closes early, just open the same link again and it carries on uploading.</li>
+    </ul>
+  </div>
+</div>
+
+<!-- 2. Studio -->
+<div id="studio" class="studio hidden">
+  <header>
+    <div class="row" style="gap:14px; min-width:0">
+      <div class="brand" style="font-size:16px; min-width:0"><span class="dot"></span><span id="roomTitle" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">Studio</span></div>
+      <span class="recbadge" id="recBadge"><span class="blink"></span>REC <span id="recTime">00:00:00</span></span>
+    </div>
+    <div class="row">
+      <span class="uploadline" id="uploadLine"></span>
+      <button class="small ghost hostonly hidden" id="copyGuestBtn">Copy guest link</button>
+      <a class="hostonly hidden" id="recordingsLink" target="_blank"><button class="small ghost">Recordings ↗</button></a>
+    </div>
+  </header>
+  <div id="warnBar" class="warnbar hidden"></div>
+  <div class="stage">
+    <main class="grid" id="grid"></main>
+    <aside class="drawer hidden" id="drawer">
+      <div class="drawer-tabs">
+        <button class="tab" data-tab="chat">💬 Chat</button>
+        <button class="tab hostonly hidden" data-tab="health">🩺 Health</button>
+        <button class="small ghost" id="drawerClose" title="Close">✕</button>
+      </div>
+      <div class="drawer-body" id="tab-chat">
+        <div class="chatlog" id="chatLog"></div>
+        <form id="chatForm" class="row" style="gap:6px; flex-wrap:nowrap"><input type="text" id="chatInput" maxlength="500" placeholder="Message everyone…" autocomplete="off"><button class="primary small">Send</button></form>
+      </div>
+      <div class="drawer-body hidden" id="tab-health">
+        <div id="healthServer" class="small-text"></div>
+        <div id="healthRows"></div>
+        <div id="healthMarkers" class="small-text muted" style="margin-top:12px"></div>
+      </div>
+    </aside>
+  </div>
+  <div class="controls">
+    <button id="micBtn">🎙 Mic on</button>
+    <button id="camBtn">📷 Camera on</button>
+    <button id="screenBtn" class="hidden">🖥 Share screen</button>
+    <button class="primary recbtn hostonly hidden" id="recBtn">● Start recording</button>
+    <button class="ghost hostonly hidden" id="markerBtn" title="Drop a marker for editing (or press M)">📍 Marker</button>
+    <button class="ghost hostonly hidden" id="toneBtn" title="Everyone stays silent while a noise print is recorded">🤫 Room tone</button>
+    <button class="ghost" id="chatBtn">💬 Chat <span class="badge hidden" id="chatBadge"></span></button>
+    <button class="ghost hostonly hidden" id="healthBtn">🩺 Health <span class="badge hidden" id="healthBadge"></span></button>
+    <button class="ghost" id="leaveBtn">Leave</button>
+  </div>
+</div>
+
+<!-- 3. Message screen (waiting room / left / errors / finishing uploads) -->
+<div id="message" class="wrap hidden">
+  <div class="topbar"><div class="brand"><span class="dot"></span><span class="studio-name">Podcast Studio</span></div></div>
+  <div class="card">
+    <h1 id="msgTitle">You've left the studio</h1>
+    <p id="msgText" class="muted"></p>
+    <div class="row" style="margin-top:16px"><button class="primary hidden" id="rejoinBtn">Rejoin</button></div>
+  </div>
+</div>
+
+<!-- Room tone (noise print) overlay -->
+<div id="tone" class="tone hidden">
+  <div class="tonebox">
+    <div class="tone-emoji">🤫</div>
+    <h1 id="toneTitle">Quiet please</h1>
+    <div class="tone-count" id="toneCount">20</div>
+    <p id="toneText">Recording room tone. Please stay silent and still — don't type, move or touch your mic.</p>
+    <div id="toneHostTips" class="tone-tips hidden">
+      <b>Host tips</b>
+      <ul>
+        <li>Everyone stays where they'll sit for the show, mics on.</li>
+        <li>Fans, heaters and air-con stay as they will be for the show.</li>
+        <li>This becomes a separate "room tone" file for each person — use it as the noise print for noise reduction.</li>
+      </ul>
+    </div>
+    <div id="toneMuted" class="hidden" style="margin-top:14px">
+      <p style="color:var(--warn);font-weight:700">Your mic is muted — room tone needs it on.</p>
+      <button class="primary" id="toneUnmute">Unmute my mic</button>
+    </div>
+  </div>
+</div>
+
+<!-- waiting-room knocks (host) -->
+<div id="knocks" class="knocks"></div>
+
+<div id="modal" class="modal hidden">
+  <div class="card">
+    <h2 id="modalTitle"></h2>
+    <div id="modalText" class="muted" style="margin:10px 0 16px"></div>
+    <div class="row" style="justify-content:flex-end">
+      <button class="ghost" id="modalNo">Cancel</button>
+      <button class="ghost hidden" id="modalAlt">Alt</button>
+      <button class="primary" id="modalYes">OK</button>
+    </div>
+  </div>
+</div>
+
+<script src="/room.js"></script>
+</body>
+</html>

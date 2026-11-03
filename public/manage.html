@@ -1,0 +1,124 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Recordings</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<div class="wrap">
+  <div class="topbar">
+    <div class="brand"><span class="dot"></span><span class="studio-name">Podcast Studio</span></div>
+    <a href="/" class="small-text muted" id="adminLink">All rooms</a>
+  </div>
+  <div id="err" class="card hidden"><h1>Link not valid</h1><p class="muted">Ask the studio owner for a new host link.</p></div>
+  <div id="main" class="hidden">
+    <div class="row spread" style="margin-bottom:16px">
+      <div><h1 id="roomName">Recordings</h1><div class="muted small-text" id="roomSub"></div></div>
+      <a id="studioLink" target="_blank"><button class="primary">Open studio as host</button></a>
+    </div>
+    <div class="card" style="margin-bottom:18px">
+      <label style="margin-top:0">Guest link — send this to guests</label>
+      <div class="linkbox"><input type="text" readonly id="guestLink"><button class="small" id="copyGuest">Copy</button></div>
+      <details style="margin-top:14px">
+        <summary><b>Room settings</b></summary>
+        <label class="check" style="margin-top:12px"><input type="checkbox" id="waitingRoom"> <span>Waiting room<br><span class="muted small-text">Guests wait until the host lets them in. Once let in, they can reconnect without asking again.</span></span></label>
+        <label>Email me when a take is ready</label>
+        <div class="linkbox"><input type="text" id="notifyEmail" placeholder="you@example.com (separate several with commas)"><button class="small" id="saveRoom">Save</button></div>
+        <div class="small-text muted" id="emailNote" style="margin-top:6px"></div>
+      </details>
+    </div>
+    <div class="card">
+      <h2>Takes</h2>
+      <p class="muted small-text" style="margin-top:0">
+        <b>Audio</b> = each person's lossless 24-bit WAV, all lined up so you can drop them straight onto separate tracks.
+        <b>Room tone</b> = the quiet section for noise reduction.
+        <b>Video</b> = each person's camera as an MP4, lined up the same way.
+        <b>Session</b> = open in Audition (File › Open) or Premiere/Resolve (Import) to get every file on its own track with markers — if it asks where the files are, point it at the first one.
+      </p>
+      <div id="takes"></div>
+    </div>
+  </div>
+</div>
+<script>
+const $ = s => document.querySelector(s);
+const roomId = location.pathname.split('/').filter(Boolean)[1];
+const k = new URLSearchParams(location.search).get('k') || '';
+const q = k ? '?k=' + encodeURIComponent(k) : '';
+const esc = s => String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+const mb = b => b > 1073741824 ? (b / 1073741824).toFixed(2) + ' GB' : b > 1048576 ? (b / 1048576).toFixed(1) + ' MB' : Math.max(1, Math.round(b / 1024)) + ' KB';
+const dur = (a, b) => { const s = Math.round((b - a) / 1000); return `${Math.floor(s / 3600) ? Math.floor(s / 3600) + 'h ' : ''}${Math.floor(s % 3600 / 60)}m ${s % 60}s`; };
+const hms = ms => { const s = Math.floor(ms / 1000); return [s / 3600, (s % 3600) / 60, s % 60].map(x => String(Math.floor(x)).padStart(2, '0')).join(':'); };
+function toast(t) { const d = document.createElement('div'); d.className = 'toast'; d.textContent = t; document.body.appendChild(d); setTimeout(() => d.remove(), 2500); }
+const KIND = { audio: ['Audio', 'Lossless WAV'], roomtone: ['Room tone', 'Noise print WAV'], mix: ['Mix', 'All voices together (WAV)'], video: ['Video', 'MP4 (H.264)'],
+  'video-original': ['Video', 'Camera original'], screen: ['Screen share', 'MP4'], session: ['Session', 'Audition / Premiere / Resolve'], markers: ['Markers', ''], chat: ['Chat', 'Messages during the take'] };
+const ORDER = { audio: 0, roomtone: 1, video: 2, 'video-original': 3, screen: 4, session: 5, markers: 6, mix: 7, chat: 8 };
+const STATUS = { recording: ['rec', '● Recording'], waiting: ['warn', 'Waiting for uploads to finish'], queued: ['warn', 'In the queue'], processing: ['warn', 'Building files'], ready: ['ok', '✓ Ready'], error: ['rec', 'Problem'] };
+let lastJson = '', settingsLoaded = false;
+
+async function load() {
+  const res = await fetch(`/api/rooms/${roomId}${q}`);
+  if (!res.ok) { $('#err').classList.remove('hidden'); return; }
+  const r = await res.json();
+  if (!settingsLoaded) {
+    settingsLoaded = true;
+    $('#waitingRoom').checked = r.waitingRoom; $('#notifyEmail').value = r.notifyEmail;
+    $('#emailNote').textContent = r.emailReady ? '' : 'Email isn\'t set up on this studio yet (Studio settings on the main page), so nothing will be sent until it is.';
+  }
+  delete r.disk;
+  const json = JSON.stringify(r);
+  if (json === lastJson) return; lastJson = json;
+  $('#main').classList.remove('hidden');
+  $('#roomName').textContent = r.name; document.title = r.name + ' — Recordings';
+  $('#roomSub').textContent = r.recording ? '● Recording right now' : r.online.length ? `In the studio now: ${r.online.join(', ')}` : '';
+  $('#studioLink').href = `/r/${roomId}?k=${encodeURIComponent(r.hostKey)}`;
+  $('#guestLink').value = `${location.origin}/r/${roomId}`;
+  const box = $('#takes'); box.innerHTML = r.takes.length ? '' : '<p class="muted">No recordings yet. Open the studio, then press <b>Start recording</b>.</p>';
+  for (const t of r.takes) {
+    const [cls, label] = STATUS[t.status] || ['', t.status];
+    const el = document.createElement('div'); el.className = 'take';
+    const when = new Date(t.started).toLocaleString([], { weekday: 'short', day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' });
+    const outs = [...t.outputs].sort((a, b) => (a.person === 'Everyone') - (b.person === 'Everyone') || a.person.localeCompare(b.person) || ORDER[a.kind] - ORDER[b.kind]);
+    const backup = t.backup ? (t.backup.ok ? '<span class="pill ok">💾 Backed up</span>' : `<span class="pill warn" title="${esc(t.backup.error)}">💾 Backup failed</span>`) : '';
+    el.innerHTML = `
+      <div class="row spread">
+        <div><b>Take ${t.n}</b> <span class="muted small-text">· ${when}${t.stopped ? ' · ' + dur(t.started, t.stopped) : ''} · ${esc(t.people.join(', ') || 'nobody')}</span></div>
+        <div class="row"><span class="pill ${cls}">${label}${t.progress ? ' — ' + esc(t.progress) : ''}</span>${backup}
+          ${t.outputs.length ? `<a href="/zip/${roomId}/${t.id}${q}"><button class="small primary">⬇ Download everything (${mb(t.totalSize)})</button></a>` : ''}</div>
+      </div>
+      ${t.error ? `<p class="small-text" style="color:var(--rec);white-space:pre-wrap">${esc(t.error)}</p>` : ''}
+      ${t.backup && !t.backup.ok ? `<p class="small-text" style="color:var(--warn)">Backup: ${esc(t.backup.error)}</p>` : ''}
+      ${t.markers.length ? `<p class="small-text muted">📍 ${t.markers.map(m => `${hms(m.at)} ${esc(m.label)}`).join(' · ')}</p>` : ''}
+      ${outs.length ? `<table class="files">${outs.map(o => `<tr>
+          <td><b>${esc(o.person)}</b></td><td>${KIND[o.kind] ? KIND[o.kind][0] : o.kind} <span class="muted small-text">${KIND[o.kind] ? KIND[o.kind][1] || esc(o.file) : ''}</span></td>
+          <td class="muted small-text">${mb(o.size)}</td>
+          <td><a href="/dl/${roomId}/${t.id}/${encodeURIComponent(o.file)}${q}"><button class="small">⬇ Download</button></a></td></tr>`).join('')}</table>` : ''}
+      <div class="row" style="justify-content:flex-end; margin-top:8px">
+        ${['ready', 'error', 'waiting'].includes(t.status) ? `<button class="small ghost" data-rebuild="${t.id}">Rebuild files</button>` : ''}
+        ${!['recording', 'processing', 'queued'].includes(t.status) ? `<button class="small ghost" data-del="${t.id}" data-n="${t.n}">Delete take</button>` : ''}
+      </div>`;
+    box.appendChild(el);
+  }
+}
+async function saveRoom(body) {
+  const res = await fetch(`/api/rooms/${roomId}/settings${q}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+  toast(res.ok ? 'Saved ✓' : 'Could not save');
+}
+$('#waitingRoom').onchange = () => saveRoom({ waitingRoom: $('#waitingRoom').checked });
+document.addEventListener('click', async e => {
+  const b = e.target.closest('button'); if (!b) return;
+  if (b.id === 'saveRoom') saveRoom({ notifyEmail: $('#notifyEmail').value });
+  if (b.id === 'copyGuest') navigator.clipboard.writeText($('#guestLink').value).then(() => toast('Guest link copied'), () => $('#guestLink').select());
+  if (b.dataset.rebuild) { await fetch(`/api/rooms/${roomId}/takes/${b.dataset.rebuild}/rebuild${q}`, { method: 'POST' }); lastJson = ''; load(); }
+  if (b.dataset.del) {
+    if (!confirm(`Delete take ${b.dataset.n} and all its files? This can't be undone.`)) return;
+    const res = await fetch(`/api/rooms/${roomId}/takes/${b.dataset.del}${q}`, { method: 'DELETE' });
+    if (!res.ok) toast((await res.json()).error || 'Could not delete'); lastJson = ''; load();
+  }
+});
+fetch('/api/info').then(r => r.json()).then(i => { document.querySelectorAll('.studio-name').forEach(e => e.textContent = i.name); if (!i.admin) $('#adminLink').classList.add('hidden'); });
+load(); setInterval(load, 3000);
+</script>
+</body>
+</html>

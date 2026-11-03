@@ -1,0 +1,89 @@
+# Podcast Studio
+
+A self-hosted remote recording studio, a bit like Riverside.
+
+**Recording**
+- **Video call** for up to 5 people in the browser — guests just click a link, nothing to install.
+- **Lossless audio per person** — each browser records its own mic as 24-bit / 48 kHz WAV.
+- **Video per person** (720p) and **screen shares**, each recorded locally as its own file.
+- **Room tone** — a 20-second "Quiet please" countdown when recording starts; a separate noise-print WAV per person. Grab another any time with 🤫.
+- **Everything lined up** — all files start at the same moment; camera video is matched to the audio automatically.
+- **Markers** — host presses **M** (or 📍) to mark edit points.
+- **Session file** — open in Audition (File › Open), Premiere or Resolve to get every file on its own track, with markers. Plus an Audition markers CSV.
+
+**Fail-safes**
+- **Crash-proof** — every piece is saved to the guest's own disk *before* uploading, and only deleted once the server has it. If a browser crashes, the laptop dies or the tab is closed, reopening the link carries on uploading; the take rebuilds itself automatically.
+- **Server restart / power cut** mid-show — the take carries on when the server is back; browsers keep recording and catch up.
+- **Problem alerts** — silent mic, unplugged mic (auto-reconnects), distortion, audio glitches, upload falling behind, poor connection, low disk. Each person sees plain-English advice; the host gets a toast and the 🩺 **Health** panel.
+- **Connection check** in the lobby (upload, download, delay) with advice; camera recording quality is set to match the connection. Audio always uploads first.
+- **Disk check** before recording starts, with "hours left" in the Health panel.
+- **Automatic backup** of every finished take to a second drive.
+- **Email** when a take is ready (any SMTP server, e.g. Mailcow).
+
+**Comfort**
+- **Waiting room** — guests wait until the host lets them in.
+- **Text chat** during the show (saved with the take).
+- **Free relay** (Cloudflare TURN) so guests on locked-down networks can still connect.
+
+## Install (Ubuntu / Debian, incl. Raspberry Pi OS)
+
+```bash
+tar xzf podcast-studio-*.tar.gz
+cd podcast-studio
+sudo DOMAIN=podcast.yourdomain.com bash install.sh
+```
+
+The installer adds ffmpeg and Node.js if needed, sets up a service that starts on boot, and prints your **admin password** at the end.
+
+### What it needs
+| Thing | Why |
+|---|---|
+| Ubuntu 22.04+ / Debian 12+ (64-bit) | runs the server |
+| Node.js 18 or newer (installer adds 22) | the app |
+| ffmpeg + ffprobe 4.4 or newer (from apt) | builds the WAV / MP4 / session files |
+| npm packages: express, ws, archiver, nodemailer | installed automatically |
+| HTTPS on a domain | browsers only allow camera/mic over HTTPS |
+| Disk space | about 4 GB per person per hour of recording (lossless audio + camera original + MP4). Delete old takes from the Recordings page once downloaded. |
+
+### HTTPS
+The app listens on `127.0.0.1:8790` and needs something in front of it for HTTPS:
+
+- **Cloudflare Tunnel** (easiest, no port forwarding): pass `DOMAIN=...` to the installer. If your tunnel uses a local `config.yml` it's added automatically; if it's managed in the Cloudflare dashboard, add a Public Hostname → `HTTP` → `localhost:8790`.
+- **Caddy**: `podcast.yourdomain.com { reverse_proxy 127.0.0.1:8790 }`
+- **nginx**: proxy to `127.0.0.1:8790` with WebSocket upgrade headers for `/ws`, and `client_max_body_size 64m;`.
+
+## Using it
+1. Open your domain, log in with the admin password, and **Create room** (e.g. one per show).
+2. Copy the **Host link** for the presenter and the **Guest link** for guests.
+3. Host presses **Start recording** → choose room tone → everyone sees the countdown → talk.
+4. Press **Stop recording**. Everyone's tab shows "Saved ✓" when their upload has finished.
+5. Open **Recordings** — files appear a minute or two later (MP4 conversion takes longer on slower machines).
+
+Tips for guests: Chrome, Edge or Safari on a laptop/desktop; headphones give the cleanest sound (tick "I'm wearing headphones").
+
+## Settings
+Email, backup drive and relay are set on the dashboard under **Studio settings** (stored in `recordings/settings.json`). Waiting room and who gets emailed are per room, on its Recordings page.
+
+Everything else: edit `/opt/podcast-studio/.env`, then `sudo systemctl restart podcast-studio`.
+
+| Setting | Default | |
+|---|---|---|
+| `ADMIN_PASSWORD` | random | dashboard login |
+| `STUDIO_NAME` | Podcast Studio | shown on every page |
+| `PORT` | 8790 | |
+| `MAX_PEOPLE` | 5 | per room |
+| `ROOM_TONE_SECONDS` | 20 | |
+| `VIDEO_PRESET` | veryfast | x264 speed for MP4 copies |
+| `DATA_DIR` | /opt/podcast-studio/recordings | where takes are stored |
+| `BACKUP_DIR` | auto: /mnt/usb-drive/… if mounted | default backup folder |
+| `MIN_FREE_GB` | 2 | refuse to start recording below this |
+| `TURN_URLS`, `TURN_SECRET` | – | your own coturn relay instead of Cloudflare's (`use-auth-secret`) |
+
+Without a relay, a guest on a locked-down network (some offices/hotels) may not see/hear the others live — **their recording still uploads fine**, because uploads go over normal HTTPS. Add the free Cloudflare relay in Studio settings to fix the live call too.
+
+## Looking after it
+- Status: `systemctl status podcast-studio`
+- Live log: `journalctl -u podcast-studio -f`
+- Update: unpack the new version and run `sudo bash install.sh` again (settings and recordings are kept)
+- Back up: copy `/opt/podcast-studio/recordings`
+- Remove: `sudo systemctl disable --now podcast-studio && sudo rm -rf /opt/podcast-studio /etc/systemd/system/podcast-studio.service`
