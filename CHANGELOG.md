@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.3.3
+- **Fix: transcripts failing with "Error opening output … No such file or directory".** The system's /tmp clean-up removed the transcription work folder while the studio was running. Work files now live with the recordings, and the folder is re-made before every job
+- A transcript that hiccups once and then carries on no longer reports the old error
+
 ## 1.3.2
 - **Live level bars on every tile** — everyone sees a moving green/amber/red bar for every person (−60 to 0 dBFS) with a peak-hold line and a red CLIP light that stays on for 3 s
 - **Transcripts you can see:** the Recordings page says exactly where each take's transcript is at (live %, ready with line count, failed and why, or not made yet)

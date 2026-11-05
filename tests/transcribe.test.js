@@ -8,7 +8,7 @@ const path = require('path');
 const createTranscriber = require('../transcribe');
 const { FAKE_WHISPER, tmpDir, pcm24, talky } = require('./helpers');
 
-function setup(secs, shape) {
+function setup(secs, shape, workDir) {
   fs.chmodSync(FAKE_WHISPER, 0o755);
   const models = tmpDir('models'); fs.writeFileSync(path.join(models, 'ggml-base.en.bin'), 'x');
   process.env.WHISPER_BIN = FAKE_WHISPER; process.env.WHISPER_MODELS = models;
@@ -18,7 +18,7 @@ function setup(secs, shape) {
   const started = 1_000_000;
   const t = { id: 'T1', room: 'R1', started, segs: { S1: { id: 'S1', name: 'Steve', _person: 'Steve', audio: { rate: 48000, end: Math.round(secs * 48000), first: { s: 0, t: started + 2000 }, last: { s: 0, t: started + 2000 } } } } };
   const saves = [];
-  const tr = createTranscriber({ settings: { transcribe: { enabled: true, model: 'base.en' } }, FFMPEG: 'ffmpeg', takeDir: () => path.join(root, 'R1', 'T1'), saveTake: x => saves.push(x) });
+  const tr = createTranscriber({ settings: { transcribe: { enabled: true, model: 'base.en' } }, FFMPEG: 'ffmpeg', workDir, takeDir: () => path.join(root, 'R1', 'T1'), saveTake: x => saves.push(x) });
   return { t, tr, saves };
 }
 
@@ -95,4 +95,14 @@ test('self-test explains a missing model or a broken engine in plain words', asy
   const flag = path.join(tmpDir('flag'), 'fail'); fs.writeFileSync(flag, '');
   process.env.FAKE_WHISPER_FAIL_FLAG = flag;
   try { await assert.rejects(tr.selfTest(), /failed to load model/); } finally { delete process.env.FAKE_WHISPER_FAIL_FLAG; }
+});
+test('keeps working if its work folder is deleted while the server runs (system /tmp clean-up)', async () => {
+  const work = path.join(tmpDir('work'), 'transcribe');
+  const { t, tr } = setup(40, talky(5), work);
+  fs.rmSync(work, { recursive: true, force: true });
+  await tr.catchUp(t, t.segs.S1, true);
+  assert.equal(t.segs.S1.tx.error, undefined, t.segs.S1.tx.error);
+  assert.ok(t.segs.S1.tx.parts.length > 3);
+  fs.rmSync(work, { recursive: true, force: true });
+  assert.equal((await tr.selfTest()).model, 'base.en');
 });

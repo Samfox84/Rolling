@@ -1,6 +1,6 @@
 {
   "name": "rolling",
-  "version": "1.3.2",
+  "version": "1.3.3",
   "description": "Self-hosted remote podcast studio: video call + lossless per-person audio and per-person video recording",
   "main": "server.js",
   "private": true,

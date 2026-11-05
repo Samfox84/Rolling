@@ -21,7 +21,7 @@ const createTranscriber = require('./transcribe');
 let nodemailer = null;
 try { nodemailer = require('nodemailer'); } catch { /* email optional */ }
 
-const VERSION = '1.3.2';
+const VERSION = '1.3.3';
 
 // ---------- settings (from .env next to this file) ----------
 (function loadEnv() {
@@ -102,7 +102,7 @@ const settings = (() => {
 })();
 function saveSettings() { writeJSON(SETTINGS_FILE, settings); try { fs.chmodSync(SETTINGS_FILE, 0o600); } catch (e) { log.warn('settings', 'could not make settings.json private', e); } }
 
-const transcriber = createTranscriber({ settings, FFMPEG, takeDir: (r, t) => takeDir(r, t), saveTake: (t, now) => saveTake(t, now) });
+const transcriber = createTranscriber({ settings, FFMPEG, workDir: path.join(DATA_DIR, '.work', 'transcribe'), takeDir: (r, t) => takeDir(r, t), saveTake: (t, now) => saveTake(t, now) });
 
 // ---------- admin password ----------
 function hashPassword(pw) { const salt = crypto.randomBytes(16); return `scrypt:${salt.toString('hex')}:${crypto.scryptSync(pw, salt, 64).toString('hex')}`; }

@@ -16,12 +16,14 @@ const { run } = require('./proc');
 
 const HALLUCINATION = /^\s*(\[.*\]|\(.*\)|♪+|thank you\.?|thanks for watching!?|you\.?|bye\.?|\.+)\s*$/i;
 
-module.exports = function createTranscriber({ settings, FFMPEG, takeDir, saveTake }) {
+module.exports = function createTranscriber({ settings, FFMPEG, takeDir, saveTake, workDir }) {
   const BIN = process.env.WHISPER_BIN || '/opt/rolling-whisper/whisper.cpp/build/bin/whisper-cli';
   const MODELS = process.env.WHISPER_MODELS || '/opt/rolling-whisper/models';
   const threads = Math.max(1, Math.min(8, os.cpus().length - 1));
-  const tmpDir = path.join(os.tmpdir(), 'rolling-transcribe');
-  fs.mkdirSync(tmpDir, { recursive: true });
+  // working files live with the recordings (not /tmp, which the system tidies up behind our back),
+  // and the folder is re-made before every job in case anything removed it
+  const tmpDir = workDir || path.join(os.tmpdir(), 'rolling-transcribe');
+  const ensureTmp = () => fsp.mkdir(tmpDir, { recursive: true });
 
   const cfg = () => Object.assign({ enabled: true, model: 'base.en', language: 'auto' }, settings.transcribe);
   const modelPath = m => path.join(MODELS, `ggml-${m || cfg().model}.bin`);
@@ -79,6 +81,7 @@ module.exports = function createTranscriber({ settings, FFMPEG, takeDir, saveTak
       if (rms > 0.0018) { // about -55 dBFS: skip chunks with nobody talking (whisper invents words in silence)
         const id = `${t.id}-${s.id}-${start}`, wav = path.join(tmpDir, id + '.wav'), prefix = path.join(tmpDir, id);
         try {
+          await ensureTmp();
           await ffExtract(file, rate, start, end, wav);
           await whisper(wav, prefix);
           const j = JSON.parse(await fsp.readFile(prefix + '.json', 'utf8'));
@@ -87,6 +90,7 @@ module.exports = function createTranscriber({ settings, FFMPEG, takeDir, saveTak
             if (!text || HALLUCINATION.test(text)) continue;
             s.tx.parts.push({ from: +(segOffset + start / rate + seg.offsets.from / 1000).toFixed(2), to: +(segOffset + start / rate + seg.offsets.to / 1000).toFixed(2), text });
           }
+          delete s.tx.error; // this chunk worked, so an earlier hiccup is no longer the whole story
         } catch (err) { s.tx.error = String(err.message).slice(0, 300); log.warn('transcribe', `${s.name}: ${s.tx.error}`); }
         finally { fsp.rm(wav, { force: true }).catch(log.ignore('transcribe', 'remove temp wav')); fsp.rm(prefix + '.json', { force: true }).catch(log.ignore('transcribe', 'remove temp json')); }
       }
@@ -132,6 +136,7 @@ module.exports = function createTranscriber({ settings, FFMPEG, takeDir, saveTak
     if (!fs.existsSync(modelPath())) throw new Error(`The speech model '${cfg().model}' isn't downloaded — run: sudo rolling-get-model ${cfg().model}`);
     const id = 'selftest-' + Date.now(), wav = path.join(tmpDir, id + '.wav'), prefix = path.join(tmpDir, id);
     try {
+      await ensureTmp();
       await run(FFMPEG, ['-hide_banner', '-loglevel', 'error', '-nostdin', '-y', '-f', 'lavfi', '-i', 'sine=frequency=300:duration=3', '-ar', '16000', '-ac', '1', '-c:a', 'pcm_s16le', wav], { stdout: 'ignore', timeoutMs: 30000 });
       const t0 = Date.now();
       await whisper(wav, prefix, 80000); // under Cloudflare's 100 s limit, so the page always gets an answer
