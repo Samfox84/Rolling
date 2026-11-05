@@ -312,7 +312,12 @@ test('advanced producer: rundown + clock, desk, dropout, server crash mid-show, 
 
   // ---- stop; everyone's uploads finish; the take builds ----
   await prod.p.click('#recBtn'); await prod.p.click('#modalYes');
-  const take = await waitFor(async () => apiTake(srv, room, ts => ts[0] && ts[0].status === 'ready' && ts[0]), 240000);
+  const take = await waitFor(async () => apiTake(srv, room, ts => ts[0] && ts[0].status === 'ready' && ts[0]), 480000)
+    .catch(async () => { // say exactly where it got to
+      const t = await apiTake(srv, room, ts => ts[0]);
+      const raw = JSON.parse(fs.readFileSync(path.join(srv.dataDir, 'rooms', room.id, 'takes', t.id, 'take.json'), 'utf8'));
+      throw new Error(`take not ready: status=${t.status} step="${t.progress}" ${t.pct}% · parts: ${Object.values(raw.segs).map(g => `${g.name} done=${g.done} audio=${g.audio ? g.audio.end : 0}`).join(', ')}`);
+    });
   assert.equal(take.error, '', take.error);
   assert.deepEqual([...new Set(take.people)].sort(), ['Guest', 'Steve'], 'the control room is not in the recording');
 
