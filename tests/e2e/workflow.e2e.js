@@ -33,10 +33,15 @@ test.before(() => {
   };
   voices = { steve: make('steve', 2.6, 1.7, 0.25), guest: make('guest', 3.4, 2.1, 0.2), sam: make('sam', 3.0, 1.5, 0.22) };
 });
-test.after(async () => {
-  // keep the server logs for anyone looking into a failure
-  fs.writeFileSync(path.join(require('os').tmpdir(), 'rolling-workflow-server.log'), servers.map((s, i) => `===== server ${i + 1} =====\n${s.logs()}`).join('\n'));
-  for (const b of browsers) await b.close().catch(() => {}); for (const s of servers) await s.stop().catch(() => {});
+// each test closes its own browsers and servers when it ends, so the next test has the whole machine
+const logs = [];
+test.afterEach(async () => {
+  for (const sv of servers) logs.push(sv.logs());
+  for (const b of browsers.splice(0)) await b.close().catch(() => {});
+  for (const sv of servers.splice(0)) await sv.stop().catch(() => {});
+});
+test.after(() => { // keep the server logs for anyone looking into a failure
+  fs.writeFileSync(path.join(require('os').tmpdir(), 'rolling-workflow-server.log'), logs.map((l, i) => `===== server ${i + 1} =====\n${l}`).join('\n'));
 });
 
 // ---------- helpers ----------
