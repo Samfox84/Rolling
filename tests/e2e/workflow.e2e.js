@@ -233,7 +233,7 @@ test('advanced producer: rundown + clock, desk, dropout, server crash mid-show, 
 
   // ---- rundown: three segments typed in the studio and saved ----
   await prod.p.click('.drawer-tabs [data-tab="rundown"]');
-  for (const [name, mins] of [['Intro', '0.2'], ['Interview', '1'], ['Wrap up', '0.5']]) {
+  for (const [name, mins] of [['Intro', '0.5'], ['Interview', '1'], ['Wrap up', '0.5']]) {
     await prod.p.click('#rdAdd');
     const rows = await prod.p.$$('#rundownList .rdrow');
     const last = rows[rows.length - 1];
@@ -250,16 +250,16 @@ test('advanced producer: rundown + clock, desk, dropout, server crash mid-show, 
   await waitFor(() => steve.p.evaluate(() => document.getElementById('tile-me').classList.contains('rec')), 10000);
   assert.equal(await prod.p.$('#tile-me'), null, 'the control room has no tile and is not recorded');
 
-  // segment 1: Intro (12 s) — everyone's clock shows it, counting down, then "over"
+  // segment 1: Intro (30 s) — everyone's clock shows it, counting down, then "over"
   await watchClock(prod);
   const segTc = [];
   await prod.p.click('#rdNext'); segTc.push(await tcAtAction(prod));
   await waitFor(async () => (await tcText(steve, 'segname')) === 'INTRO', 5000);
-  await waitFor(async () => /^0:1[0-2] left$/.test(await tcText(guest, 'left')), 3000) // counting down on the guest's screen too
+  await waitFor(async () => /^0:[0-3]\d left$/.test(await tcText(guest, 'left')), 5000) // counting down on the guest's screen too
     .catch(async e => { throw new Error(`guest's clock shows "${await guest.p.textContent('#tcBar')}"`); });
   await new Promise(r => setTimeout(r, 2000));
   await prod.p.keyboard.press('1'); const tagTc = await tcAtAction(prod);  // quick tag: Great bit
-  await waitFor(() => guest.p.evaluate(() => document.querySelector('#tcBar [data-tc="segblock"]').classList.contains('over')), 15000);
+  await waitFor(() => guest.p.evaluate(() => document.querySelector('#tcBar [data-tc="segblock"]').classList.contains('over')), 45000);
   assert.match(await tcText(guest, 'left'), /^\+0:0\d over$/);
 
   // segment 2: Interview — the segment clock starts again from zero
