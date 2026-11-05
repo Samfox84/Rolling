@@ -254,7 +254,8 @@ test('advanced producer: rundown + clock, desk, dropout, server crash mid-show, 
   await watchClock(prod);
   const segTc = [];
   await prod.p.click('#rdNext'); segTc.push(await tcAtAction(prod));
-  await waitFor(async () => (await tcText(steve, 'segname')) === 'INTRO', 5000);
+  await waitFor(async () => (await tcText(steve, 'segname')) === 'INTRO', 5000)
+    .catch(async () => { throw new Error(`after Next: producer sees "${await prod.p.textContent('#tcBar')}" / toasts "${await prod.p.evaluate(() => [...document.querySelectorAll('.toast')].map(t => t.textContent).join(' | '))}" / rundown ${await prod.p.evaluate(() => document.querySelectorAll('#rundownList .rdrow').length)} rows; Steve sees "${await steve.p.textContent('#tcBar')}"`); });
   await waitFor(async () => /^0:[0-3]\d left$/.test(await tcText(guest, 'left')), 5000) // counting down on the guest's screen too
     .catch(async e => { throw new Error(`guest's clock shows "${await guest.p.textContent('#tcBar')}"`); });
   await new Promise(r => setTimeout(r, 2000));
