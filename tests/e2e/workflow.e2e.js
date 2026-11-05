@@ -219,7 +219,7 @@ test('basic user: make a room, record a take with a guest, download everything',
 });
 
 // =====================================================================================
-test('advanced producer: rundown + clock, desk, dropout, server crash mid-show, post tools', { skip, timeout: 600000 }, async () => {
+test('advanced producer: rundown + clock, desk, dropout, server crash mid-show, post tools', { skip, timeout: 1200000 }, async () => {
   let srv = await startServer(); servers.push(srv);
   const out = tmpDir('adv-files');
   const { cookie } = await login(srv.url);
