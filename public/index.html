@@ -88,6 +88,9 @@
         <div><label>Mark long pauses in the edit list</label><select id="clPauses"><option value="0">Off</option><option value="2">Longer than 2 seconds</option><option value="3">Longer than 3 seconds</option><option value="5">Longer than 5 seconds</option><option value="10">Longer than 10 seconds</option></select></div>
       </div>
 
+      <h2 style="margin-top:22px">🎞 Frame rate</h2>
+      <div class="grid2"><div><label>Timecode clock and video files</label><select id="fpsSel"><option value="25">25 fps (UK & Europe)</option><option value="30">30 fps (USA)</option></select></div></div>
+
       <h2 style="margin-top:22px">🧹 Disk space</h2>
       <label class="check"><input type="checkbox" id="autoCompact"> <span>After a take is backed up, delete its raw upload data automatically<br><span class="muted small-text">Saves space. Finished files are kept, but the take can no longer be fully rebuilt.</span></span></label>
 
@@ -189,6 +192,7 @@ async function loadSettings() {
   $('#txModel').innerHTML = models.map(m => `<option value="${esc(m)}" ${m === tx.model ? 'selected' : ''}>${esc(names[m] || m)}</option>`).join('');
   $('#txLang').value = tx.language || 'auto'; $('#txLang').disabled = /\.en$/.test(tx.model || '');
   $('#autoCompact').checked = !!s.autoCompact;
+  $('#fpsSel').value = String(s.fps || 25);
   const c = s.clean || {};
   $('#clAuto').checked = c.auto !== false; $('#clNoise').value = c.noise || 'medium'; $('#clMains').value = String(c.mains || 50);
   $('#clRumble').checked = !!c.rumble; $('#clDeclip').checked = !!c.declip; $('#clDeess').checked = !!c.deess; $('#clComp').checked = !!c.compress; $('#clGate').checked = !!c.gate;
@@ -202,7 +206,7 @@ function showBackup(b) {
 function settingsBody() {
   return { smtp: { host: $('#sHost').value, port: $('#sPort').value, user: $('#sUser').value, pass: $('#sPass').value, from: $('#sFrom').value },
     turn: { keyId: $('#tKey').value, token: $('#tTok').value }, backupDir: $('#sBackup').value, publicUrl: $('#sUrl').value,
-    transcribe: { enabled: $('#txOn').checked, model: $('#txModel').value, language: $('#txLang').value }, autoCompact: $('#autoCompact').checked,
+    transcribe: { enabled: $('#txOn').checked, model: $('#txModel').value, language: $('#txLang').value }, autoCompact: $('#autoCompact').checked, fps: Number($('#fpsSel').value),
     clean: { auto: $('#clAuto').checked, noise: $('#clNoise').value, mains: Number($('#clMains').value), rumble: $('#clRumble').checked, declip: $('#clDeclip').checked,
       deess: $('#clDeess').checked, compress: $('#clComp').checked, gate: $('#clGate').checked, pauses: Number($('#clPauses').value) } };
 }

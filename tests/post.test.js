@@ -76,7 +76,9 @@ test('Audition .sesx is well-formed, places clips in samples, maps mono to both 
   assert.match(x, /Ep 1 &lt;test&gt; &amp; &quot;quotes&quot;/);
 });
 test('FCP XML is well-formed and offsets clips by their start', () => {
-  const x = post.fcpXml('Show', [{ kind: 'video', file: 'a.mp4', start: 3, dur: 10, w: 1280, h: 720 }, { kind: 'audio', file: 'A b.wav', start: 3, dur: 10, channels: 1 }], [{ label: 'M', at: 5 }]);
+  const x = post.fcpXml('Show', [{ kind: 'video', file: 'a.mp4', start: 3, dur: 10, w: 1280, h: 720 }, { kind: 'audio', file: 'A b.wav', start: 3, dur: 10, channels: 1 }], [{ label: 'M', at: 5 }], 30);
+  assert.match(x, /<timebase>30<\/timebase>/);
+  assert.match(post.fcpXml('Show', [{ kind: 'audio', file: 'a.wav', start: 2, dur: 2, channels: 1 }], []), /<timebase>25<\/timebase>[\s\S]*<start>50<\/start>/, 'UK 25 fps by default');
   assert.ok(xmlWellFormed(x));
   assert.match(x, /<start>90<\/start><end>390<\/end>/);
   assert.match(x, /file:\/\/localhost\/A%20b\.wav/);

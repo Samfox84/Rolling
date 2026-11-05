@@ -37,6 +37,7 @@ let talking = null;                 // host: peer id I'm doing talkback to
 let talkMic = null;                 // host in the control room: a mic just for talkback
 const talkStream = new MediaStream(); // host: the private talkback channel to each person
 let rundown = [], segment = null;   // show clock
+let fps = 25;                       // timecode frame rate (same as the video files)
 const loudHist = new Map();         // id -> last 5 minutes of short-term loudness (one value a second)
 let clockOffset = Date.now() - performance.now();
 const syncSamples = [];
@@ -554,7 +555,7 @@ function onMsg(m) {
       else { recStartedAt = m.recording.started; if (recording && recording.take !== m.recording.take) stopLocal(recording); }
       if (m.roomTone) startToneOverlay(m.roomTone);
       if (screenStream) wsSend({ t: 'screen', on: true, streamId: screenStream.id });
-      rundown = m.rundown || []; segment = m.segment || null; renderRundown();
+      rundown = m.rundown || []; segment = m.segment || null; renderRundown(); if (m.fps) fps = m.fps;
       for (const id of m.coughing || []) { const p = peers.get(id); if (p) { p.coughing = true; p.tile.classList.add('coughing'); } }
       renderDesk();
       updateRecUI(); sendState(true); layout();
@@ -756,6 +757,7 @@ addEventListener('resize', layout);
 
 function renderStatus(p) {
   const s = p.state || {}, el = p.tile; if (!el) return;
+  el.classList.toggle('rec', s.rec === 'recording'); // tally on the person's tile
   el.classList.toggle('camoff', s.cam === false);
   el.querySelector('.micicon').textContent = s.mic === false ? '🔇' : '';
   el.querySelector('.status').innerHTML = statusPills(s);
@@ -1020,25 +1022,76 @@ $('#rdSave').onclick = async () => {
 };
 $('#rdNext').onclick = () => { const next = segment ? segment.idx + 1 : 0; if (next >= rundown.length) return toast(rundown.length ? 'That was the last segment' : 'Add and save some segments first'); startSegment(next); };
 $('#rdStop').onclick = () => wsSend({ t: 'segment', idx: -1 });
-setInterval(() => {
-  const el = $('#segClock');
-  if (!segment) { el.classList.add('hidden'); return; }
-  const used = serverNow() - segment.at, left = segment.mins * 60000 - used;
-  el.classList.remove('hidden');
-  el.classList.toggle('over', !!segment.mins && left < 0); el.classList.toggle('soon', !!segment.mins && left >= 0 && left < 60000);
-  el.textContent = !segment.mins ? `${segment.name} · ${mmss(used)}` : left >= 0 ? `${segment.name} · ${mmss(left)} left` : `${segment.name} · +${mmss(left)} over`;
-}, 250);
+
+// ---------- timecode clock + tally (everyone): record TC, segment TC, time of day ----------
+// Record TC starts at 00:00:00:00 when recording starts — the same timeline as every file in the take.
+const tc = ms => { ms = Math.max(0, ms); const s = Math.floor(ms / 1000), f = Math.floor((ms % 1000) / (1000 / fps)); return [s / 3600, (s % 3600) / 60, s % 60, f].map(x => String(Math.floor(x)).padStart(2, '0')).join(':'); };
+function clockMarkup() {
+  return `<div class="tally" data-tc="tally"><span class="lamp"></span><span data-tc="tallytext">STANDBY</span></div>
+    <div class="tcblock"><div class="tclabel">REC</div><div class="tc" data-tc="rec">00:00:00:00</div></div>
+    <div class="tcblock" data-tc="segblock"><div class="tclabel" data-tc="segname">SEGMENT</div><div class="tc" data-tc="seg">--:--:--:--</div><div class="tcleft" data-tc="left"></div></div>
+    <div class="tcblock tod"><div class="tclabel">TIME OF DAY</div><div class="tc" data-tc="tod">--:--:--:--</div></div>`;
+}
+$('#tcBar').innerHTML = clockMarkup() + '<div class="tcbtns"><button class="small ghost" id="clockFull" title="Full-screen clock">⛶ Clock</button><button class="small ghost" id="clockPop" title="Open the clock in its own window — drag it to a second screen">↗ Pop out</button></div>';
+$('#bigClock').innerHTML = clockMarkup();
+let pop = null;
+function renderClock(root) {
+  const q = k => root.querySelector(`[data-tc="${k}"]`);
+  const state = roomTone ? 'tone' : recStartedAt ? 'rec' : 'stby';
+  q('tally').className = 'tally ' + state;
+  q('tallytext').textContent = state === 'rec' ? 'REC' : state === 'tone' ? 'ROOM TONE' : 'STANDBY';
+  q('rec').textContent = recStartedAt ? tc(serverNow() - recStartedAt) : '00:00:00:00';
+  q('rec').classList.toggle('dim', !recStartedAt);
+  const sb = q('segblock');
+  if (segment) {
+    const used = serverNow() - segment.at, left = segment.mins * 60000 - used;
+    q('segname').textContent = segment.name.toUpperCase();
+    q('seg').textContent = tc(used);
+    q('left').textContent = !segment.mins ? '' : left >= 0 ? `${mmss(left)} left` : `+${mmss(left)} over`;
+    sb.classList.toggle('over', !!segment.mins && left < 0); sb.classList.toggle('soon', !!segment.mins && left >= 0 && left < 60000);
+  } else { q('segname').textContent = 'SEGMENT'; q('seg').textContent = '--:--:--:--'; q('left').textContent = ''; sb.classList.remove('over', 'soon'); }
+  const d = new Date(serverNow());
+  q('tod').textContent = tc((d.getHours() * 3600 + d.getMinutes() * 60 + d.getSeconds()) * 1000 + d.getMilliseconds());
+}
+function renderClocks() {
+  if (!joined) return;
+  renderClock($('#tcBar'));
+  if (!$('#bigClock').classList.contains('hidden')) renderClock($('#bigClock'));
+  if (pop && !pop.closed) { try { renderClock(pop.document.body); } catch (e) { quiet('clock window')(e); pop = null; } }
+  const state = roomTone ? 'tone' : recStartedAt ? 'rec' : '';
+  document.body.classList.toggle('tally-rec', state === 'rec'); document.body.classList.toggle('tally-tone', state === 'tone');
+}
+setInterval(renderClocks, 20);
+function closeBigClock() { $('#bigClock').classList.add('hidden'); if (document.fullscreenElement) document.exitFullscreen().catch(quiet('leave full screen')); }
+$('#clockFull').onclick = () => { $('#bigClock').classList.remove('hidden'); renderClock($('#bigClock')); $('#bigClock').requestFullscreen().catch(quiet('full-screen clock')); };
+$('#bigClock').onclick = closeBigClock;
+addEventListener('keydown', e => { if (e.key === 'Escape' && !$('#bigClock').classList.contains('hidden')) closeBigClock(); });
+document.addEventListener('fullscreenchange', () => {
+  const hidden = $('#bigClock').classList.contains('hidden');
+  if (!document.fullscreenElement && !hidden) $('#bigClock').classList.add('hidden');            // left full screen with the browser's own Esc
+  if (document.fullscreenElement === $('#bigClock') && hidden) document.exitFullscreen().catch(quiet('leave full screen')); // closed while full screen was still opening
+});
+$('#clockPop').onclick = () => {
+  pop = window.open('', 'rolling-clock', 'width=1000,height=380');
+  if (!pop) return toast('Your browser blocked the clock window — allow pop-ups for this site and try again', 6000);
+  const css = [...document.styleSheets].map(sh => { try { return [...sh.cssRules].map(r => r.cssText).join('\n'); } catch (e) { quiet('copy styles to clock window')(e); return ''; } }).join('\n');
+  pop.document.title = `${document.title} — clock`;
+  pop.document.head.innerHTML = `<meta name="viewport" content="width=device-width"><style>${css}</style>`;
+  pop.document.body.className = 'clockwin';
+  pop.document.body.innerHTML = `<div class="bigclock">${clockMarkup()}</div><p class="clockhint">Double-click for full screen · drag this window to another screen</p>`;
+  pop.document.body.ondblclick = () => pop.document.documentElement.requestFullscreen().catch(quiet('clock window full screen'));
+  renderClock(pop.document.body); pop.focus();
+};
 $('#copyGuestBtn').onclick = () => {
   const link = location.origin + '/r/' + roomId;
   navigator.clipboard.writeText(link).then(() => toast('Guest link copied')).catch(() => ask('Guest link', `<input type="text" value="${link}" readonly onclick="this.select()">`, 'Done', null));
 };
 function updateRecUI() {
-  $('#recBadge').classList.toggle('on', !!recStartedAt);
   $('#recBtn').textContent = recStartedAt ? '■ Stop recording' : '● Start recording';
   $('#recBtn').classList.toggle('danger', !!recStartedAt); $('#recBtn').classList.toggle('primary', !recStartedAt);
   $('#toneBtn').disabled = $('#markerBtn').disabled = !recStartedAt;
 }
-setInterval(() => { if (recStartedAt) $('#recTime').textContent = fmtTime(serverNow() - recStartedAt); }, 250);
+
 
 // drawer: chat + health
 let drawerTab = null, unread = 0;
@@ -1263,7 +1316,7 @@ function sendState(force) {
   if (!joined) return;
   const s = myState(), key = JSON.stringify({ ...s, pending: Math.round(s.pending / 524288), pendingAudio: Math.round(s.pendingAudio / 262144), loss: Math.round(s.loss * 50), rtt: Math.round((s.rtt || 0) / 25) });
   const meTile = document.getElementById('tile-me');
-  if (meTile) meTile.querySelector('.status').innerHTML = statusPills(s);
+  if (meTile) { meTile.querySelector('.status').innerHTML = statusPills(s); meTile.classList.toggle('rec', s.rec === 'recording'); }
   if (s.rec === 'uploading') {
     uploadPeak = Math.max(uploadPeak, s.pending);
     const pct = uploadPeak ? Math.round(100 * (1 - s.pending / uploadPeak)) : 0;

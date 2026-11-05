@@ -27,6 +27,7 @@ Version: see [CHANGELOG.md](CHANGELOG.md). Licence: [GNU AGPL-3.0](LICENSE) — 
 **Producer desk (live)**
 - **🎚 Desk** — a fader per person (what you hear + baked into the **Producer mix**), 🎧 mute/solo for your ears only.
 - **Cue cards** to one person or everyone, **talkback** (hold T), **quick tags** (keys 1–4: Great bit, Cut this, Retake, Ad break).
+- **Timecode clock + tally** for everyone: record, segment and time-of-day timecode, red tally frame while recording; full-screen and pop-out clock for a second screen.
 - **⏱ Rundown + show clock** everyone can see; segments become chapters. **Loudness history** for each person.
 - **🤧 Cough button** for everyone (hold C) — mutes live sound only; marked and muted in the Producer mix.
 

@@ -22,7 +22,7 @@ const createTranscriber = require('./transcribe');
 let nodemailer = null;
 try { nodemailer = require('nodemailer'); } catch { /* email optional */ }
 
-const VERSION = '1.4.0';
+const VERSION = '1.4.1';
 
 // ---------- settings (from .env next to this file) ----------
 (function loadEnv() {
@@ -97,7 +97,8 @@ const settings = (() => {
     publicUrl: s.publicUrl || process.env.PUBLIC_URL || '',
     transcribe: Object.assign({ enabled: true, model: process.env.WHISPER_MODEL || 'base.en', language: 'auto' }, s.transcribe),
     autoCompact: !!s.autoCompact,
-    clean: treat.cfg(s.clean),        // clean-up files made after each take (the untouched recordings are always kept)
+    clean: treat.cfg(s.clean),
+    fps: s.fps === 30 ? 30 : 25,     // frame rate for the on-screen timecode, the MP4s and the editor XML (25 = UK/Europe)        // clean-up files made after each take (the untouched recordings are always kept)
     adminHash: s.adminHash || '',   // set once the password is changed from the dashboard (scrypt, never stored in plain text)
     sessionGen: s.sessionGen || 0,  // bumped on password change so old logins stop working
   };
@@ -562,7 +563,7 @@ async function processTakeUntraced(roomId, takeId, opts = {}) {
       const file = `${s._label} - video.mp4`;
       try {
         await ff(['-fflags', '+genpts', '-i', path.join(out, orig),
-          '-vf', `fps=30,${padS > 0.01 ? `tpad=start_duration=${padS.toFixed(3)}:color=black,` : ''}scale=trunc(iw/2)*2:trunc(ih/2)*2,format=yuv420p`,
+          '-vf', `fps=${settings.fps},${padS > 0.01 ? `tpad=start_duration=${padS.toFixed(3)}:color=black,` : ''}scale=trunc(iw/2)*2:trunc(ih/2)*2,format=yuv420p`,
           '-af', padS > 0.01 ? `adelay=${Math.round(padS * 1000)}:all=1` : 'anull',
           '-c:v', 'libx264', '-preset', VIDEO_PRESET, '-crf', '20', '-c:a', 'aac', '-b:a', '160k', '-movflags', '+faststart', path.join(out, file)], report, takeSecs);
         add(file, 'video', s._label);
@@ -583,7 +584,7 @@ async function processTakeUntraced(roomId, takeId, opts = {}) {
         const padS = Math.max(0, ((sc.st || t.started) - t.started) / 1000);
         try {
           await ff(['-fflags', '+genpts', '-i', src, '-an',
-            '-vf', `fps=30,${padS > 0.01 ? `tpad=start_duration=${padS.toFixed(3)}:color=black,` : ''}scale=trunc(iw/2)*2:trunc(ih/2)*2,format=yuv420p`,
+            '-vf', `fps=${settings.fps},${padS > 0.01 ? `tpad=start_duration=${padS.toFixed(3)}:color=black,` : ''}scale=trunc(iw/2)*2:trunc(ih/2)*2,format=yuv420p`,
             '-c:v', 'libx264', '-preset', VIDEO_PRESET, '-crf', '20', '-movflags', '+faststart', path.join(out, file)], report, takeSecs);
           add(file, 'screen', s._person);
         } catch (e) {
@@ -746,7 +747,7 @@ async function buildDocsUntraced(t, room, out, add, assets) {
     const wh = (await probe(path.join(out, o.file), 'stream=width,height', 'v:0')).split(',').map(Number);
     videos.push({ kind: 'video', file: o.file, start: introLen, dur: await dur(o.file), w: wh[0] || 1280, h: wh[1] || 720 });
   }
-  await write(`${title} (Premiere, Resolve, Audition).xml`, post.fcpXml(title, [...videos, ...tracks], sessMarkers), 'session');
+  await write(`${title} (Premiere, Resolve, Audition).xml`, post.fcpXml(title, [...videos, ...tracks], sessMarkers, settings.fps), 'session');
 }
 
 // free up disk space on a finished take
@@ -888,7 +889,7 @@ app.post('/api/settings/password', needAdmin, express.json(), (req, res) => {
 app.get('/api/settings', needAdmin, async (req, res) => {
   res.json({ smtp: { ...settings.smtp, pass: settings.smtp.pass ? MASK : '' }, turn: { keyId: settings.turn.keyId, token: settings.turn.token ? MASK : '' },
     backupDir: settings.backupDir, publicUrl: settings.publicUrl, backup: await backupStatus(), emailAvailable: !!nodemailer, turnError: cfIce.error, passwordChanged: !!settings.adminHash,
-    transcribe: { ...settings.transcribe, installed: transcriber.available(), models: transcriber.installedModels() }, autoCompact: settings.autoCompact, clean: settings.clean });
+    transcribe: { ...settings.transcribe, installed: transcriber.available(), models: transcriber.installedModels() }, autoCompact: settings.autoCompact, clean: settings.clean, fps: settings.fps });
 });
 app.post('/api/settings', needAdmin, express.json(), async (req, res) => {
   const b = req.body || {};
@@ -898,6 +899,7 @@ app.post('/api/settings', needAdmin, express.json(), async (req, res) => {
   if ('publicUrl' in b) settings.publicUrl = cleanText(b.publicUrl, 200).replace(/\/+$/, '');
   if (b.transcribe) { settings.transcribe.enabled = !!b.transcribe.enabled; if (/^[a-z0-9.-]{2,40}$/.test(b.transcribe.model || '')) settings.transcribe.model = b.transcribe.model; if (/^[a-z]{2}$|^auto$/.test(b.transcribe.language || '')) settings.transcribe.language = b.transcribe.language; }
   if ('autoCompact' in b) settings.autoCompact = !!b.autoCompact;
+  if ('fps' in b) settings.fps = Number(b.fps) === 30 ? 30 : 25;
   if (b.clean && typeof b.clean === 'object') settings.clean = treat.cfg({ ...settings.clean, ...b.clean });
   if (settings.backupDir) { try { fs.mkdirSync(settings.backupDir, { recursive: true }); } catch (e) { return res.status(400).json({ error: `Can't use that backup folder: ${e.message}` }); } }
   saveSettings();
@@ -1174,7 +1176,7 @@ wss.on('connection', ws => {
       peers: [...lr.peers.values()].filter(p => p !== peer).map(peerInfo),
       recording: t ? { take: t.id, started: t.started, n: t.n, markers: (t.markers || []).length } : null, nextEpisode: (room.lastEpisode || 0) + 1,
       roomToneSeconds: ROOM_TONE_SECONDS, roomTone: lr.roomTone && lr.roomTone.end > Date.now() ? lr.roomTone : null,
-      rundown: room.rundown || [], segment: lr.segment || null, coughing: [...lr.peers.values()].filter(p => p.coughing).map(p => p.id),
+      rundown: room.rundown || [], segment: lr.segment || null, fps: settings.fps, coughing: [...lr.peers.values()].filter(p => p.coughing).map(p => p.id),
       chat: lr.chat.slice(-100), waiting: peer.isHost ? [...lr.waiting.values()].map(w => ({ id: w.id, name: w.name })) : [],
       disk: peer.isHost ? await diskInfo() : null, gbPerPersonHour: GB_PER_PERSON_HOUR, minFreeGB: MIN_FREE_GB });
     if (t && !peer.control) {

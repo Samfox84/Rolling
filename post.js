@@ -179,8 +179,8 @@ ${files.map((f, i) => `    <file absolutePath="${xmlEsc(f)}" id="${i}" mediaHand
 
 // ---------- FCP7 XML (Audition File > Open, Premiere, Resolve) ----------
 // items: [{ file, kind: 'audio'|'video', start (s), dur (s), channels, w, h, hasAudio }]
-function fcpXml(title, items, markers) {
-  const fps = 30, fr = s => Math.max(0, Math.round(s * fps));
+function fcpXml(title, items, markers, fps = 25) {
+  const fr = s => Math.max(0, Math.round(s * fps));
   const rate = `<rate><timebase>${fps}</timebase><ntsc>FALSE</ntsc></rate>`;
   const url = f => 'file://localhost/' + encodeURIComponent(f);
   let n = 0, max = 0;

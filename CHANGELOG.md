@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.4.1 — timecode clock and tally
+- **Timecode bar for everyone** (like a broadcast monitor): REC timecode (HH:MM:SS:FF, starts at 00:00:00:00 with the take — the same timeline as every file), current segment timecode with time left, and time of day
+- **Tally**: red frame round the whole studio while recording (amber during room tone), REC lamp in the bar, and a red frame on each person who is recording
+- **⛶ Clock** full-screen view and **↗ Pop out** window to drag onto a second screen (double-click it for full screen)
+- **Frame rate setting** (Studio settings): 25 fps (UK, now the default) or 30 fps — used for the clock, the MP4s and the Premiere/Resolve XML, so the timecode always matches the files
+- Fix: closing the full-screen clock while it was still opening could leave the screen stuck in full screen
+
 ## 1.4.0 — producer desk and clean-up files
 **Live, while recording (host)**
 - **🎚 Desk** with a fader per person: changes what you hear *and* is recorded into the new **Producer mix**; 🎧 mute / solo for your ears only; your own listening volume

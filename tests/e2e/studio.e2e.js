@@ -19,11 +19,13 @@ test.before(async () => {
   const { cookie } = await login(srv.url);
   room = await (await fetch(srv.url + '/api/rooms', { method: 'POST', headers: { cookie, 'Content-Type': 'application/json' }, body: JSON.stringify({ name: 'E2E Show' }) })).json();
 });
-test.after(async () => { if (srv) await srv.stop(); });
+const browsers = []; // closed at the end even if a test fails, so a failure never hangs the run
+test.after(async () => { for (const b of browsers) await b.close().catch(() => {}); if (srv) await srv.stop(); });
 
 async function person(name, host, { control = false } = {}) {
   const args = ['--use-fake-device-for-media-stream', '--use-fake-ui-for-media-stream', ...(SPEECH ? [`--use-file-for-fake-audio-capture=${SPEECH}`] : [])];
   const b = await chromium.launch({ args });
+  browsers.push(b);
   const ctx = await b.newContext({ viewport: { width: 1280, height: 760 }, permissions: control ? [] : ['camera', 'microphone'] });
   const p = await ctx.newPage();
   const errors = [];
@@ -129,12 +131,28 @@ test('producer desk: faders, listening mute, cue card, talkback, cough button, q
   await host.p.click('#rdSave');
   await waitFor(async () => /Interview/.test(JSON.stringify(await (await fetch(`${srv.url}/api/rooms/${room.id}?k=${room.hostKey}`)).json())), 5000);
   await host.p.click('#rdNext');
-  await guest.p.waitForSelector('#segClock:not(.hidden)');
-  assert.match(await guest.p.textContent('#segClock'), /Interview · [45]:\d\d left/);
+  await waitFor(async () => (await guest.p.textContent('#tcBar [data-tc="segname"]')) === 'INTERVIEW', 5000);
+  assert.match(await guest.p.textContent('#tcBar [data-tc="left"]'), /^[45]:\d\d left$/);
+  assert.match(await guest.p.textContent('#tcBar [data-tc="seg"]'), /^00:00:0\d:\d\d$/);
+  assert.match(await guest.p.textContent('#tcBar [data-tc="tallytext"]'), /STANDBY/);
 
   // record a few seconds with a quick tag, check the loudness history line
   await host.p.click('#recBtn'); await host.p.click('#modalAlt');
   await new Promise(r => setTimeout(r, 4000));
+  // tally + record timecode: everyone sees REC, a red frame, and the same running timecode (25 fps frames)
+  assert.equal(await guest.p.textContent('#tcBar [data-tc="tallytext"]'), 'REC');
+  assert.ok(await guest.p.evaluate(() => document.body.classList.contains('tally-rec')));
+  const tcs = [await host.p.textContent('#tcBar [data-tc="rec"]'), await guest.p.textContent('#tcBar [data-tc="rec"]')];
+  for (const x of tcs) assert.match(x, /^00:00:0[3-9]:([01]\d|2[0-4])$/);
+  await waitFor(() => guest.p.evaluate(() => document.getElementById('tile-me').classList.contains('rec')), 5000);
+  await host.p.click('#clockFull');
+  assert.match(await host.p.textContent('#bigClock [data-tc="rec"]'), /^00:00:0\d:\d\d$/);
+  await host.p.keyboard.press('Escape');
+  await host.p.waitForSelector('#bigClock.hidden', { state: 'attached' });
+  await waitFor(() => host.p.evaluate(() => !document.fullscreenElement), 5000); // let full screen finish closing first
+  const [popup] = await Promise.all([host.p.waitForEvent('popup'), host.p.click('#clockPop')]);
+  await waitFor(async () => /^00:00:\d\d:\d\d$/.test(await popup.textContent('[data-tc="rec"]')), 5000);
+  assert.equal(await popup.textContent('[data-tc="tallytext"]'), 'REC');
   await host.p.keyboard.press('1');
   await host.p.click('#healthBtn');
   await waitFor(async () => (await host.p.$$eval('.lhist polyline', els => els.length)) >= 2, 10000);

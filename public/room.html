@@ -74,8 +74,6 @@
   <header>
     <div class="row" style="gap:14px; min-width:0">
       <div class="brand" style="font-size:16px; min-width:0"><span class="dot"></span><span id="roomTitle" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">Studio</span></div>
-      <span class="recbadge" id="recBadge"><span class="blink"></span>REC <span id="recTime">00:00:00</span></span>
-      <span class="segclock hidden" id="segClock" title="Show clock — the current segment of the rundown"></span>
     </div>
     <div class="row">
       <span class="uploadline" id="uploadLine"></span>
@@ -83,6 +81,7 @@
       <a class="hostonly hidden" id="recordingsLink" target="_blank"><button class="small ghost">Recordings ↗</button></a>
     </div>
   </header>
+  <div class="tcbar" id="tcBar"></div>
   <div id="warnBar" class="warnbar hidden"></div>
   <div class="stage">
     <main class="grid" id="grid"></main>
@@ -200,6 +199,9 @@
 </div>
 
 <div id="countdown" class="countdown hidden"></div>
+
+<!-- full-screen clock (like a broadcast monitor): click or Esc to close -->
+<div id="bigClock" class="bigclock hidden" title="Click or press Esc to close"></div>
 
 <!-- cue card from the host -->
 <div id="cue" class="cue hidden" title="Click to dismiss"><div class="cuebox"><div id="cueMsg"></div><div class="small-text muted" id="cueFrom"></div></div></div>

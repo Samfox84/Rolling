@@ -217,9 +217,6 @@ kbd { font: 11px/1 ui-monospace, monospace; background: #fff2; border-radius: 4p
 @keyframes cuepop { from { transform: scale(.85); opacity: 0; } to { transform: scale(1); opacity: 1; } }
 .talkin { position: fixed; top: 64px; left: 50%; transform: translateX(-50%); background: var(--rec); color: #fff; padding: 10px 18px; border-radius: 12px; z-index: 55; font-weight: 700; box-shadow: 0 6px 24px #0008; }
 /* show clock */
-.segclock { font-weight: 800; font-size: 13px; padding: 4px 10px; border-radius: 8px; background: #fff1; font-variant-numeric: tabular-nums; white-space: nowrap; }
-.segclock.soon { background: var(--warn); color: #000; }
-.segclock.over { background: var(--rec); color: #fff; }
 .rdrow { display: grid; grid-template-columns: 28px minmax(0, 1fr) 64px 28px; gap: 6px; align-items: center; margin-bottom: 6px; }
 .rdrow.current { outline: 2px solid var(--ok); border-radius: 8px; }
 .rdrow input { margin: 0; }
@@ -228,3 +225,36 @@ kbd { font: 11px/1 ui-monospace, monospace; background: #fff2; border-radius: 4p
 .lhist { width: 100%; height: 34px; display: block; margin: 4px 0 2px; background: #0003; border-radius: 4px; }
 .lhist polyline { fill: none; stroke: var(--ok); stroke-width: 1.5; vector-effect: non-scaling-stroke; }
 .lhist line { stroke: #fff3; stroke-width: 1; stroke-dasharray: 3 3; vector-effect: non-scaling-stroke; }
+
+/* ---------- timecode clock + tally (like a broadcast monitor) ---------- */
+.tcbar { display: flex; align-items: stretch; gap: 10px; padding: 6px 12px; background: #000; border-bottom: 1px solid var(--line); overflow-x: auto; }
+.tcbar .tcbtns { margin-left: auto; display: flex; gap: 6px; align-items: center; }
+.tally { display: flex; align-items: center; gap: 8px; padding: 0 12px; border-radius: 6px; font: 800 13px/1 ui-monospace, monospace; letter-spacing: .08em; background: #222; color: #888; white-space: nowrap; }
+.tally .lamp { width: 12px; height: 12px; border-radius: 50%; background: #444; }
+.tally.rec { background: var(--rec); color: #fff; } .tally.rec .lamp { background: #fff; animation: blink 1.2s infinite; }
+.tally.tone { background: var(--warn); color: #000; } .tally.tone .lamp { background: #000; }
+.tcblock { display: flex; flex-direction: column; justify-content: center; padding: 0 10px; border-left: 1px solid #fff2; min-width: 0; }
+.tclabel { font: 700 10px/1.2 system-ui, sans-serif; letter-spacing: .1em; color: #999; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 18ch; }
+.tc { font: 700 20px/1.1 ui-monospace, 'SF Mono', Menlo, Consolas, monospace; font-variant-numeric: tabular-nums; color: #fff; white-space: nowrap; }
+.tc.dim { color: #555; }
+.tcleft { font: 700 11px/1.2 ui-monospace, monospace; color: var(--ok); white-space: nowrap; }
+.tcblock.soon .tcleft, .tcblock.soon .tc { color: var(--warn); }
+.tcblock.over .tcleft, .tcblock.over .tc { color: var(--rec); }
+.tcblock.tod .tc { color: #8cf; }
+/* tally: red frame round the whole studio while recording, amber during room tone; red frame on each recording tile */
+body.tally-rec .studio::after, body.tally-tone .studio::after { content: ''; position: fixed; inset: 0; border: 4px solid var(--rec); pointer-events: none; z-index: 45; }
+body.tally-tone .studio::after { border-color: var(--warn); }
+.tile.rec { box-shadow: inset 0 0 0 3px var(--rec); }
+/* full-screen clock + pop-out window */
+.bigclock { position: fixed; inset: 0; z-index: 70; background: #000; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); grid-template-rows: auto 1fr 1fr; gap: 2vmin; padding: 3vmin; cursor: pointer; }
+.bigclock .tally { grid-column: 1 / -1; justify-content: center; font-size: 6vmin; padding: 2vmin; border-radius: 1.5vmin; }
+.bigclock .tally .lamp { width: 4vmin; height: 4vmin; }
+.bigclock .tcblock { border: 1px solid #fff2; border-radius: 1.5vmin; align-items: center; padding: 2vmin; }
+.bigclock .tcblock:nth-of-type(2) { grid-column: 1 / -1; }
+.bigclock .tclabel { font-size: 3vmin; max-width: none; }
+.bigclock .tc { font-size: 11vmin; }
+.bigclock .tcblock:nth-of-type(2) .tc { font-size: 16vmin; }
+.bigclock .tcleft { font-size: 4vmin; }
+body.clockwin { margin: 0; background: #000; overflow: hidden; }
+body.clockwin .bigclock { cursor: default; }
+.clockhint { position: fixed; bottom: 4px; left: 0; right: 0; text-align: center; color: #555; font: 12px system-ui, sans-serif; margin: 0; z-index: 71; }
