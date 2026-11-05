@@ -1,5 +1,23 @@
 # Changelog
 
+## 1.4.0 — producer desk and clean-up files
+**Live, while recording (host)**
+- **🎚 Desk** with a fader per person: changes what you hear *and* is recorded into the new **Producer mix**; 🎧 mute / solo for your ears only; your own listening volume
+- **Cue cards** — big on-screen messages to one person or everyone (Wrap up, 2 minutes, Go to the ad break, Speak up… or your own)
+- **Talkback** — hold T (or the button) to talk privately to one person; works from the control room too
+- **Quick tags** — keys 1–4: Great bit, Cut this, Retake, Ad break (M is still a plain marker)
+- **⏱ Rundown and show clock** — plan segments with timings; everyone sees the clock (amber in the last minute, red when over); each segment becomes a chapter
+- **Loudness history** — the last 5 minutes of each person's level in the Health panel
+
+**Everyone**
+- **🤧 Cough button** — hold C (or the button) to mute your live sound; your recording is untouched, the cough is marked and muted in the Producer mix
+
+**After each take**
+- **Cleaned copy of every voice** (−16 LUFS): repair distortion, rumble + mains hum (50/60 Hz), noise reduction set from the room tone, de-ess, gentle compression, optional gate — all switchable in Studio settings › Clean-up files; the untouched recordings are always kept
+- **Producer mix** replaces the rough mix: cleaned voices + your live fader moves + coughs/talkback muted + intro/outro, at −16 LUFS
+- **Edit list.txt** — tags, segments, coughs, talkback and long pauses, grouped and in time order; also in the Audition markers file (with durations)
+- **🧽 Clean again** on the Recordings page re-makes the cleaned files and Producer mix with your current settings (works even after freeing up space)
+
 ## 1.3.3
 - **Fix: transcripts failing with "Error opening output … No such file or directory".** The system's /tmp clean-up removed the transcription work folder while the studio was running. Work files now live with the recordings, and the folder is re-made before every job
 - A transcript that hiccups once and then carries on no longer reports the old error

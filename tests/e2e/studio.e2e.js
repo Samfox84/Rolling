@@ -77,3 +77,71 @@ test('control room: host runs the show without camera/mic and is not recorded', 
   assert.deepEqual([...host.errors, ...guest.errors], []);
   await host.b.close(); await guest.b.close();
 });
+
+test('producer desk: faders, listening mute, cue card, talkback, cough button, quick tags, show clock, loudness history', { skip }, async () => {
+  const host = await person('Sam', true);
+  const guest = await person('Steve', false);
+  await host.p.waitForSelector('.knock button.primary', { timeout: 5000 }).then(b => b.click()).catch(e => assert.ok(/Timeout/.test(e.message)));
+  await guest.p.waitForSelector('#studio:not(.hidden)');
+  await waitFor(async () => (await host.p.$$eval('.tile:not(.me) video', vs => vs.filter(v => v.srcObject).length)) >= 1, 15000);
+
+  // desk: one strip per person; the fader and 🎧 mute change only what the host hears
+  await host.p.click('#deskBtn');
+  await host.p.waitForSelector('#deskStrips .strip:nth-child(2)');
+  const vol = () => host.p.$eval('.tile:not(.me):not(.hidden) video', v => v.volume);
+  assert.equal(await vol(), 0.5, 'unity fader at the default listening volume');
+  await host.p.$eval('#deskStrips .strip:nth-child(2) .sfader', f => { f.value = '6'; f.dispatchEvent(new Event('input')); });
+  assert.ok(Math.abs((await vol()) - 0.5 * 10 ** (6 / 20)) < 0.01);
+  assert.match(await host.p.textContent('#deskStrips .strip:nth-child(2) .sdb'), /\+6\.0 dB/);
+  await host.p.click('#deskStrips .strip:nth-child(2) .smute');
+  assert.equal(await vol(), 0);
+  await host.p.click('#deskStrips .strip:nth-child(2) .smute');
+  assert.equal(await guest.p.$eval('.tile:not(.me):not(.hidden) video', v => v.volume), 1, 'guests hear everyone normally');
+
+  // cue card to Steve only
+  await host.p.selectOption('#cueTo', { label: 'Steve' });
+  await host.p.click('#cuePresets button:has-text("Wrap up")');
+  await guest.p.waitForSelector('#cue:not(.hidden)');
+  assert.equal(await guest.p.textContent('#cueMsg'), 'Wrap up');
+  await guest.p.click('#cue');
+
+  // talkback: Steve sees the banner and has the private channel playing
+  await host.p.selectOption('#talkTo', { label: 'Steve' });
+  await host.p.hover('#talkBtn'); await host.p.mouse.down();
+  await guest.p.waitForSelector('#talkIn:not(.hidden)');
+  assert.ok(await guest.p.evaluate(() => [...window.__studio.peers.values()].some(p => p.talkEl && p.talkEl.srcObject && p.talkEl.srcObject.getAudioTracks().length)));
+  await waitFor(() => host.p.evaluate(() => [...window.__studio.peers.values()].every(p => p.mainAudio.track === null && p.talkTr.sender.track)), 5000);
+  await host.p.mouse.up();
+  await guest.p.waitForSelector('#talkIn.hidden', { state: 'attached' });
+  await waitFor(() => host.p.evaluate(() => [...window.__studio.peers.values()].every(p => p.mainAudio.track && !p.talkTr.sender.track)), 5000);
+
+  // cough button (hold C): Steve's live sound stops, the host sees 🤧 on his tile
+  await guest.p.keyboard.down('c');
+  await host.p.waitForSelector('.tile.coughing');
+  await waitFor(() => guest.p.evaluate(() => [...window.__studio.peers.values()].every(p => p.mainAudio.track === null)), 5000);
+  await guest.p.keyboard.up('c');
+  await host.p.waitForSelector('.tile.coughing', { state: 'detached' });
+  await waitFor(() => guest.p.evaluate(() => [...window.__studio.peers.values()].every(p => p.mainAudio.track)), 5000);
+
+  // rundown: save, start a segment — everyone sees the show clock
+  await host.p.click('.drawer-tabs [data-tab="rundown"]');
+  await host.p.click('#rdAdd'); await host.p.fill('#rundownList .rdrow input[type=text]', 'Interview');
+  await host.p.click('#rdSave');
+  await waitFor(async () => /Interview/.test(JSON.stringify(await (await fetch(`${srv.url}/api/rooms/${room.id}?k=${room.hostKey}`)).json())), 5000);
+  await host.p.click('#rdNext');
+  await guest.p.waitForSelector('#segClock:not(.hidden)');
+  assert.match(await guest.p.textContent('#segClock'), /Interview · [45]:\d\d left/);
+
+  // record a few seconds with a quick tag, check the loudness history line
+  await host.p.click('#recBtn'); await host.p.click('#modalAlt');
+  await new Promise(r => setTimeout(r, 4000));
+  await host.p.keyboard.press('1');
+  await host.p.click('#healthBtn');
+  await waitFor(async () => (await host.p.$$eval('.lhist polyline', els => els.length)) >= 2, 10000);
+  await host.p.click('#recBtn'); await host.p.click('#modalYes');
+  const take = await waitFor(async () => { const r = await (await fetch(`${srv.url}/api/rooms/${room.id}?k=${room.hostKey}`)).json(); const t = r.takes.find(x => x.status === 'ready' && x.people.includes('Steve')); return t; }, 120000);
+  assert.ok(take.markers.some(m => m.label === 'Great bit 1'));
+  assert.ok(take.outputs.some(o => o.kind === 'producermix'));
+  assert.deepEqual([...host.errors, ...guest.errors], []);
+  await host.b.close(); await guest.b.close();
+});

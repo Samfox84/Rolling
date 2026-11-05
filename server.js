@@ -17,11 +17,12 @@ const express = require('express');
 const { WebSocketServer } = require('ws');
 const archiver = require('archiver');
 const post = require('./post');
+const treat = require('./treat');
 const createTranscriber = require('./transcribe');
 let nodemailer = null;
 try { nodemailer = require('nodemailer'); } catch { /* email optional */ }
 
-const VERSION = '1.3.3';
+const VERSION = '1.4.0';
 
 // ---------- settings (from .env next to this file) ----------
 (function loadEnv() {
@@ -96,6 +97,7 @@ const settings = (() => {
     publicUrl: s.publicUrl || process.env.PUBLIC_URL || '',
     transcribe: Object.assign({ enabled: true, model: process.env.WHISPER_MODEL || 'base.en', language: 'auto' }, s.transcribe),
     autoCompact: !!s.autoCompact,
+    clean: treat.cfg(s.clean),        // clean-up files made after each take (the untouched recordings are always kept)
     adminHash: s.adminHash || '',   // set once the password is changed from the dashboard (scrypt, never stored in plain text)
     sessionGen: s.sessionGen || 0,  // bumped on password change so old logins stop working
   };
@@ -194,7 +196,7 @@ function liveRoom(id) {
   if (!live.has(id)) {
     const saved = readJSON(path.join(roomDir(id), 'admitted.json'), {}) || {};
     const admitted = new Set(Object.keys(saved).filter(c => Date.now() - saved[c] < 12 * 3600e3));
-    live.set(id, { peers: new Map(), waiting: new Map(), admitted, take: null, roomTone: null, chat: [] });
+    live.set(id, { id, peers: new Map(), waiting: new Map(), admitted, take: null, roomTone: null, chat: [] });
   }
   return live.get(id);
 }
@@ -222,7 +224,7 @@ function startRecording(roomId, lr, roomTone, episode) {
   const room = loadRoom(roomId);
   const n = listTakes(roomId).reduce((a, t) => Math.max(a, t.n), 0) + 1;
   const t = { id: rid(10), room: roomId, n, started: Date.now(), stopped: null, status: 'recording', progress: '', error: '',
-    segs: {}, outputs: [], roomTones: [], markers: [], chat: [], backup: null, levels: {}, episode: null };
+    segs: {}, outputs: [], roomTones: [], markers: [], chat: [], backup: null, levels: {}, episode: null, rides: {}, coughs: {} };
   if (episode && (episode.n || episode.title)) {
     t.episode = { n: cleanText(episode.n, 12), title: cleanText(episode.title, 80) };
     const num = parseInt(t.episode.n, 10);
@@ -253,6 +255,8 @@ function stopRecording(roomId, lr) {
   lr.roomTone = null;
   if (!t) return;
   t.stopped = Date.now();
+  // anyone still holding the cough button: close it at the end of the take
+  for (const list of Object.values(t.coughs || {})) for (const c of list) if (c.to == null) c.to = t.stopped - t.started;
   t.status = 'waiting';
   saveTake(t, true);
   broadcast(lr, { t: 'record-stop', take: t.id });
@@ -284,7 +288,7 @@ let queue = Promise.resolve();
 const queued = new Map(), again = new Map();
 function queueProcess(room, take, opts = {}) {
   const k = room + '/' + take;
-  const merge = (a, b) => ({ docsOnly: !!(a && a.docsOnly && b.docsOnly), transcribe: !!((a && a.transcribe) || b.transcribe) });
+  const merge = (a, b) => ({ docsOnly: !!(a && a.docsOnly && b.docsOnly), transcribe: !!((a && a.transcribe) || b.transcribe), clean: !!((a && a.clean) || b.clean) });
   if (queued.has(k)) { again.set(k, again.has(k) ? merge(again.get(k), opts) : opts); return; }
   queued.set(k, opts);
   const t = loadTake(room, take);
@@ -378,7 +382,9 @@ function normaliseFilter(L, target) {
   const limit = Number.isFinite(L.TP) && L.TP + gain > -1;
   return `volume=${gain.toFixed(2)}dB${limit ? ',alimiter=limit=0.85:level=false:attack=5:release=50' : ''}`;
 }
-const DOC_KINDS = new Set(['markers', 'chat', 'session', 'chapters', 'transcript', 'report']);
+const DOC_KINDS = new Set(['markers', 'chat', 'session', 'chapters', 'transcript', 'report', 'editlist']);
+// clientId -> person name (the same names used for the files)
+function takePeople(t) { const m = {}; for (const s of Object.values(t.segs)) if (s._person && !m[s.clientId]) m[s.clientId] = s._person; return m; }
 
 async function processTakeUntraced(roomId, takeId, opts = {}) {
   const t = loadTake(roomId, takeId);
@@ -439,6 +445,8 @@ async function processTakeUntraced(roomId, takeId, opts = {}) {
   if (opts.transcribe && wantTranscript) for (const s of audioSegs) { previousTx.set(s, s.tx); s.tx = { done: 0, parts: [] }; }
   if (!docsOnly) total += audioSegs.length + nPeople * 4 + 2 + videoSegs.length * 8 + shares.length * 4;
   if (wantTranscript) total += 4;
+  const wantTreat = !docsOnly || !!opts.clean;
+  if (wantTreat) total += nPeople * 4 + 3;
   total += 1;
 
   if (!docsOnly) {
@@ -527,20 +535,7 @@ async function processTakeUntraced(roomId, takeId, opts = {}) {
       }
     }
     finish();
-    begin('Rough mix with intro and outro', 1);
     for (const k of ['intro', 'outro']) if (assets[k]) { const f = k === 'intro' ? 'Intro.wav' : 'Outro.wav'; try { await fsp.copyFile(assets[k].path, path.join(out, f)); add(f, k, 'Everyone'); } catch (e) { errors.push(`${f}: ${e.message}`); } }
-    const showFile = wavs.length > 1 ? 'Mix - all voices.wav' : wavs[0];
-    if (showFile) {
-      const parts = [assets.intro && assets.intro.path, path.join(out, showFile), assets.outro && assets.outro.path].filter(Boolean);
-      const file = `Rough mix${assets.intro || assets.outro ? ' (intro + show + outro)' : ''} -16 LUFS.wav`;
-      const fc = parts.map((_, i) => `[${i}:a]aformat=sample_rates=48000:channel_layouts=stereo[a${i}]`).join(';') + ';' +
-        parts.map((_, i) => `[a${i}]`).join('') + `concat=n=${parts.length}:v=0:a=1,loudnorm=I=-16:TP=-1:LRA=11,aresample=48000[out]`;
-      try {
-        await ff([...parts.flatMap(p => ['-i', p]), '-filter_complex', fc, '-map', '[out]', '-ar', '48000', '-c:a', 'pcm_s24le', path.join(out, file)], report, takeSecs + (assets.intro ? assets.intro.dur : 0) + (assets.outro ? assets.outro.dur : 0));
-        add(file, 'roughmix', 'Everyone');
-      } catch (e) { errors.push(`${file}: ${e.message.slice(0, 300)}`); }
-    }
-    finish();
 
     // --- camera video: original file + an editor-friendly H.264 MP4 lined up to the take ---
     for (let i = 0; i < videoSegs.length; i++) {
@@ -602,6 +597,9 @@ async function processTakeUntraced(roomId, takeId, opts = {}) {
 
   }
 
+  // --- treatment: cleaned voices, the Producer mix (live fader moves + coughs), long pauses ---
+  if (wantTreat) await treatTake(t, segs, out, add, assets, errors, { begin, finish, report, takeSecs });
+
   // --- finish the transcript (most of it was done live while recording) ---
   if (wantTranscript) {
     begin(opts.transcribe ? 'Making the transcript' : 'Finishing the transcript', 4);
@@ -637,6 +635,72 @@ async function processTakeUntraced(roomId, takeId, opts = {}) {
   }
 }
 
+// cleaned copy of each voice + Producer mix + long pauses. Works from the finished WAVs, so it can be re-run
+// any time (even after "free up space") from the Recordings page with new clean-up settings.
+// how loud someone's background noise is, from their room tone (skipping the first and last half second)
+async function roomToneLevel(file) {
+  const r = await run(FFMPEG, ['-hide_banner', '-nostdin', '-ss', '0.5', '-i', file, '-af', 'atrim=end=19,astats=measure_perchannel=none', '-f', 'null', '-'], { stdout: 'ignore', timeoutMs: 120000 });
+  const db = treat.parseRms(r.stderr);
+  if (db === null) log.warn('treat', `room tone ${path.basename(file)} is digital silence — noise reduction will follow the noise instead`);
+  return db;
+}
+async function treatTakeUntraced(t, segs, out, add, assets, errors, { begin, finish, report, takeSecs }) {
+  const c = settings.clean;
+  for (const o of t.outputs.filter(o => ['cleaned', 'producermix', 'roughmix'].includes(o.kind))) await fsp.rm(path.join(out, o.file), { force: true }).catch(e => log.warn('treat', `could not remove old ${o.file}`, e));
+  t.outputs = t.outputs.filter(o => !['cleaned', 'producermix', 'roughmix'].includes(o.kind));
+  t.pauses = [];
+  const voices = t.outputs.filter(o => o.kind === 'audio' && fs.existsSync(path.join(out, o.file)));
+  const sources = [];
+  for (const o of voices) {
+    const person = o.person;
+    let file = o.file, baseDb = 0;
+    if (c.auto) {
+      begin(`Cleaning up ${person}`, 3);
+      const tmp = path.join(out, `.${person} - cleaning.wav`), name = `${person} - cleaned -16 LUFS.wav`;
+      try {
+        const tone = t.outputs.find(x => x.kind === 'roomtone' && x.person === person);
+        const noiseDb = tone ? await roomToneLevel(path.join(out, tone.file)) : null;
+        await ff(['-i', path.join(out, o.file), '-af', treat.cleanFilter(c, noiseDb), '-c:a', 'pcm_f32le', tmp], report, takeSecs);
+        const L = await measureLoudness(tmp);
+        if (!Number.isFinite(L.I)) throw new Error('no speech found to clean');
+        await ff(['-i', tmp, '-af', normaliseFilter(L, -16), '-ar', '48000', '-c:a', 'pcm_s24le', path.join(out, name)]);
+        add(name, 'cleaned', person);
+        file = name;
+        const raw = t.levels && t.levels[person];
+        baseDb = raw && Number.isFinite(raw.I) ? raw.I + 16 : 0; // the Producer mix keeps everyone as loud as they were live
+      } catch (e) { errors.push(`Clean-up ${person}: ${e.message.slice(0, 300)}`); }
+      finally { await fsp.rm(tmp, { force: true }).catch(log.ignore('treat', 'remove temp clean-up file')); }
+      finish();
+    }
+    // everyone this person was (one person can have several browser ids if they rejoined from another device)
+    const ids = new Set(segs.filter(sg => sg._person === person).map(sg => sg.clientId));
+    const rides = [], coughs = [];
+    for (const id of ids) { rides.push(...((t.rides || {})[id] || [])); coughs.push(...((t.coughs || {})[id] || [])); }
+    sources.push({ file: path.join(out, file), gain: treat.envelope(rides, coughs, baseDb) });
+  }
+  if (!sources.length) return;
+  begin('Making the Producer mix', 2);
+  const rawMix = path.join(out, '.producer-mix.wav'), pausesTxt = path.join(out, '.pauses.txt');
+  try {
+    await treat.mixWithEnvelopes(sources, rawMix, f => report(f * 0.5));
+    if (c.pauses > 0) {
+      await ff(['-i', rawMix, '-af', treat.pauseFilter(c.pauses, pausesTxt), '-f', 'null', '-']);
+      t.pauses = treat.parsePauses(await fsp.readFile(pausesTxt, 'utf8').catch(e => { if (e.code === 'ENOENT') return ''; throw e; }));
+    }
+    const parts = [assets.intro && assets.intro.path, rawMix, assets.outro && assets.outro.path].filter(Boolean);
+    const file = `Producer mix${assets.intro || assets.outro ? ' (intro + show + outro)' : ''} -16 LUFS.wav`;
+    const fc = parts.map((_, i) => `[${i}:a]aformat=sample_rates=48000:channel_layouts=stereo[a${i}]`).join(';') + ';' +
+      parts.map((_, i) => `[a${i}]`).join('') + `concat=n=${parts.length}:v=0:a=1,loudnorm=I=-16:TP=-1:LRA=11,aresample=48000[out]`;
+    await ff([...parts.flatMap(p => ['-i', p]), '-filter_complex', fc, '-map', '[out]', '-ar', '48000', '-c:a', 'pcm_s24le', path.join(out, file)], f => report(0.5 + f * 0.5), takeSecs + (assets.intro ? assets.intro.dur : 0) + (assets.outro ? assets.outro.dur : 0));
+    add(file, 'producermix', 'Everyone');
+  } catch (e) { errors.push(`Producer mix: ${e.message.slice(0, 300)}`); }
+  finally {
+    await fsp.rm(rawMix, { force: true }).catch(log.ignore('treat', 'remove temp mix'));
+    await fsp.rm(pausesTxt, { force: true }).catch(log.ignore('treat', 'remove temp pauses list'));
+  }
+  finish();
+}
+
 async function buildDocsUntraced(t, room, out, add, assets) {
   const title = takeLabel(room, t);
   const introLen = assets.intro ? assets.intro.dur : 0;
@@ -649,9 +713,13 @@ async function buildDocsUntraced(t, room, out, add, assets) {
     add(file, kind, person);
   };
   // markers (times in the take) + Audition markers lined up with the session (after the intro)
+  const edits = post.editItems(t, markers, takePeople(t));
+  if (markers.length) await write('Markers.txt', markers.map(m => `${post.hms(m.at / 1000)}  ${m.label}${m.by ? '  (' + m.by + ')' : ''}`).join('\r\n') + '\r\n', 'markers');
+  if (edits.length) {
+    await write('Edit list.txt', post.editList(edits, title), 'editlist');
+    await write('Markers (Audition).csv', post.auditionMarkersCsv(edits.map(m => ({ ...m, at: introLen + m.at }))), 'markers');
+  }
   if (markers.length) {
-    await write('Markers.txt', markers.map(m => `${post.hms(m.at / 1000)}  ${m.label}${m.by ? '  (' + m.by + ')' : ''}`).join('\r\n') + '\r\n', 'markers');
-    await write('Markers (Audition).csv', post.auditionMarkersCsv(markers.map(m => ({ ...m, at: introLen + m.at / 1000 }))), 'markers');
     const ch = post.chapters(t, introLen);
     if (ch) { await write('Chapters.json', ch.json, 'chapters'); await write('Chapters (YouTube).txt', ch.youtube, 'chapters'); }
   }
@@ -746,6 +814,7 @@ async function notifyReadyUntraced(room, t) {
 
 // every pipeline step logs ENTER / EXIT (with time taken) / EXCEPTION  (LOG_LEVEL=debug to see them)
 const processTake = log.trace('build', processTakeUntraced);
+const treatTake = log.trace('treat', treatTakeUntraced);
 const buildDocs = log.trace('docs', buildDocsUntraced);
 const backupTake = log.trace('backup', backupTakeUntraced);
 const compactTake = log.trace('tidy', compactTakeUntraced);
@@ -819,7 +888,7 @@ app.post('/api/settings/password', needAdmin, express.json(), (req, res) => {
 app.get('/api/settings', needAdmin, async (req, res) => {
   res.json({ smtp: { ...settings.smtp, pass: settings.smtp.pass ? MASK : '' }, turn: { keyId: settings.turn.keyId, token: settings.turn.token ? MASK : '' },
     backupDir: settings.backupDir, publicUrl: settings.publicUrl, backup: await backupStatus(), emailAvailable: !!nodemailer, turnError: cfIce.error, passwordChanged: !!settings.adminHash,
-    transcribe: { ...settings.transcribe, installed: transcriber.available(), models: transcriber.installedModels() }, autoCompact: settings.autoCompact });
+    transcribe: { ...settings.transcribe, installed: transcriber.available(), models: transcriber.installedModels() }, autoCompact: settings.autoCompact, clean: settings.clean });
 });
 app.post('/api/settings', needAdmin, express.json(), async (req, res) => {
   const b = req.body || {};
@@ -829,6 +898,7 @@ app.post('/api/settings', needAdmin, express.json(), async (req, res) => {
   if ('publicUrl' in b) settings.publicUrl = cleanText(b.publicUrl, 200).replace(/\/+$/, '');
   if (b.transcribe) { settings.transcribe.enabled = !!b.transcribe.enabled; if (/^[a-z0-9.-]{2,40}$/.test(b.transcribe.model || '')) settings.transcribe.model = b.transcribe.model; if (/^[a-z]{2}$|^auto$/.test(b.transcribe.language || '')) settings.transcribe.language = b.transcribe.language; }
   if ('autoCompact' in b) settings.autoCompact = !!b.autoCompact;
+  if (b.clean && typeof b.clean === 'object') settings.clean = treat.cfg({ ...settings.clean, ...b.clean });
   if (settings.backupDir) { try { fs.mkdirSync(settings.backupDir, { recursive: true }); } catch (e) { return res.status(400).json({ error: `Can't use that backup folder: ${e.message}` }); } }
   saveSettings();
   res.json({ ok: true, backup: await backupStatus() });
@@ -867,9 +937,11 @@ function takeSummary(t) {
     transcript: transcriptStatus(t),
     totalSize: (t.outputs || []).reduce((a, o) => a + o.size, 0) };
 }
+// show rundown: [{ name, mins }] — up to 40 segments
+function cleanRundown(list) { return list.slice(0, 40).map(x => ({ name: cleanText(x && x.name, 60) || 'Segment', mins: Math.max(0, Math.min(600, Math.round((Number(x && x.mins) || 0) * 10) / 10)) })); }
 function roomSummary(r) {
   const lr = live.get(r.id);
-  return { id: r.id, name: r.name, created: r.created, hostKey: r.hostKey, waitingRoom: r.waitingRoom !== false, notifyEmail: r.notifyEmail || '', assets: r.assets || {}, lastEpisode: r.lastEpisode || 0,
+  return { id: r.id, name: r.name, created: r.created, hostKey: r.hostKey, waitingRoom: r.waitingRoom !== false, notifyEmail: r.notifyEmail || '', assets: r.assets || {}, lastEpisode: r.lastEpisode || 0, rundown: r.rundown || [],
     online: lr ? [...lr.peers.values()].map(p => p.name) : [], recording: !!(lr && lr.take), takes: listTakes(r.id).map(takeSummary) };
 }
 
@@ -903,7 +975,10 @@ app.post('/api/rooms/:id/settings', express.json(), (req, res) => {
   if ('waitingRoom' in b) r.waitingRoom = !!b.waitingRoom;
   if ('notifyEmail' in b) r.notifyEmail = cleanText(b.notifyEmail, 300);
   if ('name' in b && b.name) r.name = cleanName(b.name);
+  if (Array.isArray(b.rundown)) r.rundown = cleanRundown(b.rundown);
   saveRoom(r);
+  const lr = live.get(r.id);
+  if (lr && Array.isArray(b.rundown)) broadcast(lr, { t: 'rundown', rundown: r.rundown || [] });
   res.json(roomSummary(r));
 });
 app.post('/api/rooms/:id/takes/:take/rebuild', (req, res) => {
@@ -971,6 +1046,16 @@ app.post('/api/rooms/:id/takes/:take/transcribe', (req, res) => {
   if (t.compacted) return res.status(409).json({ error: 'This take\'s raw audio was deleted to save space, so it can\'t be transcribed now' });
   if (['recording', 'processing', 'queued'].includes(t.status)) return res.status(409).json({ error: 'Busy — try again when the take is ready' });
   queueProcess(r.id, t.id, { docsOnly: true, transcribe: true });
+  res.json({ ok: true });
+});
+app.post('/api/rooms/:id/takes/:take/clean', (req, res) => {
+  const r = loadRoom(req.params.id);
+  if (!canManage(req, r)) return res.status(403).json({ error: 'Not allowed' });
+  const t = loadTake(r.id, req.params.take);
+  if (!t) return res.status(404).json({ error: 'Not found' });
+  if (!['ready', 'error'].includes(t.status)) return res.status(409).json({ error: 'Busy — try again when the take is ready' });
+  if (!t.outputs.some(o => o.kind === 'audio')) return res.status(409).json({ error: 'This take has no recordings to clean' });
+  queueProcess(r.id, t.id, { docsOnly: true, clean: true });
   res.json({ ok: true });
 });
 app.post('/api/rooms/:id/takes/:take/compact', express.json(), async (req, res) => {
@@ -1089,6 +1174,7 @@ wss.on('connection', ws => {
       peers: [...lr.peers.values()].filter(p => p !== peer).map(peerInfo),
       recording: t ? { take: t.id, started: t.started, n: t.n, markers: (t.markers || []).length } : null, nextEpisode: (room.lastEpisode || 0) + 1,
       roomToneSeconds: ROOM_TONE_SECONDS, roomTone: lr.roomTone && lr.roomTone.end > Date.now() ? lr.roomTone : null,
+      rundown: room.rundown || [], segment: lr.segment || null, coughing: [...lr.peers.values()].filter(p => p.coughing).map(p => p.id),
       chat: lr.chat.slice(-100), waiting: peer.isHost ? [...lr.waiting.values()].map(w => ({ id: w.id, name: w.name })) : [],
       disk: peer.isHost ? await diskInfo() : null, gbPerPersonHour: GB_PER_PERSON_HOUR, minFreeGB: MIN_FREE_GB });
     if (t && !peer.control) {
@@ -1129,6 +1215,13 @@ wss.on('connection', ws => {
       case 'state': peer.state = m.state || {}; broadcast(lr, { t: 'peer-state', id: peer.id, state: peer.state }, peer.id); return;
       case 'screen': peer.screenId = m.on ? validStreamId(m.streamId) : null; broadcast(lr, { t: 'screen', id: peer.id, on: !!m.on, streamId: peer.screenId }, peer.id); return;
       case 'meter': if (m.m && typeof m.m === 'object') toHosts(lr, { t: 'meter', id: peer.id, m: m.m }); return;
+      case 'cough': { // held cough button: live sound muted for everyone; marked for the edit (the recording is untouched)
+        const on = !!m.on; if (on === !!peer.coughing) return;
+        peer.coughing = on;
+        broadcast(lr, { t: 'cough', id: peer.id, on });
+        markRange(lr, peer, on, 'cough');
+        return;
+      }
       case 'chat': {
         const text = cleanText(m.text, 500); if (!text) return;
         const msg = { t: 'chat', id: rid(6), from: peer.name, pid: peer.id, text, ts: Date.now() };
@@ -1152,9 +1245,47 @@ wss.on('connection', ws => {
       case 'marker': {
         const t = lr.take && loadTake(roomId, lr.take); if (!t) return;
         t.markers = t.markers || [];
-        const mk = { at: Date.now() - t.started, label: cleanText(m.label, 80) || `Marker ${t.markers.length + 1}`, by: peer.name };
+        const tag = post.TAGS[m.tag] ? m.tag : null;
+        const same = t.markers.filter(x => (x.tag || null) === tag).length + 1;
+        const mk = { at: Date.now() - t.started, label: cleanText(m.label, 80) || (tag ? `${post.TAGS[tag]} ${same}` : `Marker ${same}`), by: peer.name, ...(tag ? { tag } : {}) };
         t.markers.push(mk); saveTake(t, true);
         toHosts(lr, { t: 'marker', n: t.markers.length, ...mk });
+        return;
+      }
+      case 'ride': { // the host moved a fader on the producer desk — baked into the Producer mix
+        const target = lr.peers.get(m.id); if (!target) return;
+        const db = m.db === null ? null : Number(m.db);
+        if (db !== null && !(Number.isFinite(db) && db >= -60 && db <= 12)) return;
+        const t = lr.take && loadTake(roomId, lr.take); if (!t) return;
+        t.rides = t.rides || {}; const list = t.rides[target.clientId] || (t.rides[target.clientId] = []);
+        list.push({ at: Math.max(0, Date.now() - t.started), db });
+        if (list.length > 20000) list.splice(0, list.length - 20000);
+        saveTake(t);
+        return;
+      }
+      case 'cue': { // big on-screen message for one person (or everyone)
+        const text = cleanText(m.text, 120); if (!text) return;
+        const msg = { t: 'cue', text, from: peer.name };
+        if (m.to === 'all') broadcast(lr, msg, peer.id);
+        else { const to = lr.peers.get(m.to); if (to) send(to.ws, msg); }
+        return;
+      }
+      case 'talk': { // talkback: the host speaks privately to one person — muted in the Producer mix, marked in the edit list
+        const to = lr.peers.get(m.to); if (!to || to === peer) return;
+        const on = !!m.on;
+        send(to.ws, { t: 'talk', from: peer.id, on, name: peer.name });
+        if (on !== !!peer.talking) { peer.talking = on; if (!peer.control) markRange(lr, peer, on, 'talk'); }
+        return;
+      }
+      case 'segment': { // rundown: start a segment (or stop the clock with idx = -1)
+        const room = loadRoom(roomId); const list = (room && room.rundown) || [];
+        const idx = Number(m.idx);
+        if (idx === -1) { lr.segment = null; broadcast(lr, { t: 'segment', segment: null }); return; }
+        if (!Number.isInteger(idx) || !list[idx]) return;
+        lr.segment = { idx, name: list[idx].name, mins: list[idx].mins, at: Date.now() };
+        broadcast(lr, { t: 'segment', segment: lr.segment });
+        const t = lr.take && loadTake(roomId, lr.take);
+        if (t) { t.markers = t.markers || []; const mk = { at: Date.now() - t.started, label: list[idx].name, by: peer.name, tag: 'segment' }; t.markers.push(mk); saveTake(t, true); toHosts(lr, { t: 'marker', n: t.markers.length, ...mk }); }
         return;
       }
       case 'admit': {
@@ -1171,6 +1302,8 @@ wss.on('connection', ws => {
   ws.on('close', () => {
     if (waiting && lr) { lr.waiting.delete(waiting.id); toHosts(lr, { t: 'knock-gone', id: waiting.id }); }
     if (!peer || !lr) return;
+    if (peer.coughing) { peer.coughing = false; broadcast(lr, { t: 'cough', id: peer.id, on: false }); markRange(lr, peer, false, 'cough'); } // left mid-cough
+    if (peer.talking) { peer.talking = false; markRange(lr, peer, false, 'talk'); }
     if (lr.peers.get(peer.id) === peer) {
       lr.peers.delete(peer.id);
       broadcast(lr, { t: 'peer-left', id: peer.id });
@@ -1180,6 +1313,16 @@ wss.on('connection', ws => {
     if (lr.peers.size === 0 && lr.take) scheduleEmptyStop(roomId, lr, 5);
   });
 });
+// a stretch of a person's recording that's muted in the Producer mix and listed in the edit list (cough button, talkback)
+function markRange(lr, peer, on, kind) {
+  const tk = lr.take && loadTake(lr.id, lr.take); if (!tk) return;
+  tk.coughs = tk.coughs || {};
+  const list = tk.coughs[peer.clientId] || (tk.coughs[peer.clientId] = []);
+  const at = Date.now() - tk.started;
+  if (on) list.push({ from: at, to: null, ...(kind === 'talk' ? { kind } : {}) });
+  else { const open = list.slice().reverse().find(c => c.to == null && (c.kind || 'cough') === kind); if (open) open.to = Math.max(open.from + 50, at); }
+  saveTake(tk);
+}
 function scheduleEmptyStop(roomId, lr, minutes) {
   const take = lr.take;
   setTimeout(() => { if (lr.peers.size === 0 && lr.take === take) { log.info('rec', 'nobody came back — stopping take'); stopRecording(roomId, lr); } }, minutes * 60 * 1000);

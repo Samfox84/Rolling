@@ -40,9 +40,14 @@ function transcriptVtt(t) {
   return 'WEBVTT\n\n' + parts.map(p => `${vttTime(p.from)} --> ${vttTime(Math.max(p.to, p.from + 0.5))}\n<v ${p.who}>${p.text}\n`).join('\n');
 }
 
-// ---------- chapters (from markers) ----------
+// ---------- quick tags (producer desk) ----------
+const TAGS = { great: 'Great bit', cut: 'Cut this', retake: 'Retake', ad: 'Ad break', segment: 'Segment' };
+// tags that are edit notes, not places a listener would jump to
+const NOT_CHAPTERS = new Set(['great', 'cut', 'retake']);
+
+// ---------- chapters (from markers: plain markers, rundown segments, ad breaks) ----------
 function chapters(t, introLen) {
-  const marks = (t.markers || []).slice().sort((a, b) => a.at - b.at);
+  const marks = (t.markers || []).filter(m => !NOT_CHAPTERS.has(m.tag)).sort((a, b) => a.at - b.at);
   if (!marks.length) return null;
   const list = [];
   if (introLen) list.push({ startTime: 0, title: 'Intro' });
@@ -52,6 +57,36 @@ function chapters(t, introLen) {
     json: JSON.stringify({ version: '1.2.0', chapters: list }, null, 2),
     youtube: list.map(c => `${ytTime(c.startTime)} ${c.title}`).join('\r\n') + '\r\n',
   };
+}
+
+// ---------- edit list: everything worth knowing in the edit, in time order ----------
+/**
+ * markers (labelled), coughs per person and long pauses → [{ at (s), dur (s), label, group }]
+ * people: clientId → person name
+ */
+function editItems(t, markers, people) {
+  const items = [];
+  for (const m of markers) items.push({ at: m.at / 1000, dur: 0, label: m.label, group: m.tag ? TAGS[m.tag] || 'Marker' : 'Marker', by: m.by });
+  for (const [id, list] of Object.entries(t.coughs || {})) for (const c of list) {
+    if (c.to == null) continue;
+    const g = c.kind === 'talk' ? 'Talkback' : 'Cough';
+    items.push({ at: c.from / 1000, dur: (c.to - c.from) / 1000, label: `${g} — ${people[id] || 'someone'}`, group: g });
+  }
+  for (const p of t.pauses || []) items.push({ at: p.at, dur: p.dur, label: `Pause ${p.dur.toFixed(1)} s`, group: 'Long pause' });
+  return items.sort((a, b) => a.at - b.at);
+}
+function editList(items, title) {
+  const groups = ['Cut this', 'Retake', 'Great bit', 'Ad break', 'Segment', 'Marker', 'Cough', 'Talkback', 'Long pause'];
+  const lines = [`${title} — edit list`, 'Times are from the start of the recordings (the untouched and cleaned files). Coughs and talkback are already muted in the Producer mix.', ''];
+  for (const g of groups) {
+    const list = items.filter(i => i.group === g); if (!list.length) continue;
+    lines.push(`${g.toUpperCase()} (${list.length})`);
+    for (const i of list) lines.push(`  ${hms(i.at)}${i.dur ? `  to ${hms(i.at + i.dur)}` : ' '.repeat(13)}  ${i.label}${i.by ? `  (${i.by})` : ''}`);
+    lines.push('');
+  }
+  lines.push('EVERYTHING IN ORDER');
+  for (const i of items) lines.push(`  ${hms(i.at)}  [${i.group}] ${i.label}${i.dur && i.group !== 'Long pause' ? ` (${i.dur.toFixed(1)} s)` : ''}`);
+  return lines.join('\r\n') + '\r\n';
 }
 
 // ---------- level report ----------
@@ -166,7 +201,7 @@ function fcpXml(title, items, markers) {
 
 function auditionMarkersCsv(markers) {
   const t = sec => { const h = Math.floor(sec / 3600), m = Math.floor((sec % 3600) / 60), s = (sec % 60).toFixed(3).padStart(6, '0'); return h ? `${h}:${pad(m)}:${s}` : `${m}:${s}`; };
-  return 'Name\tStart\tDuration\tTime Format\tType\tDescription\r\n' + markers.map(m => `${m.label.replace(/\t/g, ' ')}\t${t(m.at)}\t0:00.000\tdecimal\tCue\t`).join('\r\n') + '\r\n';
+  return 'Name\tStart\tDuration\tTime Format\tType\tDescription\r\n' + markers.map(m => `${m.label.replace(/\t/g, ' ')}\t${t(m.at)}\t${t(m.dur || 0)}\tdecimal\tCue\t${(m.group || '').replace(/\t/g, ' ')}`).join('\r\n') + '\r\n';
 }
 
-module.exports = { hms, transcriptTxt, transcriptSrt, transcriptVtt, chapters, levelReport, verdict, sesx, fcpXml, auditionMarkersCsv };
+module.exports = { TAGS, editItems, editList, hms, transcriptTxt, transcriptSrt, transcriptVtt, chapters, levelReport, verdict, sesx, fcpXml, auditionMarkersCsv };

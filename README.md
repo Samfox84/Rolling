@@ -18,11 +18,21 @@ Version: see [CHANGELOG.md](CHANGELOG.md). Licence: [GNU AGPL-3.0](LICENSE) — 
 **Post-production**
 - **Live level bars** on every person's video tile (green / amber / red, peak hold, clip light) and **broadcast loudness meters** (EBU R128) for everyone, live in the host's Health panel.
 - **Level report + normalised copies** of every person at −16 LUFS (podcast) and −23 LUFS (broadcast), alongside the untouched recordings.
-- **Intro & outro** per show, added to the session files and a −16 LUFS rough mix.
+- **Intro & outro** per show, added to the session files and a −16 LUFS Producer mix.
 - **Native Audition session (.sesx)** plus XML for Premiere / Resolve.
 - **Transcripts** (TXT, SRT, VTT, with speaker names) made on your own server with [whisper.cpp](https://github.com/ggml-org/whisper.cpp), transcribed live in the background while you record. The Recordings page shows each transcript's progress or why it failed, with a **Make transcript** button for older takes.
 - **Chapters** from markers, **episode numbers and titles** in file names, progress bars for everything.
 - **Control room** — the host can run the show without being on camera.
+
+**Producer desk (live)**
+- **🎚 Desk** — a fader per person (what you hear + baked into the **Producer mix**), 🎧 mute/solo for your ears only.
+- **Cue cards** to one person or everyone, **talkback** (hold T), **quick tags** (keys 1–4: Great bit, Cut this, Retake, Ad break).
+- **⏱ Rundown + show clock** everyone can see; segments become chapters. **Loudness history** for each person.
+- **🤧 Cough button** for everyone (hold C) — mutes live sound only; marked and muted in the Producer mix.
+
+**Clean-up (after each take — the untouched files are always kept)**
+- **Cleaned copy of every voice** — declip, rumble + mains hum, noise reduction from the room tone, de-ess, compression, optional gate. Settings in Studio settings › Clean-up files; **🧽 Clean again** to redo a take.
+- **Producer mix** (cleaned voices + your fader moves + intro/outro, −16 LUFS) and an **Edit list** (tags, segments, coughs, talkback, long pauses).
 
 **Fail-safes**
 - **Crash-proof** — every piece is saved to the guest's own disk *before* uploading, and only deleted once the server has it. If a browser crashes, the laptop dies or the tab is closed, reopening the link carries on uploading; the take rebuilds itself automatically.
@@ -100,7 +110,7 @@ Each install gets its own random password, shown at the end of the install. Chan
 
 ## Tests
 ```bash
-npm test            # 47 tests: loudness meter accuracy, transcripts, documents, a full recording through the real server
+npm test            # 55 tests: loudness meter accuracy, transcripts, documents, a full recording through the real server
 npm run test:e2e    # real browsers (needs: npm i -g playwright && npx playwright install chromium)
 ```
 Tests never touch the internet (`NO_EXTERNAL_CALLS=1`) and use a stand-in for whisper.cpp.

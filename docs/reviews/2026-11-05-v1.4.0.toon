@@ -1,0 +1,59 @@
+role: implementation-architect
+review: Rolling v1.3.3 → v1.4.0 producer desk + clean-up files (no-orphans-no-dual-paths | golden-plan guardrails | architecture-review gates)
+date: 2026-11-05
+reviewer: Claude (Anthropic) — model claude-opus-5-5 — directed by Sam Fox
+format: TOON
+
+summary: |
+  Sam asked for all 14 producer/treatment options. Answers: cue cards go to a chosen person (or everyone);
+  cleaned files are separate, made automatically, with settings — the untouched ISOs are always kept.
+  Built: desk faders (monitor + Producer mix automation), listening mute/solo, cue cards, talkback, cough
+  button, quick tags, rundown + show clock, loudness history; cleaned voices (declip, rumble/hum, noise
+  reduction from room tone, de-ess, compression, gate), Producer mix, long-pause detection, Edit list,
+  "Clean again". 55 unit/integration tests + 4 real-browser tests pass; key wiring mutation-checked.
+
+decisions:
+  [6]{id|decision|why}:
+  D1 | Producer mix replaces the Rough mix (same place in the pipeline) | R2 no dual paths — one mixed-down file, now with the desk applied
+  D2 | Host hears faders through the video element volume (0…1), default listening volume 50 % | keeps the browser's echo cancellation working for guests; 50 % leaves +6 dB of audible boost
+  D3 | Producer mix uses cleaned voices gain-matched back to their live loudness, then the fader moves | the host's moves were made against live levels — applying them to normalised copies would double-correct
+  D4 | Noise reduction uses the room tone's measured level (afftdn nf) instead of ffmpeg's "sample noise" command | measured: the sample command had no effect in ffmpeg 6.1 (identical output); nf from room tone gave ~11 dB less hiss with the voice unchanged
+  D5 | One function decides what audio each peer receives (updateAudioSenders) | mic recovery, cough and talkback all change senders — one path, no conflicts
+  D6 | Talkback/cough stretches recorded as ranges on the person (t.coughs, kind talk) | muted in the Producer mix and listed in the edit list; the untouched recording is never edited
+
+rules_checked:
+  [3]{rule|result}:
+  R1 No orphaned code   | PASS — scan of server/treat/post/room/pages: every function has a caller (loadEnv is self-invoking, as before); treat.DEFAULTS no longer exported
+  R2 No dual paths      | PASS — rough-mix path removed; mic-recovery sender loops replaced by updateAudioSenders; one range recorder (markRange) for cough + talkback
+  R3 Deferred tracked   | 3 items (see deferred)
+
+tests:
+  run: npm test  (55)   npm run test:e2e  (4)
+  [5]{file|added|covers}:
+  tests/treat.test.js     | 6 NEW | settings validation, filter chain per setting, real ffmpeg: hiss/hum down >10 dB and voice kept, envelope ramps/off/cough fades, float mix + mute, pause detection
+  tests/post.test.js      | +2    | edit list grouping/alignment/durations, Audition CSV durations, chapters skip edit notes
+  tests/server.test.js    | +~20 asserts | rides/segment/tags/cue/talk/cough over WebSocket, guests can't cue or ride, cleaned -16 LUFS measured, Producer mix silent where the host pulled the fader, edit list content, Clean again with cleaning off, untouched WAV unchanged
+  tests/e2e/studio.e2e.js | +1    | real browsers: fader → volume, mute, cue overlay, talkback channel + banner, cough (C key) mutes senders + host sees 🤧, rundown save + clock on guest, tag key, loudness history, take builds Producer mix
+  mutation_check:
+    [4]{mutation|result}:
+    Producer mix ignores fader moves        | server test FAILS — caught
+    coughs/talkback never stored            | server test FAILS — caught
+    cue cards sent to everyone incl. sender | server test FAILS — caught
+    tile meters not drawn (from 1.3.2)      | e2e FAILS — caught
+
+gates:
+  [8]{gate|status|notes}:
+  A  | PASS | server→treat/post, page→common.js api(); all new WS messages have a sender and a handler
+  B  | PASS | no new packages; ffmpeg filters used (adeclip afftdn deesser acompressor agate bandreject highpass silencedetect ametadata astats) exist in ffmpeg 4.4+
+  C  | PASS | existing endpoints unchanged; new: POST /api/rooms/:id/takes/:take/clean; room settings accept rundown; settings accept clean
+  D  | PASS | filter behaviour measured, not assumed (D4)
+  D2 | PASS | desk → WS ride/cough/talk → take.json → treatTake envelope → Producer mix → Edit list/CSV; every stage asserted in the integration test
+  E  | PASS |
+  F  | PASS | node --check all JS; unused-function scan clean
+  G  | PASS | 55/55 + 4/4
+
+deferred:
+  [3]{item|why|needs_confirmation}:
+  ENTER/EXIT trace on every function >5 lines | carried from 1.3.1 — trace on pipeline steps only (now incl. treatTake) | YES — Sam (asked before; still open)
+  Talkback from the control room on a real Mac/Chrome | needs a real mic permission prompt; tested with fake devices | Sam's next show
+  Clean-up sound on real voices | judged by measurement on test signals; settings can be changed + "Clean again" | Sam to listen

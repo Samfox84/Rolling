@@ -1,6 +1,6 @@
 (() => {
 'use strict';
-const { $, esc, toast, quiet, LS, fmtMB } = window.Rolling;
+const { $, esc, toast, quiet, LS, fmtMB, api } = window.Rolling;
 const roomId = location.pathname.split('/').filter(Boolean)[1] || '';
 const hostKey = new URLSearchParams(location.search).get('k') || '';
 function rand(n) { const c = 'abcdefghijkmnpqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789'; let s = ''; for (const x of crypto.getRandomValues(new Uint8Array(n))) s += c[x % c.length]; return s; }
@@ -29,6 +29,15 @@ let nextEpisode = 1;
 let build = null;                   // progress of the take being built (host)
 let uploadPeak = 0;                 // for the upload progress bar
 const markers = [];
+// producer desk (host): per person { db (null = fader off), mute, solo } — mute/solo are for the host's ears only
+const desk = new Map();
+let monVol = 0.5;
+let coughing = false;               // my cough button is held: my live sound is muted (recording untouched)
+let talking = null;                 // host: peer id I'm doing talkback to
+let talkMic = null;                 // host in the control room: a mic just for talkback
+const talkStream = new MediaStream(); // host: the private talkback channel to each person
+let rundown = [], segment = null;   // show clock
+const loudHist = new Map();         // id -> last 5 minutes of short-term loudness (one value a second)
 let clockOffset = Date.now() - performance.now();
 const syncSamples = [];
 const serverNow = () => performance.now() + clockOffset;
@@ -389,8 +398,7 @@ async function recoverMic() {
       for (const old of stream.getAudioTracks()) { old.onended = null; stream.removeTrack(old); old.stop(); }
       nt.enabled = micOn; stream.addTrack(nt);
       connectMic();
-      for (const p of peers.values()) for (const snd of p.pc.getSenders()) if (snd.track && snd.track.kind === 'audio') snd.replaceTrack(nt).catch(e => { quiet('send new mic')(e); toast('⚠ Others may not hear your new mic — if so, press Leave and rejoin', 6000); });
-      for (const p of peers.values()) { const tr = p.pc.getTransceivers().find(t => t.receiver.track.kind === 'audio' && !t.sender.track); if (tr) tr.sender.replaceTrack(nt).catch(quiet('send new mic (spare slot)')); }
+      updateAudioSenders();
       setWarn('mic-lost', false); toast('🎙 Microphone reconnected'); fillDevices().catch(quiet('refresh device list'));
       break;
     } catch { await new Promise(r => setTimeout(r, 3000)); }
@@ -447,6 +455,11 @@ function levelLoop() {
     drawVu(p.tile, p.state && p.state.mic === false ? 0 : p.level);
   }
   drawVu(meTile, micOn ? localPeak : 0);
+  if (drawerTab === 'desk') for (const el of document.querySelectorAll('#deskStrips .strip')) {
+    const id = el.dataset.id, p = peers.get(id), pk = id === myId ? (micOn ? localPeak : 0) : p ? p.level || 0 : 0;
+    const db = 20 * Math.log10(Math.max(pk, 1e-6)), pos = Math.max(0, Math.min(1, (db + 60) / 60));
+    el.querySelector('.smeter span').style.width = ((1 - pos) * 100).toFixed(1) + '%';
+  }
   localPeak *= 0.85;
   requestAnimationFrame(levelLoop);
 }
@@ -541,6 +554,9 @@ function onMsg(m) {
       else { recStartedAt = m.recording.started; if (recording && recording.take !== m.recording.take) stopLocal(recording); }
       if (m.roomTone) startToneOverlay(m.roomTone);
       if (screenStream) wsSend({ t: 'screen', on: true, streamId: screenStream.id });
+      rundown = m.rundown || []; segment = m.segment || null; renderRundown();
+      for (const id of m.coughing || []) { const p = peers.get(id); if (p) { p.coughing = true; p.tile.classList.add('coughing'); } }
+      renderDesk();
       updateRecUI(); sendState(true); layout();
       break;
     }
@@ -551,12 +567,12 @@ function onMsg(m) {
       if (up.items.size) finishScreen();
       break;
     case 'notice': ask(m.level === 'error' ? 'Problem' : 'Note', esc(m.text), 'OK', null); break;
-    case 'peer-joined': addPeer(m.peer, false); layout(); toast(`${m.peer.name} joined`); break;
-    case 'peer-left': { const p = peers.get(m.id); if (p) toast(`${p.name} left`); removePeer(m.id); pendingSignals.delete(m.id); layout(); break; }
+    case 'peer-joined': addPeer(m.peer, false); layout(); toast(`${m.peer.name} joined`); renderDesk(); break;
+    case 'peer-left': { const p = peers.get(m.id); if (p) toast(`${p.name} left`); if (talking === m.id) stopTalk(); removePeer(m.id); pendingSignals.delete(m.id); layout(); renderDesk(); break; }
     case 'peer-state': { const p = peers.get(m.id); if (p) { const before = new Set((p.state && p.state.warnings) || []); p.state = m.state; renderStatus(p); if (isHost) for (const w of p.state.warnings || []) if (!before.has(w)) { toast(`⚠ ${p.name}: ${WARN_TEXT[w] ? WARN_TEXT[w][1] : w}`, 5000); } } break; }
     case 'screen': { const p = peers.get(m.id); if (p) { p.screenId = m.on ? m.streamId : null; if (!m.on) removeScreenTile(p.id); else attachScreenIfReady(p); } break; }
     case 'signal': onSignal(m.from, m.data); break;
-    case 'recording': recStartedAt = m.on ? m.started : null; updateRecUI(); if (m.on) { toast(`Recording started (take ${m.n})`); markers.length = 0; build = null; if (m.nextEpisode) nextEpisode = m.nextEpisode; if (!m.roomTone) countdown(); recNode.port.postMessage({ cmd: 'resetLoud' }); } else { toast('Recording stopped — finishing uploads…', 3500); uploadPeak = 0; } break;
+    case 'recording': recStartedAt = m.on ? m.started : null; updateRecUI(); if (m.on) { toast(`Recording started (take ${m.n})`); markers.length = 0; build = null; sendAllRides(); if (m.nextEpisode) nextEpisode = m.nextEpisode; if (!m.roomTone) countdown(); recNode.port.postMessage({ cmd: 'resetLoud' }); } else { toast('Recording stopped — finishing uploads…', 3500); uploadPeak = 0; } break;
     case 'record-start': startLocal(m); break;
     case 'record-stop': if (recording && recording.take === m.take) stopLocal(recording); stopToneOverlay(true); break;
     case 'roomtone': startToneOverlay(m); break;
@@ -568,6 +584,11 @@ function onMsg(m) {
     case 'meter': { const p = peers.get(m.id); if (p) p.loud = m.m; break; }
     case 'build': build = m; renderBuild(); break;
     case 'tx': txLive = m; break;
+    case 'cough': { const p = peers.get(m.id); if (p) { p.coughing = m.on; if (p.tile) p.tile.classList.toggle('coughing', m.on); } break; }
+    case 'cue': showCue(m.text, m.from); break;
+    case 'talk': { const p = peers.get(m.from); $('#talkName').textContent = m.name || (p && p.name) || 'The host'; $('#talkIn').classList.toggle('hidden', !m.on); if (m.on && p && p.talkEl) p.talkEl.play().catch(quiet('play talkback')); break; }
+    case 'segment': segment = m.segment; renderRundown(); break;
+    case 'rundown': rundown = m.rundown || []; renderRundown(); break;
   }
 }
 
@@ -590,8 +611,9 @@ function addPeer(info, initiator) {
     p.tile.appendChild(k);
   }
   renderStatus(p);
-  for (const tr of stream.getTracks()) pc.addTrack(tr, stream);
-  if (!stream.getAudioTracks().length) pc.addTransceiver('audio', { direction: 'recvonly' });
+  for (const tr of stream.getTracks()) { const snd = pc.addTrack(tr, stream); if (tr.kind === 'audio') p.mainAudio = snd; }
+  if (!stream.getAudioTracks().length) p.mainAudio = pc.addTransceiver('audio', { direction: 'recvonly' }).sender;
+  if (isHost) p.talkTr = pc.addTransceiver('audio', { direction: 'sendonly', streams: [talkStream] }); // private talkback channel (silent until used)
   if (!stream.getVideoTracks().length) pc.addTransceiver('video', { direction: 'recvonly' });
   if (screenStream) p.screenSender = pc.addTrack(screenStream.getVideoTracks()[0], screenStream);
   pc.ontrack = e => {
@@ -599,6 +621,11 @@ function addPeer(info, initiator) {
     p.streams.set(st.id, st);
     const isScreen = (p.screenId && st.id === p.screenId) || (e.track.kind === 'video' && p.camId && st.id !== p.camId);
     if (isScreen) { if (!p.screenId) p.screenId = st.id; showScreenTile(p.id, st, `${p.name}'s screen`); return; }
+    if (e.track.kind === 'audio' && p.camId && st.id !== p.camId) { // the host's talkback channel — heard by me only, never recorded
+      if (!p.talkEl) { p.talkEl = new Audio(); p.talkEl.autoplay = true; }
+      p.talkEl.srcObject = st; p.talkEl.play().catch(quiet('talkback autoplay'));
+      return;
+    }
     const v = p.tile.querySelector('video');
     if (v.srcObject !== st) v.srcObject = st;
     playOrAsk(v);
@@ -813,9 +840,194 @@ $('#toneBtn').onclick = async () => {
   if (roomTone) return;
   if (await ask('Record room tone now?', `Everyone will be asked to stay silent for ${roomToneSeconds} seconds.`, 'Start room tone')) wsSend({ t: 'roomtone' });
 };
-function dropMarker() { if (!isHost) return; if (!recStartedAt) return toast('Markers work while recording'); wsSend({ t: 'marker' }); }
-$('#markerBtn').onclick = dropMarker;
-addEventListener('keydown', e => { if ((e.key === 'm' || e.key === 'M') && joined && !e.target.closest('input,textarea,select') && !e.metaKey && !e.ctrlKey) dropMarker(); });
+function dropMarker(tag) { if (!isHost) return; if (!recStartedAt) return toast('Markers work while recording'); wsSend({ t: 'marker', ...(tag ? { tag } : {}) }); }
+$('#markerBtn').onclick = () => dropMarker();
+document.querySelectorAll('[data-tag]').forEach(b => { b.onclick = () => dropMarker(b.dataset.tag || null); });
+const TAG_KEYS = { 1: 'great', 2: 'cut', 3: 'retake', 4: 'ad' };
+const typing = e => !!(e.target.closest && e.target.closest('input,textarea,select')) || e.metaKey || e.ctrlKey || e.altKey;
+addEventListener('keydown', e => {
+  if (!joined || typing(e)) return;
+  const k = e.key.toLowerCase();
+  if (k === 'm') dropMarker();
+  else if (TAG_KEYS[k] && isHost) dropMarker(TAG_KEYS[k]);
+  else if (k === 'c' && !e.repeat && !controlMode) setCough(true);
+  else if (k === 't' && !e.repeat && isHost) startTalk();
+});
+addEventListener('keyup', e => {
+  const k = e.key.toLowerCase();
+  if (k === 'c') setCough(false);
+  if (k === 't') stopTalk();
+});
+addEventListener('blur', () => { setCough(false); stopTalk(); }); // never leave someone stuck muted
+
+// ---------- one place that decides what audio goes to each person ----------
+// my mic goes to everyone unless I'm holding the cough button or doing talkback; talkback goes only to its target
+function updateAudioSenders() {
+  const mic = (stream && stream.getAudioTracks()[0]) || null;
+  const talkTrack = talking ? (mic || (talkMic && talkMic.getAudioTracks()[0]) || null) : null;
+  for (const p of peers.values()) {
+    const main = coughing || talking ? null : mic;
+    if (p.mainAudio && p.mainAudio.track !== main) p.mainAudio.replaceTrack(main).catch(e => { quiet('send my mic')(e); toast('⚠ Others may not hear you — if so, press Leave and rejoin', 6000); });
+    const tb = p.talkTr && (talking === p.id ? talkTrack : null);
+    if (p.talkTr && p.talkTr.sender.track !== tb) p.talkTr.sender.replaceTrack(tb || null).catch(quiet('talkback channel'));
+  }
+}
+
+// ---------- cough button: hold to mute your live sound ----------
+function setCough(on) {
+  if (on === coughing || controlMode) return;
+  coughing = on;
+  updateAudioSenders();
+  wsSend({ t: 'cough', on });
+  $('#coughBtn').classList.toggle('held', on);
+  const me = document.getElementById('tile-me'); if (me) me.classList.toggle('coughing', on);
+}
+const hold = (el, down, up) => {
+  el.addEventListener('pointerdown', e => { e.preventDefault(); el.setPointerCapture(e.pointerId); down(); });
+  for (const ev of ['pointerup', 'pointercancel', 'lostpointercapture']) el.addEventListener(ev, up);
+};
+hold($('#coughBtn'), () => setCough(true), () => setCough(false));
+
+// ---------- talkback (host): hold to talk privately to one person ----------
+let talkWanted = false;
+async function startTalk() {
+  talkWanted = true;
+  if (talking || !isHost) return;
+  const to = $('#talkTo').value; if (!to || !peers.has(to)) return toast('Nobody to talk to yet');
+  if (!stream.getAudioTracks().length && !talkMic) {
+    try { talkMic = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true } }); }
+    catch (e) { quiet('talkback mic')(e); return toast('⚠ Talkback needs your microphone — allow it in the address bar', 6000); }
+    if (!talkWanted) return; // let go while the browser was asking for the mic
+  }
+  talking = to;
+  updateAudioSenders();
+  wsSend({ t: 'talk', to, on: true });
+  $('#talkBtn').classList.add('held'); $('#talkBtn').firstChild.textContent = `🗣 Talking to ${peers.get(to).name}… `;
+}
+function stopTalk() {
+  talkWanted = false;
+  if (!talking) return;
+  const to = talking; talking = null;
+  updateAudioSenders();
+  wsSend({ t: 'talk', to, on: false });
+  $('#talkBtn').classList.remove('held'); $('#talkBtn').firstChild.textContent = '🗣 Hold to talk ';
+}
+hold($('#talkBtn'), startTalk, stopTalk);
+
+// ---------- cue cards ----------
+let cueTimer = null;
+function showCue(text, from) {
+  $('#cueMsg').textContent = text; $('#cueFrom').textContent = from ? `from ${from}` : '';
+  $('#cue').classList.remove('hidden'); chime();
+  clearTimeout(cueTimer); cueTimer = setTimeout(() => $('#cue').classList.add('hidden'), 10000);
+}
+$('#cue').onclick = () => { $('#cue').classList.add('hidden'); clearTimeout(cueTimer); };
+function sendCue(text) {
+  text = String(text || '').trim(); if (!text) return;
+  const to = $('#cueTo').value;
+  wsSend({ t: 'cue', to, text });
+  toast(`Cue sent to ${to === 'all' ? 'everyone' : (peers.get(to) || {}).name || '?'}: ${text}`);
+}
+document.querySelectorAll('#cuePresets button').forEach(b => { b.onclick = () => sendCue(b.textContent); });
+$('#cueForm').onsubmit = e => { e.preventDefault(); sendCue($('#cueText').value); $('#cueText').value = ''; };
+
+// ---------- producer desk: faders (what I hear + the Producer mix), mute/solo for my ears ----------
+const FADER_MIN = -40; // bottom of the fader = off
+const deskOf = id => { if (!desk.has(id)) desk.set(id, { db: 0, mute: false, solo: false }); return desk.get(id); };
+const dbText = db => (db === null ? 'off' : `${db > 0 ? '+' : ''}${db.toFixed(1)} dB`);
+function applyMonitor() {
+  if (!isHost) return;
+  const anySolo = [...desk.values()].some(d => d.solo);
+  for (const p of peers.values()) {
+    const v = p.tile && p.tile.querySelector('video'); if (!v) continue;
+    const d = deskOf(p.id), g = d.db === null ? 0 : 10 ** (d.db / 20);
+    v.volume = d.mute || (anySolo && !d.solo) ? 0 : Math.max(0, Math.min(1, monVol * g));
+  }
+}
+const rideTimers = new Map();
+function sendRide(id) { // at most ~12 a second per fader; the last position always goes
+  if (rideTimers.has(id)) { rideTimers.get(id).again = true; return; }
+  const go = () => wsSend({ t: 'ride', id, db: deskOf(id).db });
+  go();
+  const st = { again: false };
+  st.timer = setTimeout(function next() { if (st.again) { st.again = false; go(); st.timer = setTimeout(next, 80); } else rideTimers.delete(id); }, 80);
+  rideTimers.set(id, st);
+}
+function sendAllRides() { if (!isHost) return; for (const id of [myId, ...peers.keys()]) if (id && desk.has(id)) wsSend({ t: 'ride', id, db: desk.get(id).db }); }
+function renderDesk() {
+  // who can be talked to / cued
+  const people = [...peers.values()].filter(p => !p.control);
+  const opts = people.map(p => `<option value="${p.id}">${esc(p.name)}</option>`).join('');
+  const keep = (sel, extra) => { const v = sel.value; sel.innerHTML = extra + opts; if ([...sel.options].some(o => o.value === v)) sel.value = v; };
+  keep($('#cueTo'), '<option value="all">Everyone</option>'); keep($('#talkTo'), '');
+  if (!isHost) return;
+  const list = [...(controlMode ? [] : [{ id: myId, name: $('#nameInput').value.trim() + ' (you)' }]), ...people.map(p => ({ id: p.id, name: p.name }))];
+  const box = $('#deskStrips');
+  const have = [...box.children].map(c => c.dataset.id).join(','), want = list.map(x => x.id).join(',');
+  if (have === want) return applyMonitor(); // don't rebuild while someone may be dragging a fader
+  box.innerHTML = '';
+  for (const x of list) {
+    const d = deskOf(x.id), el = document.createElement('div');
+    el.className = 'strip'; el.dataset.id = x.id;
+    el.innerHTML = `<div class="sname"></div><div class="sdb"></div><input class="sfader" type="range" min="${FADER_MIN}" max="10" step="0.5"><div class="smeter"><span></span></div>
+      <div class="sbtns">${x.id === myId ? '<span class="small-text muted">your own mic</span>' : '<button class="small ghost smute" title="Mute in your headphones only">🎧 M</button><button class="small ghost ssolo" title="Hear only this person (your headphones only)">S</button>'}<button class="small ghost scough hidden" disabled>🤧</button></div>`;
+    el.querySelector('.sname').textContent = x.name;
+    const f = el.querySelector('.sfader'), out = el.querySelector('.sdb');
+    const show = () => { f.value = d.db === null ? FADER_MIN : d.db; out.textContent = dbText(d.db); };
+    f.oninput = () => { const v = Number(f.value); d.db = v <= FADER_MIN ? null : v; out.textContent = dbText(d.db); applyMonitor(); if (recStartedAt) sendRide(x.id); };
+    f.ondblclick = () => { d.db = 0; show(); applyMonitor(); if (recStartedAt) sendRide(x.id); };
+    const mb = el.querySelector('.smute'), sb = el.querySelector('.ssolo');
+    if (mb) mb.onclick = () => { d.mute = !d.mute; mb.classList.toggle('on', d.mute); applyMonitor(); };
+    if (sb) sb.onclick = () => { d.solo = !d.solo; sb.classList.toggle('on', d.solo); applyMonitor(); };
+    if (mb) mb.classList.toggle('on', d.mute); if (sb) sb.classList.toggle('on', d.solo);
+    show(); box.appendChild(el);
+  }
+  applyMonitor();
+}
+$('#monVol').oninput = () => { monVol = Number($('#monVol').value) / 100; LS.set('ps_monvol', String($('#monVol').value)); applyMonitor(); };
+if (LS.get('ps_monvol')) { $('#monVol').value = LS.get('ps_monvol'); monVol = Number(LS.get('ps_monvol')) / 100; }
+setInterval(() => { // show who is coughing on the desk
+  for (const el of document.querySelectorAll('#deskStrips .strip')) { const p = peers.get(el.dataset.id), c = el.dataset.id === myId ? coughing : !!(p && p.coughing); el.querySelector('.scough').classList.toggle('hidden', !c); }
+}, 300);
+
+// ---------- rundown + show clock ----------
+const mmss = ms => { const s = Math.round(Math.abs(ms) / 1000); return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`; };
+function renderRundown() {
+  const box = $('#rundownList');
+  if (box && !box.contains(document.activeElement)) {
+    box.innerHTML = '';
+    rundown.forEach((r, i) => {
+      const el = document.createElement('div'); el.className = 'rdrow' + (segment && segment.idx === i ? ' current' : '');
+      el.innerHTML = `<button class="small ghost" title="Start this segment">▶</button><input type="text" maxlength="60" placeholder="Segment name"><input type="number" min="0" max="600" step="0.5" title="Minutes"><button class="small ghost" title="Remove">✕</button>`;
+      const [go, name, mins, del] = el.children;
+      name.value = r.name; mins.value = r.mins || '';
+      name.oninput = () => { r.name = name.value; }; mins.oninput = () => { r.mins = Number(mins.value) || 0; showTotal(); };
+      go.onclick = () => startSegment(i);
+      del.onclick = () => { rundown.splice(i, 1); renderRundown(); };
+      box.appendChild(el);
+    });
+    if (!rundown.length) box.innerHTML = '<p class="small-text muted">No segments yet — add your running order (e.g. Intro 2, Interview 25, Listener mail 8, Outro 2).</p>';
+  }
+  showTotal();
+}
+function showTotal() { const total = rundown.reduce((a, r) => a + (Number(r.mins) || 0), 0); $('#rdTotal').textContent = total ? `${Math.floor(total / 60) ? Math.floor(total / 60) + ' h ' : ''}${Math.round(total % 60)} min planned` : ''; }
+function startSegment(i) { if (!rundown[i]) return toast('Save the rundown first'); wsSend({ t: 'segment', idx: i }); }
+$('#rdAdd').onclick = () => { rundown.push({ name: '', mins: 5 }); renderRundown(); const ins = $('#rundownList').querySelectorAll('input[type=text]'); if (ins.length) ins[ins.length - 1].focus(); };
+$('#rdSave').onclick = async () => {
+  const res = await api(`/api/rooms/${roomId}/settings?k=${encodeURIComponent(hostKey)}`, { json: { rundown } });
+  if (!res.ok) return toast('Couldn\'t save: ' + res.error);
+  rundown = res.data.rundown || []; renderRundown(); toast('Rundown saved ✓');
+};
+$('#rdNext').onclick = () => { const next = segment ? segment.idx + 1 : 0; if (next >= rundown.length) return toast(rundown.length ? 'That was the last segment' : 'Add and save some segments first'); startSegment(next); };
+$('#rdStop').onclick = () => wsSend({ t: 'segment', idx: -1 });
+setInterval(() => {
+  const el = $('#segClock');
+  if (!segment) { el.classList.add('hidden'); return; }
+  const used = serverNow() - segment.at, left = segment.mins * 60000 - used;
+  el.classList.remove('hidden');
+  el.classList.toggle('over', !!segment.mins && left < 0); el.classList.toggle('soon', !!segment.mins && left >= 0 && left < 60000);
+  el.textContent = !segment.mins ? `${segment.name} · ${mmss(used)}` : left >= 0 ? `${segment.name} · ${mmss(left)} left` : `${segment.name} · +${mmss(left)} over`;
+}, 250);
 $('#copyGuestBtn').onclick = () => {
   const link = location.origin + '/r/' + roomId;
   navigator.clipboard.writeText(link).then(() => toast('Guest link copied')).catch(() => ask('Guest link', `<input type="text" value="${link}" readonly onclick="this.select()">`, 'Done', null));
@@ -835,7 +1047,9 @@ function openDrawer(tab) {
   drawerTab = tab;
   $('#drawer').classList.remove('hidden');
   document.querySelectorAll('.drawer-tabs .tab').forEach(b => b.classList.toggle('active', b.dataset.tab === tab));
-  $('#tab-chat').classList.toggle('hidden', tab !== 'chat'); $('#tab-health').classList.toggle('hidden', tab !== 'health');
+  for (const k of ['chat', 'health', 'desk', 'rundown']) $('#tab-' + k).classList.toggle('hidden', tab !== k);
+  if (tab === 'desk') renderDesk();
+  if (tab === 'rundown') renderRundown();
   if (tab === 'chat') { unread = 0; $('#chatBadge').classList.add('hidden'); setTimeout(() => $('#chatInput').focus(), 50); }
   if (tab === 'health') renderHealth();
   layout();
@@ -843,6 +1057,7 @@ function openDrawer(tab) {
 function closeDrawer() { drawerTab = null; $('#drawer').classList.add('hidden'); layout(); }
 $('#chatBtn').onclick = () => openDrawer('chat');
 $('#healthBtn').onclick = () => openDrawer('health');
+$('#deskBtn').onclick = () => openDrawer('desk');
 $('#drawerClose').onclick = closeDrawer;
 document.querySelectorAll('.drawer-tabs .tab').forEach(b => { b.onclick = () => openDrawer(b.dataset.tab); });
 function addChat(m, quiet) {
@@ -890,8 +1105,8 @@ function renderHealth() {
   for (const p of peers.values()) totalWarn += ((p.state && p.state.warnings) || []).length;
   $('#healthBadge').textContent = totalWarn; $('#healthBadge').classList.toggle('hidden', !totalWarn);
   if (drawerTab !== 'health') return;
-  const rows = controlMode ? [] : [{ name: $('#nameInput').value.trim() + ' (you)', s: myState(), level: localPeak, loud: myLoud }];
-  for (const p of peers.values()) if (!p.control) rows.push({ name: p.name, s: p.state || {}, level: p.level || 0, conn: p.pc.connectionState, loud: p.loud });
+  const rows = controlMode ? [] : [{ id: myId, name: $('#nameInput').value.trim() + ' (you)', s: myState(), level: localPeak, loud: myLoud }];
+  for (const p of peers.values()) if (!p.control) rows.push({ id: p.id, name: p.name, s: p.state || {}, level: p.level || 0, conn: p.pc.connectionState, loud: p.loud });
   const people = rows.length;
   if (serverDisk) {
     const gb = serverDisk.free / 1073741824, hrs = gb / (people * gbPerPersonHour);
@@ -907,6 +1122,7 @@ function renderHealth() {
     return `<div class="hrow ${ws.length ? 'has-warn' : ''}">
       <div class="row spread"><b>${esc(r.name)}</b>${rec}</div>
       ${loudMeter(r.loud, s.mic === false)}
+      ${histSvg(loudHist.get(r.id))}
       <div class="small-text muted">${s.mic === false ? '🔇 muted · ' : ''}${n.up ? `up ${n.up} Mbps · ` : ''}${s.rtt ? `ping ${s.rtt} ms · ` : ''}loss ${Math.round((s.loss || 0) * 100)}%${s.relay ? ' · via relay' : ''}${s.glitches ? ` · ${s.glitches} glitch${s.glitches > 1 ? 'es' : ''}` : ''}${behind}${s.durable === false ? ' · ⚠ not saving to disk' : ''}</div>
       ${ws.map(w => `<div class="hwarn">⚠ ${esc(WARN_TEXT[w] ? WARN_TEXT[w][1] : w)}</div>`).join('')}
     </div>`;
@@ -914,6 +1130,23 @@ function renderHealth() {
   $('#healthMarkers').innerHTML = markers.length ? '<b>Markers this take</b><br>' + markers.map(m => `📍 ${fmtTime(m.at)} — ${esc(m.label)}`).join('<br>') : (recStartedAt ? 'Press <b>M</b> or 📍 to drop a marker for editing.' : '');
 }
 setInterval(renderHealth, 250);
+// loudness history: short-term LUFS once a second, last 5 minutes, per person
+setInterval(() => {
+  if (!joined || !isHost) return;
+  const add = (id, L, muted) => { if (!id) return; const h = loudHist.get(id) || []; h.push(!muted && L && Number.isFinite(L.S) ? L.S : null); if (h.length > 300) h.shift(); loudHist.set(id, h); };
+  if (!controlMode) add(myId, myLoud, !micOn);
+  for (const p of peers.values()) if (!p.control) add(p.id, p.loud, p.state && p.state.mic === false);
+  for (const id of [...loudHist.keys()]) if (id !== myId && !peers.has(id)) loudHist.delete(id);
+}, 1000);
+function histSvg(h) {
+  if (!h || h.length < 2) return '';
+  const y = v => (Math.max(-50, Math.min(0, v)) / -50 * 100).toFixed(1); // -50…0 LUFS, top = loud
+  const segs = []; let cur = [];
+  h.forEach((v, i) => { if (v === null) { if (cur.length) segs.push(cur); cur = []; } else cur.push(`${(i * 300 / 299).toFixed(1)},${y(v)}`); });
+  if (cur.length) segs.push(cur);
+  return `<svg class="lhist" viewBox="0 0 300 100" preserveAspectRatio="none" aria-label="Loudness, last 5 minutes"><title>Short-term loudness, last 5 minutes (dashed: −16 and −23 LUFS)</title>
+    <line x1="0" x2="300" y1="${y(-16)}" y2="${y(-16)}"/><line x1="0" x2="300" y1="${y(-23)}" y2="${y(-23)}"/>${segs.map(s => `<polyline points="${s.join(' ')}"/>`).join('')}</svg>`;
+}
 function tileLoud(el, L, muted) {
   if (!el) return;
   let b = el.querySelector('.tloud');

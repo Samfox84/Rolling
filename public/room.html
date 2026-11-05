@@ -75,6 +75,7 @@
     <div class="row" style="gap:14px; min-width:0">
       <div class="brand" style="font-size:16px; min-width:0"><span class="dot"></span><span id="roomTitle" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">Studio</span></div>
       <span class="recbadge" id="recBadge"><span class="blink"></span>REC <span id="recTime">00:00:00</span></span>
+      <span class="segclock hidden" id="segClock" title="Show clock — the current segment of the rundown"></span>
     </div>
     <div class="row">
       <span class="uploadline" id="uploadLine"></span>
@@ -89,6 +90,8 @@
       <div class="drawer-tabs">
         <button class="tab" data-tab="chat">💬 Chat</button>
         <button class="tab hostonly hidden" data-tab="health">🩺 Health</button>
+        <button class="tab hostonly hidden" data-tab="desk">🎚 Desk</button>
+        <button class="tab hostonly hidden" data-tab="rundown">⏱ Rundown</button>
         <button class="small ghost" id="drawerClose" title="Close">✕</button>
       </div>
       <div class="drawer-body" id="tab-chat">
@@ -101,6 +104,52 @@
         <div id="healthRows"></div>
         <div id="healthMarkers" class="small-text muted" style="margin-top:12px"></div>
       </div>
+      <div class="drawer-body hidden" id="tab-desk">
+        <div class="desk-sec">
+          <div class="desk-h">Quick tags <span class="muted small-text">— for the edit list (keys 1–4, M)</span></div>
+          <div class="tagrow">
+            <button class="small" data-tag="great">⭐ Great bit <kbd>1</kbd></button>
+            <button class="small" data-tag="cut">✂ Cut this <kbd>2</kbd></button>
+            <button class="small" data-tag="retake">🔁 Retake <kbd>3</kbd></button>
+            <button class="small" data-tag="ad">📢 Ad break <kbd>4</kbd></button>
+            <button class="small" data-tag="">📍 Marker <kbd>M</kbd></button>
+          </div>
+        </div>
+        <div class="desk-sec">
+          <div class="desk-h">Cue card <span class="muted small-text">— a big message on their screen</span></div>
+          <div class="row" style="gap:6px"><label class="small-text" style="margin:0">To</label><select id="cueTo" class="small"></select></div>
+          <div class="tagrow" id="cuePresets">
+            <button class="small ghost">Wrap up</button><button class="small ghost">2 minutes</button><button class="small ghost">30 seconds</button>
+            <button class="small ghost">Go to the ad break</button><button class="small ghost">Speak up</button><button class="small ghost">Slow down</button>
+            <button class="small ghost">Move closer to the mic</button><button class="small ghost">Great — keep going</button>
+          </div>
+          <form id="cueForm" class="row" style="gap:6px; flex-wrap:nowrap"><input type="text" id="cueText" maxlength="120" placeholder="Your own cue…" autocomplete="off"><button class="primary small">Send</button></form>
+        </div>
+        <div class="desk-sec">
+          <div class="desk-h">Talkback <span class="muted small-text">— only they hear you; muted in the Producer mix</span></div>
+          <div class="row" style="gap:6px; flex-wrap:nowrap"><select id="talkTo" class="small"></select><button class="small primary" id="talkBtn">🗣 Hold to talk <kbd>T</kbd></button></div>
+        </div>
+        <div class="desk-sec">
+          <div class="desk-h">Faders</div>
+          <p class="small-text muted" style="margin:0 0 6px">Faders set what you hear <b>and</b> are recorded into the <b>Producer mix</b>. The original recordings are never changed. 🎧 M / S = mute / solo for your ears only. Double-click a fader for 0 dB.</p>
+          <label class="small-text" style="margin:0">🎧 Your listening volume <input type="range" id="monVol" min="0" max="100" value="50"></label>
+          <div id="deskStrips"></div>
+        </div>
+      </div>
+      <div class="drawer-body hidden" id="tab-rundown">
+        <div class="desk-h">Rundown</div>
+        <p class="small-text muted" style="margin:0 0 8px">Plan the show. Press ▶ to start a segment — everyone sees the clock, and a chapter marker is added while recording.</p>
+        <div id="rundownList"></div>
+        <div class="row" style="gap:6px; margin-top:8px">
+          <button class="small ghost" id="rdAdd">+ Add segment</button>
+          <button class="small primary" id="rdSave">Save rundown</button>
+          <span class="small-text muted" id="rdTotal"></span>
+        </div>
+        <div class="row" style="gap:6px; margin-top:12px">
+          <button class="primary" id="rdNext">▶ Next segment</button>
+          <button class="ghost" id="rdStop">⏹ Stop clock</button>
+        </div>
+      </div>
     </aside>
   </div>
   <div class="controls">
@@ -110,6 +159,8 @@
     <button class="primary recbtn hostonly hidden" id="recBtn">● Start recording</button>
     <button class="ghost hostonly hidden" id="markerBtn" title="Drop a marker for editing (or press M)">📍 Marker</button>
     <button class="ghost hostonly hidden" id="toneBtn" title="Everyone stays silent while a noise print is recorded">🤫 Room tone</button>
+    <button class="ghost hostonly hidden" id="deskBtn" title="Producer desk: faders, cue cards, talkback, quick tags">🎚 Desk</button>
+    <button class="ghost" id="coughBtn" title="Hold to mute your live sound for a cough (or hold C). Your recording is untouched — the edit list marks it.">🤧 Cough</button>
     <button class="ghost" id="chatBtn">💬 Chat <span class="badge hidden" id="chatBadge"></span></button>
     <button class="ghost hostonly hidden" id="healthBtn">🩺 Health <span class="badge hidden" id="healthBadge"></span></button>
     <button class="ghost" id="leaveBtn">Leave</button>
@@ -149,6 +200,11 @@
 </div>
 
 <div id="countdown" class="countdown hidden"></div>
+
+<!-- cue card from the host -->
+<div id="cue" class="cue hidden" title="Click to dismiss"><div class="cuebox"><div id="cueMsg"></div><div class="small-text muted" id="cueFrom"></div></div></div>
+<!-- talkback from the host -->
+<div id="talkIn" class="talkin hidden">🗣 <b id="talkName"></b> is talking to you — only you can hear</div>
 
 <!-- waiting-room knocks (host) -->
 <div id="knocks" class="knocks"></div>

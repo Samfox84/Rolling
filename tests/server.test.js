@@ -5,6 +5,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('fs');
 const path = require('path');
+const { spawnSync } = require('child_process');
 const { startServer, login, waitFor, pcm24, talky, ffMeasure, duration, xmlWellFormed } = require('./helpers');
 
 const hasWS = typeof WebSocket === 'function'; // Node 22+
@@ -14,7 +15,7 @@ test.before(async () => {
   srv = await startServer();
   cookie = (await login(srv.url)).cookie;
   room = await (await fetch(srv.url + '/api/rooms', { method: 'POST', headers: { cookie, 'Content-Type': 'application/json' }, body: JSON.stringify({ name: 'Test Show' }) })).json();
-  await fetch(`${srv.url}/api/rooms/${room.id}/settings?k=${room.hostKey}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ waitingRoom: false }) });
+  await fetch(`${srv.url}/api/rooms/${room.id}/settings?k=${room.hostKey}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ waitingRoom: false, rundown: [{ name: 'Interview', mins: 25 }, { name: '', mins: 'x' }] }) });
 });
 test.after(async () => { if (srv) await srv.stop(); });
 
@@ -60,6 +61,29 @@ test('full take: record, upload lossless audio, build every file', { skip: !hasW
   const gstart = await guest.next('record-start');
   assert.ok(start.tok && start.seg && gstart.seg !== start.seg);
 
+  // ---- producer desk ----
+  const guestId = host.msgs.find(m => m.t === 'peer-joined' && m.peer.name === 'Guest').peer.id;
+  const hostId = host.msgs.find(m => m.t === 'welcome').id;
+  host.send({ t: 'ride', id: hostId, db: null });            // Steve's fader right down: the Producer mix should be the guest only
+  host.send({ t: 'ride', id: guestId, db: 99 });             // out of range: ignored
+  guest.send({ t: 'ride', id: guestId, db: -10 });           // guests can't ride faders
+  host.send({ t: 'segment', idx: 0 });                       // rundown clock (everyone sees it) + a chapter marker
+  assert.equal((await guest.next('segment')).segment.name, 'Interview');
+  host.send({ t: 'marker', tag: 'great' });
+  assert.equal((await host.next('marker', host.msgs.findIndex(m => m.t === 'marker' && m.tag === 'segment') + 1)).label, 'Great bit 1');
+  host.send({ t: 'cue', to: guestId, text: 'Wrap up' });     // cue card to one person
+  assert.equal((await guest.next('cue')).text, 'Wrap up');
+  guest.send({ t: 'cue', to: 'all', text: 'not allowed' });
+  host.send({ t: 'talk', to: guestId, on: true });           // talkback
+  assert.equal((await guest.next('talk')).on, true);
+  guest.send({ t: 'cough', on: true });                      // cough button: everyone is told
+  assert.equal((await host.next('cough')).on, true);
+  await new Promise(r => setTimeout(r, 300));
+  guest.send({ t: 'cough', on: false });
+  host.send({ t: 'talk', to: guestId, on: false });
+  await new Promise(r => setTimeout(r, 200));
+  assert.equal(host.msgs.filter(m => m.t === 'cue').length, 0, 'guests can\'t send cue cards');
+
   // upload 40 s of audio in half-second pieces, out of order, exactly as browsers send it (24-bit PCM)
   const up = async (who, s, shape) => {
     const pcm = pcm24(40, shape), piece = 24000 * 3;
@@ -75,7 +99,7 @@ test('full take: record, upload lossless audio, build every file', { skip: !hasW
   await up('Steve', start, talky(1));
   await up('Guest', gstart, talky(2, x => x < 10));
   host.send({ t: 'marker' });
-  const mk = await host.next('marker');
+  const mk = await waitFor(() => host.msgs.find(m => m.t === 'marker' && !m.tag), 10000, 50);
   assert.equal(mk.label, 'Marker 1');
 
   // things that must be refused
@@ -104,7 +128,7 @@ test('full take: record, upload lossless audio, build every file', { skip: !hasW
   const out = path.join(srv.dataDir, 'rooms', room.id, 'takes', take.id, 'out');
   const files = take.outputs.map(o => o.file);
   for (const f of ['Steve.wav', 'Guest.wav', 'Steve - room tone.wav', 'Steve - normalised -16 LUFS.wav', 'Steve - normalised -23 LUFS.wav',
-    'Mix - all voices.wav', 'Transcript.txt', 'Transcript.srt', 'Transcript.vtt', 'Level report.txt', 'Markers.txt', 'Chapters.json',
+    'Mix - all voices.wav', 'Steve - cleaned -16 LUFS.wav', 'Guest - cleaned -16 LUFS.wav', 'Producer mix -16 LUFS.wav', 'Edit list.txt', 'Transcript.txt', 'Transcript.srt', 'Transcript.vtt', 'Level report.txt', 'Markers.txt', 'Chapters.json',
     'Test Show - Ep 7 - Testing (Audition).sesx', 'Test Show - Ep 7 - Testing (Premiere, Resolve, Audition).xml']) assert.ok(files.includes(f), `missing ${f}`);
 
   // lossless audio, lined up: 40 s of audio that started 50 ms into the take
@@ -112,6 +136,18 @@ test('full take: record, upload lossless audio, build every file', { skip: !hasW
   // normalised copies really hit their targets (measured by ffmpeg, not by our own code)
   assert.ok(Math.abs(ffMeasure(path.join(out, 'Steve - normalised -16 LUFS.wav')).I - -16) < 0.5);
   assert.ok(Math.abs(ffMeasure(path.join(out, 'Steve - normalised -23 LUFS.wav')).I - -23) < 0.5);
+  // cleaned copies are their own files at -16 LUFS; the untouched recordings are still exactly as recorded
+  assert.ok(Math.abs(ffMeasure(path.join(out, 'Steve - cleaned -16 LUFS.wav')).I - -16) < 0.7);
+  // the Producer mix follows the desk: Steve's fader was down, and the guest doesn't talk for the first 10 s
+  const pm = path.join(out, 'Producer mix -16 LUFS.wav');
+  const quietStart = spawnSync('ffmpeg', ['-hide_banner', '-nostdin', '-ss', '1', '-t', '7', '-i', pm, '-af', 'astats=measure_perchannel=none', '-f', 'null', '-'], { encoding: 'utf8' }).stderr.match(/RMS level dB:\s*(-?[\d.]+|-inf)/)[1];
+  assert.ok(quietStart === '-inf' || parseFloat(quietStart) < -60, `Steve should be faded out of the Producer mix: ${quietStart}`);
+  assert.ok(Math.abs(ffMeasure(pm).I - -16) < 1);
+  // edit list: tags, segment, the guest's cough, the host's talkback
+  const edl = fs.readFileSync(path.join(out, 'Edit list.txt'), 'utf8');
+  for (const want of [/Great bit 1/, /Interview/, /Cough — Guest/, /Talkback — Steve/]) assert.match(edl, want);
+  assert.match(fs.readFileSync(path.join(out, 'Markers (Audition).csv'), 'utf8'), /Cough — Guest\t[\d:.]+\t0:00\.[2-9]/);
+  assert.equal(JSON.parse(fs.readFileSync(path.join(out, 'Chapters.json'), 'utf8')).chapters.some(c => /Great bit/.test(c.title)), false, 'edit notes are not chapters');
   // the level verdict travels with the levels (one rule, used by report and page)
   assert.ok(take.levels.Steve.verdict && take.levels.Steve.verdict.text);
   // room tone is the right length
@@ -142,6 +178,16 @@ test('full take: record, upload lossless audio, build every file', { skip: !hasW
   // the chapters file must exist at every moment while it is being updated
   await waitFor(() => /The big question/.test(fs.readFileSync(path.join(out, 'Chapters.json'), 'utf8')), 30000, 20);
   assert.equal(fs.statSync(path.join(out, 'Steve.wav')).mtimeMs, wavTime);
+
+  // "Clean again" with new settings: cleaning switched off → no cleaned files, the Producer mix is still made
+  await waitFor(async () => (await (await fetch(`${srv.url}/api/rooms/${room.id}?k=${room.hostKey}`)).json()).takes[0].status === 'ready', 30000);
+  assert.equal((await fetch(`${srv.url}/api/settings`, { method: 'POST', headers: { cookie, 'Content-Type': 'application/json' }, body: JSON.stringify({ clean: { auto: false } }) })).status, 200);
+  assert.equal((await fetch(`${srv.url}/api/rooms/${room.id}/takes/${take.id}/clean?k=${room.hostKey}`, { method: 'POST' })).status, 200);
+  const recleaned = await waitFor(async () => { const x = (await (await fetch(`${srv.url}/api/rooms/${room.id}?k=${room.hostKey}`)).json()).takes[0]; return x.status === 'ready' && !x.outputs.some(o => o.kind === 'cleaned') && x; }, 60000);
+  assert.ok(recleaned.outputs.some(o => o.file === 'Producer mix -16 LUFS.wav'));
+  assert.equal(fs.existsSync(path.join(out, 'Steve - cleaned -16 LUFS.wav')), false, 'old cleaned files removed');
+  assert.equal(fs.statSync(path.join(out, 'Steve.wav')).mtimeMs, wavTime, 'cleaning never touches the untouched recordings');
+  await fetch(`${srv.url}/api/settings`, { method: 'POST', headers: { cookie, 'Content-Type': 'application/json' }, body: JSON.stringify({ clean: { auto: true } }) });
 
   // "Make transcript" with a broken engine: the take says so plainly, and the good transcript is kept
   const ready2 = async () => waitFor(async () => { const x = (await (await fetch(`${srv.url}/api/rooms/${room.id}?k=${room.hostKey}`)).json()).takes[0]; return x.status === 'ready' && x; }, 60000);

@@ -92,3 +92,23 @@ test('the XML checker itself rejects broken XML (so the checks above mean someth
   assert.equal(xmlWellFormed('<a><b></a></b>'), false);
   assert.equal(xmlWellFormed('<a>x < y</a>'), false);
 });
+
+test('edit list: tags, segments, coughs, talkback and long pauses, grouped and in time order', () => {
+  const t = { coughs: { C1: [{ from: 61000, to: 63500 }, { from: 90000, to: null }], C2: [{ from: 70000, to: 72000, kind: 'talk' }] }, pauses: [{ at: 100, dur: 4.2 }] };
+  const markers = [{ at: 30000, label: 'Cut this 1', tag: 'cut', by: 'Sam' }, { at: 10000, label: 'Interview', tag: 'segment' }, { at: 50000, label: 'Marker 1' }];
+  const items = post.editItems(t, markers, { C1: 'Steve', C2: 'Sam' });
+  assert.deepEqual(items.map(i => i.group), ['Segment', 'Cut this', 'Marker', 'Cough', 'Talkback', 'Long pause'], 'unfinished cough skipped; sorted by time');
+  assert.equal(items[3].label, 'Cough — Steve'); assert.equal(items[3].dur, 2.5);
+  const txt = post.editList(items, 'Show');
+  assert.match(txt, /CUT THIS \(1\)\r\n  00:00:30 {15}Cut this 1  \(Sam\)/);
+  assert.match(txt, /COUGH \(1\)\r\n  00:01:01  to 00:01:03  Cough — Steve/);
+  assert.ok(txt.indexOf('CUT THIS') < txt.indexOf('GREAT BIT') || !txt.includes('GREAT BIT'));
+  const csv = post.auditionMarkersCsv(items);
+  assert.match(csv, /Cough — Steve\t1:01\.000\t0:02\.500\tdecimal\tCue\tCough/);
+});
+
+test('chapters skip edit notes (cut / retake / great bit) but keep segments, ad breaks and plain markers', () => {
+  const ch = post.chapters({ markers: [{ at: 5000, label: 'Interview', tag: 'segment' }, { at: 9000, label: 'Cut this 1', tag: 'cut' }, { at: 12000, label: 'Ad break 1', tag: 'ad' }, { at: 15000, label: 'Great bit 1', tag: 'great' }] }, 0);
+  const titles = JSON.parse(ch.json).chapters.map(c => c.title);
+  assert.deepEqual(titles, ['Start', 'Interview', 'Ad break 1']);
+});

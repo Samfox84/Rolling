@@ -40,9 +40,11 @@
       <details class="small-text muted" style="margin-bottom:6px"><summary>What are all these files?</summary>
         <ul class="steps" style="margin-top:6px">
           <li><b>Audio</b> — each person's untouched lossless 24-bit WAV, all lined up to start together.</li>
+          <li><b>Cleaned</b> — a cleaned-up copy of each voice (noise, hum, rumble, harsh "s", distortion — set in Studio settings), at −16 LUFS. The untouched file is always kept too.</li>
           <li><b>Normalised</b> — the same, turned up/down to −16 LUFS (podcasts) or −23 LUFS (EBU R128 broadcast).</li>
           <li><b>Room tone</b> — the quiet section, for noise reduction.</li>
-          <li><b>Rough mix</b> — everyone together with your intro and outro, at −16 LUFS. Handy for a quick listen.</li>
+          <li><b>Producer mix</b> — everyone together, cleaned, with your live fader moves from the 🎚 Desk, coughs and talkback muted, plus your intro and outro, at −16 LUFS. (Older takes have a "Rough mix" instead.)</li>
+          <li><b>Edit list</b> — your quick tags (Cut this, Retake, Great bit, Ad break), rundown segments, coughs, talkback and long pauses with their times. The Audition markers file has them all too.</li>
           <li><b>Video</b> — each camera as an MP4, lined up the same way. "Camera original" is the untouched file.</li>
           <li><b>Session</b> — the <b>.sesx</b> opens straight in Audition (beta); the <b>.xml</b> opens in Premiere, Resolve and Audition. Everything on its own track, with markers. Keep them in the same folder as the audio.</li>
           <li><b>Transcript</b> — who said what: .txt to read, .srt / .vtt subtitles for Premiere or YouTube.</li>
@@ -61,10 +63,10 @@ const k = new URLSearchParams(location.search).get('k') || '';
 const q = k ? '?k=' + encodeURIComponent(k) : '';
 const dur = (a, b) => { const s = Math.round((b - a) / 1000); return `${Math.floor(s / 3600) ? Math.floor(s / 3600) + 'h ' : ''}${Math.floor(s % 3600 / 60)}m ${s % 60}s`; };
 const secs = s => `${Math.floor(s / 60)}:${String(Math.round(s % 60)).padStart(2, '0')}`;
-const KIND = { audio: ['Audio', 'Lossless WAV (untouched)'], normalised: ['Normalised', ''], roomtone: ['Room tone', 'Noise print WAV'], mix: ['Mix', 'All voices together'],
-  roughmix: ['Rough mix', ''], intro: ['Intro', ''], outro: ['Outro', ''], video: ['Video', 'MP4 (H.264)'], 'video-original': ['Video', 'Camera original'], screen: ['Screen share', 'MP4'],
+const KIND = { audio: ['Audio', 'Lossless WAV (untouched)'], cleaned: ['Cleaned', ''], normalised: ['Normalised', ''], roomtone: ['Room tone', 'Noise print WAV'], mix: ['Mix', 'All voices together'],
+  producermix: ['Producer mix', ''], roughmix: ['Rough mix', ''], editlist: ['Edit list', ''], intro: ['Intro', ''], outro: ['Outro', ''], video: ['Video', 'MP4 (H.264)'], 'video-original': ['Video', 'Camera original'], screen: ['Screen share', 'MP4'],
   session: ['Session', ''], transcript: ['Transcript', ''], chapters: ['Chapters', ''], markers: ['Markers', ''], report: ['Level report', ''], chat: ['Chat', 'Messages during the take'] };
-const ORDER = { audio: 0, normalised: 1, roomtone: 2, video: 3, 'video-original': 4, screen: 5, roughmix: 6, mix: 7, intro: 8, outro: 9, session: 10, transcript: 11, chapters: 12, markers: 13, report: 14, chat: 15 };
+const ORDER = { audio: 0, cleaned: 1, normalised: 2, roomtone: 3, video: 4, 'video-original': 5, screen: 6, producermix: 7, roughmix: 8, mix: 9, intro: 10, outro: 11, session: 12, editlist: 13, transcript: 14, chapters: 15, markers: 16, report: 17, chat: 18 };
 const STATUS = { recording: ['rec', '● Recording'], waiting: ['warn', 'Waiting for uploads to finish'], queued: ['warn', 'In the queue'], processing: ['warn', 'Building files'], ready: ['ok', '✓ Ready'], error: ['rec', 'Problem'] };
 const VCLASS = { good: 'goodc', warn: 'warnc', bad: 'bad', none: '' };
 const verdictView = l => (l && l.verdict ? [VCLASS[l.verdict.level] || '', l.verdict.text] : ['', 'not measured']);
@@ -126,6 +128,7 @@ async function load() {
           <td><a href="/dl/${roomId}/${t.id}/${encodeURIComponent(o.file)}${q}"><button class="small">⬇ Download</button></a></td></tr>`).join('')}</table>` : ''}
       <div class="row" style="justify-content:flex-end; margin-top:8px">
         ${t.status === 'ready' && !t.compacted ? `<button class="small ghost" data-compact="${t.id}" data-what="camera-originals">Free space: delete camera originals</button><button class="small ghost" data-compact="${t.id}" data-what="rebuild-data">Free space: delete rebuild data</button>` : ''}
+        ${['ready', 'error'].includes(t.status) && t.outputs.some(o => o.kind === 'audio') ? `<button class="small ghost" data-clean="${t.id}" title="Make the cleaned files and the Producer mix again with the current Studio settings">🧽 Clean again</button>` : ''}
         ${t.transcript && t.transcript.canMake && ['ready', 'error'].includes(t.status) ? `<button class="small ghost" data-transcribe="${t.id}">📝 ${t.transcript.hasFile ? 'Make the transcript again' : 'Make transcript'}</button>` : ''}
         ${['ready', 'error', 'waiting'].includes(t.status) ? `<button class="small ghost" data-rebuild="${t.id}">${t.compacted ? 'Update documents' : 'Rebuild files'}</button>` : ''}
         ${!['recording', 'processing', 'queued'].includes(t.status) ? `<button class="small ghost" data-del="${t.id}" data-n="${t.n}">Delete take</button>` : ''}
@@ -178,6 +181,7 @@ document.addEventListener('click', async e => {
     const res = await api(`/api/rooms/${roomId}/takes/${b.dataset.take}/markers${q}`, { json: { markers } });
     toast(res.ok ? 'Markers saved — updating files…' : 'Could not save: ' + res.error); editing = false; lastJson = ''; load();
   }
+  if (b.dataset.clean) { const r = await api(`/api/rooms/${roomId}/takes/${b.dataset.clean}/clean${q}`, { method: 'POST' }); toast(r.ok ? 'Cleaning up again with the current settings — watch the progress bar' : r.error); lastJson = ''; load(); }
   if (b.dataset.transcribe) { const r = await api(`/api/rooms/${roomId}/takes/${b.dataset.transcribe}/transcribe${q}`, { method: 'POST' }); toast(r.ok ? 'Making the transcript — the progress bar shows how far it has got' : r.error); lastJson = ''; load(); }
   if (b.dataset.rebuild) { const r = await api(`/api/rooms/${roomId}/takes/${b.dataset.rebuild}/rebuild${q}`, { method: 'POST' }); if (!r.ok) toast(r.error); lastJson = ''; load(); }
   if (b.dataset.compact) {
