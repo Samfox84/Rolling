@@ -50,12 +50,12 @@ function xmlWellFormed(xml) {
   return stack.length === 0 && !/[<>]/.test(stray);
 }
 
-/** Start a real server on a free port with its own data folder. */
+/** Start a real server on a free port with its own data folder (pass DATA_DIR + PORT to restart the same studio). */
 async function startServer(extraEnv = {}) {
-  const dataDir = tmpDir('data');
+  const dataDir = extraEnv.DATA_DIR || tmpDir('data');
   fs.chmodSync(FAKE_WHISPER, 0o755);
   const models = tmpDir('models'); fs.writeFileSync(path.join(models, 'ggml-base.en.bin'), 'test');
-  const port = 20000 + Math.floor(Math.random() * 20000);
+  const port = Number(extraEnv.PORT) || 20000 + Math.floor(Math.random() * 20000);
   const env = { ...process.env, PORT: String(port), BIND: '127.0.0.1', DATA_DIR: dataDir, ADMIN_PASSWORD: 'testpass', SECRET: 'testsecret',
     ROOM_TONE_SECONDS: '3', LATE_REBUILD_SECONDS: '2', LIVE_TX_SECONDS: '1', FAKE_WHISPER_FAIL_FLAG: path.join(dataDir, 'whisper-fail'), NO_EXTERNAL_CALLS: '1', WHISPER_BIN: FAKE_WHISPER, WHISPER_MODELS: models, LOG_LEVEL: 'warn', ...extraEnv };
   const proc = spawn(process.execPath, [path.join(ROOT, 'server.js')], { env, stdio: ['ignore', 'pipe', 'pipe'], cwd: os.tmpdir() });
@@ -68,7 +68,8 @@ async function startServer(extraEnv = {}) {
     await new Promise(r => setTimeout(r, 100));
     if (i === 99) throw new Error('server did not start:\n' + logs);
   }
-  return { url, port, dataDir, proc, logs: () => logs, stop: () => new Promise(r => { proc.once('exit', r); proc.kill(); }) };
+  const end = sig => new Promise(r => { if (proc.exitCode !== null || proc.signalCode) return r(); proc.once('exit', r); proc.kill(sig); });
+  return { url, port, dataDir, proc, logs: () => logs, stop: () => end('SIGTERM'), crash: () => end('SIGKILL') }; // crash = like pulling the power
 }
 async function login(url, password = 'testpass') {
   const r = await fetch(url + '/api/login', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ password }) });

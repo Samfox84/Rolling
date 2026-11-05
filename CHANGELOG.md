@@ -1,5 +1,18 @@
 # Changelog
 
+## 1.4.2 — whole-workflow testing and the fixes it found
+Two new end-to-end tests drive real browsers through the whole job, then download and open every file:
+basic user (dashboard → room → guest → room tone → record → marker → stop → Recordings → downloads) and
+advanced producer (control room, 3-segment rundown, show clock, quick tags, desk, cue cards, talkback, cough,
+a guest dropping out and rejoining, the **server crashing mid-show**, then Clean again / Make transcript /
+free space / delete). Fixed along the way:
+- **Markers, segments, fader moves and coughs are stamped at the moment the button was pressed** (using the
+  synced clock), not when the message reached the server — exact even on a slow connection or busy computer
+- **Rebuilding a take never breaks a download**: files are built in a separate folder and swapped in at the end;
+  the previous files stay downloadable meanwhile (this happens automatically when late pieces arrive after a dropout)
+- **No more occasional failed downloads / Cloudflare 502s**: idle connections are kept open longer than Cloudflare's
+- **The show clock survives a server restart** — the current segment is remembered with the take
+
 ## 1.4.1 — timecode clock and tally
 - **Timecode bar for everyone** (like a broadcast monitor): REC timecode (HH:MM:SS:FF, starts at 00:00:00:00 with the take — the same timeline as every file), current segment timecode with time left, and time of day
 - **Tally**: red frame round the whole studio while recording (amber during room tone), REC lamp in the bar, and a red frame on each person who is recording

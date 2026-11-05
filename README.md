@@ -112,7 +112,8 @@ Each install gets its own random password, shown at the end of the install. Chan
 ## Tests
 ```bash
 npm test            # 55 tests: loudness meter accuracy, transcripts, documents, a full recording through the real server
-npm run test:e2e    # real browsers (needs: npm i -g playwright && npx playwright install chromium)
+npm run test:e2e    # real browsers: studio features + two whole-workflow runs (basic user, advanced producer with a
+                    # dropout and a server crash) that download and open every file (needs: npm i -g playwright && npx playwright install chromium)
 ```
 Tests never touch the internet (`NO_EXTERNAL_CALLS=1`) and use a stand-in for whisper.cpp.
 

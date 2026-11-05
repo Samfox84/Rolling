@@ -22,7 +22,7 @@ const createTranscriber = require('./transcribe');
 let nodemailer = null;
 try { nodemailer = require('nodemailer'); } catch { /* email optional */ }
 
-const VERSION = '1.4.1';
+const VERSION = '1.4.2';
 
 // ---------- settings (from .env next to this file) ----------
 (function loadEnv() {
@@ -392,8 +392,12 @@ async function processTakeUntraced(roomId, takeId, opts = {}) {
   const room = loadRoom(roomId);
   if (!t || !room) return;
   const dir = takeDir(roomId, takeId);
-  const out = path.join(dir, 'out');
   const docsOnly = (opts.docsOnly || t.compacted) && (t.outputs || []).length > 0;
+  // a full build happens in a separate folder and is swapped in at the end, so the previous files stay
+  // downloadable (and a download already running never breaks) while a take is rebuilt
+  const finalOut = path.join(dir, 'out');
+  const out = docsOnly ? finalOut : path.join(dir, 'out.new');
+  if (!docsOnly && (t.outputs || []).length && fs.existsSync(finalOut)) t.serving = t.serving || t.outputs;
   t.status = 'processing'; t.error = ''; t.pct = 0;
 
   // ---- progress: every step has a weight; the bar shows the share done ----
@@ -622,6 +626,14 @@ async function processTakeUntraced(roomId, takeId, opts = {}) {
   for (const f of oldDocs) if (!t.outputs.some(o => o.file === f)) await fsp.rm(path.join(out, f), { force: true }).catch(e => log.warn('docs', `could not remove old ${f}`, e));
   finish();
 
+  if (!docsOnly) { // swap the new files in
+    const old = finalOut + '.old';
+    await fsp.rm(old, { recursive: true, force: true });
+    if (fs.existsSync(finalOut)) await fsp.rename(finalOut, old);
+    await fsp.rename(out, finalOut);
+    delete t.serving;
+    fsp.rm(old, { recursive: true, force: true }).catch(e => log.warn('build', 'could not remove the previous files', e)); // open downloads keep reading them
+  }
   t.status = errors.length && !t.outputs.length ? 'error' : 'ready';
   t.error = errors.join('\n');
   t.progress = ''; t.pct = 100;
@@ -629,7 +641,7 @@ async function processTakeUntraced(roomId, takeId, opts = {}) {
   log.info('rec', `take ${t.n} in ${roomId} ${docsOnly ? 'documents updated' : 'built'}: ${t.outputs.length} files${errors.length ? ', errors: ' + errors.length : ''}`);
   if (t.outputs.length) {
     t.progress = 'Backing up'; saveTake(t, true); announce(roomId, t);
-    await backupTake(room, t, out);
+    await backupTake(room, t, finalOut);
     if (!docsOnly && settings.autoCompact && t.backup && t.backup.ok) await compactTake(roomId, t, 'rebuild-data').catch(e => log.warn('tidy', 'automatic tidy-up failed', e));
     t.progress = ''; saveTake(t, true); announce(roomId, t);
     if (!docsOnly) await notifyReady(room, t).catch(e => log.warn('mail', 'could not send the ready email', e));
@@ -934,10 +946,10 @@ function transcriptStatus(t) {
 }
 function takeSummary(t) {
   return { id: t.id, n: t.n, started: t.started, stopped: t.stopped, status: t.status, progress: t.progress, error: t.error,
-    people: [...new Set(Object.values(t.segs).map(s => s.name))], outputs: t.outputs || [], markers: t.markers || [], backup: t.backup || null,
+    people: [...new Set(Object.values(t.segs).map(s => s.name))], outputs: t.serving || t.outputs || [], markers: t.markers || [], backup: t.backup || null,
     pct: t.pct || 0, levels: t.levels || {}, episode: t.episode || null, compacted: !!t.compacted,
     transcript: transcriptStatus(t),
-    totalSize: (t.outputs || []).reduce((a, o) => a + o.size, 0) };
+    totalSize: (t.serving || t.outputs || []).reduce((a, o) => a + o.size, 0) };
 }
 // show rundown: [{ name, mins }] — up to 40 segments
 function cleanRundown(list) { return list.slice(0, 40).map(x => ({ name: cleanText(x && x.name, 60) || 'Segment', mins: Math.max(0, Math.min(600, Math.round((Number(x && x.mins) || 0) * 10) / 10)) })); }
@@ -1076,7 +1088,7 @@ app.get('/dl/:room/:take/:file', (req, res) => {
   if (!canManage(req, r)) return res.status(403).send('Not allowed');
   const t = loadTake(r.id, req.params.take);
   const name = path.basename(req.params.file);
-  if (!t || !(t.outputs || []).some(o => o.file === name)) return res.status(404).send('Not found');
+  if (!t || !(t.serving || t.outputs || []).some(o => o.file === name)) return res.status(404).send('Not found');
   res.download(path.join(takeDir(r.id, t.id), 'out', name), name.startsWith(takeLabel(r, t)) ? name : `${takeLabel(r, t)} - ${name}`);
 });
 app.get('/zip/:room/:take', (req, res) => {
@@ -1089,7 +1101,7 @@ app.get('/zip/:room/:take', (req, res) => {
   const z = archiver('zip', { store: true });
   z.on('error', e => { log.error('zip', 'zip download failed', e); res.destroy(); });
   z.pipe(res);
-  for (const o of t.outputs) z.file(path.join(takeDir(r.id, t.id), 'out', o.file), { name: `${base}/${o.file}` });
+  for (const o of t.serving || t.outputs) z.file(path.join(takeDir(r.id, t.id), 'out', o.file), { name: `${base}/${o.file}` });
   z.finalize();
 });
 
@@ -1155,6 +1167,10 @@ app.post('/up/:room/:take/:seg/done', (req, res) => {
 
 // ---------- websocket: signalling, clock sync, recording control, chat ----------
 const server = http.createServer(app);
+// keep idle connections open longer than Cloudflare's tunnel does (90 s): otherwise a reused connection can be
+// closed by us at the same moment a download starts on it, and the download fails (or Cloudflare shows a 502)
+server.keepAliveTimeout = 95 * 1000;
+server.headersTimeout = 100 * 1000;
 const wss = new WebSocketServer({ server, path: '/ws', maxPayload: 256 * 1024 });
 wss.on('connection', ws => {
   let peer = null, waiting = null, lr = null, roomId = null;
@@ -1221,7 +1237,7 @@ wss.on('connection', ws => {
         const on = !!m.on; if (on === !!peer.coughing) return;
         peer.coughing = on;
         broadcast(lr, { t: 'cough', id: peer.id, on });
-        markRange(lr, peer, on, 'cough');
+        markRange(lr, peer, on, 'cough', m.at);
         return;
       }
       case 'chat': {
@@ -1249,7 +1265,7 @@ wss.on('connection', ws => {
         t.markers = t.markers || [];
         const tag = post.TAGS[m.tag] ? m.tag : null;
         const same = t.markers.filter(x => (x.tag || null) === tag).length + 1;
-        const mk = { at: Date.now() - t.started, label: cleanText(m.label, 80) || (tag ? `${post.TAGS[tag]} ${same}` : `Marker ${same}`), by: peer.name, ...(tag ? { tag } : {}) };
+        const mk = { at: Math.max(0, pressedAt(m.at) - t.started), label: cleanText(m.label, 80) || (tag ? `${post.TAGS[tag]} ${same}` : `Marker ${same}`), by: peer.name, ...(tag ? { tag } : {}) };
         t.markers.push(mk); saveTake(t, true);
         toHosts(lr, { t: 'marker', n: t.markers.length, ...mk });
         return;
@@ -1260,7 +1276,7 @@ wss.on('connection', ws => {
         if (db !== null && !(Number.isFinite(db) && db >= -60 && db <= 12)) return;
         const t = lr.take && loadTake(roomId, lr.take); if (!t) return;
         t.rides = t.rides || {}; const list = t.rides[target.clientId] || (t.rides[target.clientId] = []);
-        list.push({ at: Math.max(0, Date.now() - t.started), db });
+        list.push({ at: Math.max(0, pressedAt(m.at) - t.started), db });
         if (list.length > 20000) list.splice(0, list.length - 20000);
         saveTake(t);
         return;
@@ -1276,18 +1292,19 @@ wss.on('connection', ws => {
         const to = lr.peers.get(m.to); if (!to || to === peer) return;
         const on = !!m.on;
         send(to.ws, { t: 'talk', from: peer.id, on, name: peer.name });
-        if (on !== !!peer.talking) { peer.talking = on; if (!peer.control) markRange(lr, peer, on, 'talk'); }
+        if (on !== !!peer.talking) { peer.talking = on; if (!peer.control) markRange(lr, peer, on, 'talk', m.at); }
         return;
       }
       case 'segment': { // rundown: start a segment (or stop the clock with idx = -1)
         const room = loadRoom(roomId); const list = (room && room.rundown) || [];
         const idx = Number(m.idx);
-        if (idx === -1) { lr.segment = null; broadcast(lr, { t: 'segment', segment: null }); return; }
+        const cur = lr.take && loadTake(roomId, lr.take);
+        if (idx === -1) { lr.segment = null; if (cur) { cur.segment = null; saveTake(cur, true); } broadcast(lr, { t: 'segment', segment: null }); return; }
         if (!Number.isInteger(idx) || !list[idx]) return;
-        lr.segment = { idx, name: list[idx].name, mins: list[idx].mins, at: Date.now() };
+        lr.segment = { idx, name: list[idx].name, mins: list[idx].mins, at: pressedAt(m.at) };
         broadcast(lr, { t: 'segment', segment: lr.segment });
-        const t = lr.take && loadTake(roomId, lr.take);
-        if (t) { t.markers = t.markers || []; const mk = { at: Date.now() - t.started, label: list[idx].name, by: peer.name, tag: 'segment' }; t.markers.push(mk); saveTake(t, true); toHosts(lr, { t: 'marker', n: t.markers.length, ...mk }); }
+        const t = cur;
+        if (t) { t.segment = lr.segment; t.markers = t.markers || []; const mk = { at: Math.max(0, lr.segment.at - t.started), label: list[idx].name, by: peer.name, tag: 'segment' }; t.markers.push(mk); saveTake(t, true); toHosts(lr, { t: 'marker', n: t.markers.length, ...mk }); }
         return;
       }
       case 'admit': {
@@ -1316,15 +1333,18 @@ wss.on('connection', ws => {
   });
 });
 // a stretch of a person's recording that's muted in the Producer mix and listed in the edit list (cough button, talkback)
-function markRange(lr, peer, on, kind) {
+function markRange(lr, peer, on, kind, when) {
   const tk = lr.take && loadTake(lr.id, lr.take); if (!tk) return;
   tk.coughs = tk.coughs || {};
   const list = tk.coughs[peer.clientId] || (tk.coughs[peer.clientId] = []);
-  const at = Date.now() - tk.started;
+  const at = Math.max(0, pressedAt(when) - tk.started);
   if (on) list.push({ from: at, to: null, ...(kind === 'talk' ? { kind } : {}) });
   else { const open = list.slice().reverse().find(c => c.to == null && (c.kind || 'cough') === kind); if (open) open.to = Math.max(open.from + 50, at); }
   saveTake(tk);
 }
+// when something happened: the moment the button was pressed (the browser's clock is synced to ours), so markers
+// land exactly where the person pressed even on a slow connection; anything odd falls back to the time it arrived
+function pressedAt(v) { return Number.isFinite(v) && Math.abs(v - Date.now()) < 5000 ? v : Date.now(); }
 function scheduleEmptyStop(roomId, lr, minutes) {
   const take = lr.take;
   setTimeout(() => { if (lr.peers.size === 0 && lr.take === take) { log.info('rec', 'nobody came back — stopping take'); stopRecording(roomId, lr); } }, minutes * 60 * 1000);
@@ -1350,7 +1370,7 @@ for (const id of fs.readdirSync(ROOMS_DIR)) {
     if (t.status === 'recording') {
       // the take was still running: keep it open so everyone's browser reconnects and carries on
       const lr = liveRoom(id);
-      if (!lr.take) { lr.take = t.id; log.info('rec', `resuming take ${t.n} in "${id}" after restart`); scheduleEmptyStop(id, lr, 10); }
+      if (!lr.take) { lr.take = t.id; lr.segment = t.segment || null; log.info('rec', `resuming take ${t.n} in "${id}" after restart`); scheduleEmptyStop(id, lr, 10); }
       else { t.status = 'waiting'; t.stopped = t.stopped || Date.now(); saveTake(t, true); queueProcess(id, t.id); }
     } else if (['waiting', 'queued', 'processing'].includes(t.status)) queueProcess(id, t.id);
   }

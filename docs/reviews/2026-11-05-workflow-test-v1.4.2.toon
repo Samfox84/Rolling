@@ -1,0 +1,42 @@
+role: implementation-architect
+review: Rolling v1.4.1 → v1.4.2 whole-workflow user testing (basic user + advanced producer)
+date: 2026-11-05
+reviewer: Claude (Anthropic) — model claude-opus-5-5 — directed by Sam Fox
+format: TOON
+
+summary: |
+  Sam asked for a user test and an advanced user test of the whole workflow, checking for silent fails,
+  timecode, segment markers and moving between segments. Two automated end-to-end tests now drive real
+  Chromium browsers (fake camera + speech-like mic per person) against a real server, then download every
+  output over HTTP and open it with ffmpeg/ffprobe. They found 4 real problems (fixed) and several test-side
+  measurement issues (fixed in the tests). Both pass; full suite green.
+
+scenarios:
+  [2]{test|steps}:
+  basic user       | dashboard login (wrong password refused) → create room via UI → host joins → guest waits → admitted → chat → record with room tone + episode 12 title → tally ROOM TONE → REC → chat during take → marker (M) → host/guest clocks agree → stop → guest "Saved" → take ready → 20 named files present → every file downloaded, decoded end to end, length/format/frame rate checked → Chat.txt has only in-take chat → Recordings page shows Ready/transcript/all rows → "Download everything" zip name → no page errors, no server errors
+  advanced producer | control room + presenter + guest (both admitted) → 3-segment rundown typed and saved in studio → record with room tone → Next ▶ Intro (everyone sees INTRO, countdown, then "+over" after 12 s) → quick tag 1 → Next ▶ Interview (segment TC restarts, over cleared) → desk fader, cue card to Steve only, talkback to Guest, Steve coughs (C), quick tag 2 → guest's page reloads mid-take and rejoins (part 2) → server killed (SIGKILL) and restarted 4 s later → everyone reconnects, still REC, same segment, clocks agree → Next ▶ Wrap up → Next at end says "last segment" → stop clock → stop → take ready → segment/tag markers within 0.4 s of the synced clock at the press → chapters = segments → edit list → every file opens (25 fps MP4s, both guest parts) → Clean again → Make transcript → free space ×2 → files still download → delete take → no page errors, no server errors
+
+found_and_fixed:
+  [4]{id|severity|problem|fix|proof}:
+  W1 | HIGH | a take rebuild (e.g. late pieces after a dropout) deleted the output folder first — downloads in progress were cut off and files 404'd until done | full builds go to out.new and are swapped in at the end; the previous files stay listed and downloadable meanwhile | server test: download running + download started mid-rebuild both complete; mutation (serve only new list) → FAILS
+  W2 | MED  | Node's 5 s keep-alive vs Cloudflare's 90 s: a reused idle connection could be closed as a download started (failed download / 502) | keepAliveTimeout 95 s, headersTimeout 100 s | workflow test: 30+ sequential downloads with long gaps, no socket errors
+  W3 | MED  | markers/segments/rides/coughs stamped on arrival at the server — up to ~0.9 s late on a busy machine (also any network delay) | browser sends the synced clock time of the press; server uses it if within 5 s of now | server test: pressed-at times used, silly times fall back; workflow: all markers within 0.4 s
+  W4 | LOW  | show clock segment kept only in memory — vanished after a server restart | segment saved with the take, restored on resume | workflow: segment still shown after SIGKILL + restart
+
+test_side_corrections:
+  [6]{item|why}:
+  chat before recording not in Chat.txt | correct behaviour — only chat during a take belongs to it
+  guest part-1 video shorter than the take | correct — each part is lined up to the take and ends at the dropout
+  part-1 camera original ends abruptly | expected — the browser's last unsent seconds of camera are lost when a page dies; audio is saved every half-second; the MP4 made from it is clean
+  Chrome WebM duplicate timestamps | browser's untouched original; only real decode errors count
+  clock comparisons | read the page's synced clock (window.__studio.recClock) instead of on-screen text, which can be a redraw late on a very busy machine
+  control-room talkback not in edit list | correct — the control room is never recorded
+
+results:
+  npm test: 55 pass
+  e2e: studio 4 pass + workflow 2 pass
+
+deferred:
+  [2]{item|needs_confirmation}:
+  Real-world run on the MacBook with Steve (real mics, real network, Cloudflare in front) | YES — next show
+  ENTER/EXIT trace on every function (carried) | YES — Sam

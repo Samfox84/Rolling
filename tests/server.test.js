@@ -98,6 +98,13 @@ test('full take: record, upload lossless audio, build every file', { skip: !hasW
   };
   await up('Steve', start, talky(1));
   await up('Guest', gstart, talky(2, x => x < 10));
+  // markers are stamped with the moment the button was pressed (synced clock), not when the message arrived;
+  // a silly time (clock wildly off) falls back to the arrival time
+  host.send({ t: 'marker', tag: 'ad', at: Date.now() - 1500 });
+  host.send({ t: 'marker', tag: 'retake', at: Date.now() - 3600e3 });
+  const adMk = await waitFor(() => host.msgs.find(m => m.t === 'marker' && m.tag === 'ad'), 5000, 20);
+  const rtMk = await waitFor(() => host.msgs.find(m => m.t === 'marker' && m.tag === 'retake'), 5000, 20);
+  assert.ok(rtMk.at - adMk.at > 1200 && rtMk.at - adMk.at < 2500, `pressed-at time used: ${rtMk.at - adMk.at} ms apart`);
   host.send({ t: 'marker' });
   const mk = await waitFor(() => host.msgs.find(m => m.t === 'marker' && !m.tag), 10000, 50);
   assert.equal(mk.label, 'Marker 1');
@@ -172,12 +179,26 @@ test('full take: record, upload lossless audio, build every file', { skip: !hasW
   assert.equal(zip.status, 200); assert.ok((await zip.arrayBuffer()).byteLength > 1000000);
 
   // renaming a marker updates the documents only (the audio is not rebuilt)
-  const wavTime = fs.statSync(path.join(out, 'Steve.wav')).mtimeMs;
+  let wavTime = fs.statSync(path.join(out, 'Steve.wav')).mtimeMs;
   const r = await fetch(`${srv.url}/api/rooms/${room.id}/takes/${take.id}/markers?k=${room.hostKey}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ markers: [{ at: take.markers[0].at, label: 'The big question' }] }) });
   assert.equal(r.status, 200);
   // the chapters file must exist at every moment while it is being updated
   await waitFor(() => /The big question/.test(fs.readFileSync(path.join(out, 'Chapters.json'), 'utf8')), 30000, 20);
   assert.equal(fs.statSync(path.join(out, 'Steve.wav')).mtimeMs, wavTime);
+
+  // a full rebuild (e.g. late pieces arriving) never makes files vanish: the old ones stay downloadable until the new ones are swapped in
+  await waitFor(async () => (await (await fetch(`${srv.url}/api/rooms/${room.id}?k=${room.hostKey}`)).json()).takes[0].status === 'ready', 30000);
+  const size = fs.statSync(path.join(out, 'Steve.wav')).size;
+  const slow = await fetch(`${srv.url}/dl/${room.id}/${take.id}/Steve.wav?k=${room.hostKey}`);   // a download already running…
+  await fetch(`${srv.url}/api/rooms/${room.id}/takes/${take.id}/rebuild?k=${room.hostKey}`, { method: 'POST' });
+  await waitFor(async () => (await (await fetch(`${srv.url}/api/rooms/${room.id}?k=${room.hostKey}`)).json()).takes[0].status === 'processing', 10000, 20);
+  const during = await fetch(`${srv.url}/dl/${room.id}/${take.id}/Steve.wav?k=${room.hostKey}`);  // …and one started mid-rebuild
+  assert.equal(during.status, 200, 'still downloadable while rebuilding');
+  assert.equal((await during.arrayBuffer()).byteLength, size);
+  assert.equal((await slow.arrayBuffer()).byteLength, size, 'a running download finishes');
+  const rebuilt = await waitFor(async () => { const x = (await (await fetch(`${srv.url}/api/rooms/${room.id}?k=${room.hostKey}`)).json()).takes[0]; return x.status === 'ready' && x; }, 120000);
+  assert.equal(rebuilt.error, ''); assert.ok(fs.existsSync(path.join(out, 'Steve.wav'))); assert.equal(fs.existsSync(out + '.new'), false);
+  wavTime = fs.statSync(path.join(out, 'Steve.wav')).mtimeMs; // a full rebuild remakes the WAVs; from here on they must not change
 
   // "Clean again" with new settings: cleaning switched off → no cleaned files, the Producer mix is still made
   await waitFor(async () => (await (await fetch(`${srv.url}/api/rooms/${room.id}?k=${room.hostKey}`)).json()).takes[0].status === 'ready', 30000);

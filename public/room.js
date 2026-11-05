@@ -842,7 +842,7 @@ $('#toneBtn').onclick = async () => {
   if (roomTone) return;
   if (await ask('Record room tone now?', `Everyone will be asked to stay silent for ${roomToneSeconds} seconds.`, 'Start room tone')) wsSend({ t: 'roomtone' });
 };
-function dropMarker(tag) { if (!isHost) return; if (!recStartedAt) return toast('Markers work while recording'); wsSend({ t: 'marker', ...(tag ? { tag } : {}) }); }
+function dropMarker(tag) { if (!isHost) return; if (!recStartedAt) return toast('Markers work while recording'); wsSend({ t: 'marker', at: serverNow(), ...(tag ? { tag } : {}) }); }
 $('#markerBtn').onclick = () => dropMarker();
 document.querySelectorAll('[data-tag]').forEach(b => { b.onclick = () => dropMarker(b.dataset.tag || null); });
 const TAG_KEYS = { 1: 'great', 2: 'cut', 3: 'retake', 4: 'ad' };
@@ -880,7 +880,7 @@ function setCough(on) {
   if (on === coughing || controlMode) return;
   coughing = on;
   updateAudioSenders();
-  wsSend({ t: 'cough', on });
+  wsSend({ t: 'cough', on, at: serverNow() });
   $('#coughBtn').classList.toggle('held', on);
   const me = document.getElementById('tile-me'); if (me) me.classList.toggle('coughing', on);
 }
@@ -903,7 +903,7 @@ async function startTalk() {
   }
   talking = to;
   updateAudioSenders();
-  wsSend({ t: 'talk', to, on: true });
+  wsSend({ t: 'talk', to, on: true, at: serverNow() });
   $('#talkBtn').classList.add('held'); $('#talkBtn').firstChild.textContent = `🗣 Talking to ${peers.get(to).name}… `;
 }
 function stopTalk() {
@@ -911,7 +911,7 @@ function stopTalk() {
   if (!talking) return;
   const to = talking; talking = null;
   updateAudioSenders();
-  wsSend({ t: 'talk', to, on: false });
+  wsSend({ t: 'talk', to, on: false, at: serverNow() });
   $('#talkBtn').classList.remove('held'); $('#talkBtn').firstChild.textContent = '🗣 Hold to talk ';
 }
 hold($('#talkBtn'), startTalk, stopTalk);
@@ -949,13 +949,13 @@ function applyMonitor() {
 const rideTimers = new Map();
 function sendRide(id) { // at most ~12 a second per fader; the last position always goes
   if (rideTimers.has(id)) { rideTimers.get(id).again = true; return; }
-  const go = () => wsSend({ t: 'ride', id, db: deskOf(id).db });
+  const go = () => wsSend({ t: 'ride', id, db: deskOf(id).db, at: serverNow() });
   go();
   const st = { again: false };
   st.timer = setTimeout(function next() { if (st.again) { st.again = false; go(); st.timer = setTimeout(next, 80); } else rideTimers.delete(id); }, 80);
   rideTimers.set(id, st);
 }
-function sendAllRides() { if (!isHost) return; for (const id of [myId, ...peers.keys()]) if (id && desk.has(id)) wsSend({ t: 'ride', id, db: desk.get(id).db }); }
+function sendAllRides() { if (!isHost) return; for (const id of [myId, ...peers.keys()]) if (id && desk.has(id)) wsSend({ t: 'ride', id, db: desk.get(id).db, at: serverNow() }); }
 function renderDesk() {
   // who can be talked to / cued
   const people = [...peers.values()].filter(p => !p.control);
@@ -1013,7 +1013,7 @@ function renderRundown() {
   showTotal();
 }
 function showTotal() { const total = rundown.reduce((a, r) => a + (Number(r.mins) || 0), 0); $('#rdTotal').textContent = total ? `${Math.floor(total / 60) ? Math.floor(total / 60) + ' h ' : ''}${Math.round(total % 60)} min planned` : ''; }
-function startSegment(i) { if (!rundown[i]) return toast('Save the rundown first'); wsSend({ t: 'segment', idx: i }); }
+function startSegment(i) { if (!rundown[i]) return toast('Save the rundown first'); wsSend({ t: 'segment', idx: i, at: serverNow() }); }
 $('#rdAdd').onclick = () => { rundown.push({ name: '', mins: 5 }); renderRundown(); const ins = $('#rundownList').querySelectorAll('input[type=text]'); if (ins.length) ins[ins.length - 1].focus(); };
 $('#rdSave').onclick = async () => {
   const res = await api(`/api/rooms/${roomId}/settings?k=${encodeURIComponent(hostKey)}`, { json: { rundown } });
@@ -1062,6 +1062,7 @@ function renderClocks() {
   document.body.classList.toggle('tally-rec', state === 'rec'); document.body.classList.toggle('tally-tone', state === 'tone');
 }
 setInterval(renderClocks, 20);
+window.__studio.recClock = () => (recStartedAt ? serverNow() - recStartedAt : null); // for troubleshooting: the synced record clock in ms
 function closeBigClock() { $('#bigClock').classList.add('hidden'); if (document.fullscreenElement) document.exitFullscreen().catch(quiet('leave full screen')); }
 $('#clockFull').onclick = () => { $('#bigClock').classList.remove('hidden'); renderClock($('#bigClock')); $('#bigClock').requestFullscreen().catch(quiet('full-screen clock')); };
 $('#bigClock').onclick = closeBigClock;
