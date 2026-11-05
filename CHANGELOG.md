@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.3.2
+- **Live level bars on every tile** — everyone sees a moving green/amber/red bar for every person (−60 to 0 dBFS) with a peak-hold line and a red CLIP light that stays on for 3 s
+- **Transcripts you can see:** the Recordings page says exactly where each take's transcript is at (live %, ready with line count, failed and why, or not made yet)
+- **📝 Make transcript** button for takes recorded before transcripts were on, or to make one again — a failed re-run never throws away the old transcript
+- **Live transcript progress** in the host's Health panel while recording
+- **Test transcription** button in Studio settings, and the installer now test-runs the engine and says if it works
+- Transcript failures are listed as take errors — never just a missing file
+
 ## 1.3.1 — deep audit (see docs/reviews/2026-11-03-audit-v1.3.1.toon)
 - **Live loudness on the video tiles:** the host sees every person's LUFS while they talk; guests see their own
 - **No silent failures:** every error is logged (journalctl) or shown; corrupt files are kept and reported

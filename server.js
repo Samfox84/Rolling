@@ -21,7 +21,7 @@ const createTranscriber = require('./transcribe');
 let nodemailer = null;
 try { nodemailer = require('nodemailer'); } catch { /* email optional */ }
 
-const VERSION = '1.3.1';
+const VERSION = '1.3.2';
 
 // ---------- settings (from .env next to this file) ----------
 (function loadEnv() {
@@ -284,7 +284,7 @@ let queue = Promise.resolve();
 const queued = new Map(), again = new Map();
 function queueProcess(room, take, opts = {}) {
   const k = room + '/' + take;
-  const merge = (a, b) => ({ docsOnly: !!(a && a.docsOnly && b.docsOnly) });
+  const merge = (a, b) => ({ docsOnly: !!(a && a.docsOnly && b.docsOnly), transcribe: !!((a && a.transcribe) || b.transcribe) });
   if (queued.has(k)) { again.set(k, again.has(k) ? merge(again.get(k), opts) : opts); return; }
   queued.set(k, opts);
   const t = loadTake(room, take);
@@ -434,7 +434,11 @@ async function processTakeUntraced(roomId, takeId, opts = {}) {
   const shares = [];
   for (const s of segs) for (const [r, sc] of Object.entries(s.screens || {})) if (sc.chunks > 0) shares.push({ s, r, sc });
   const nPeople = new Set(audioSegs.map(s => s.clientId)).size;
-  if (!docsOnly) total += audioSegs.length + nPeople * 4 + 2 + videoSegs.length * 8 + shares.length * 4 + (transcriber.enabled() ? 4 : 0);
+  const wantTranscript = transcriber.enabled() && !t.compacted && (!docsOnly || !!opts.transcribe);
+  const previousTx = new Map(); // "Make transcript" starts again from the beginning, but never throws away a good transcript if the new run fails
+  if (opts.transcribe && wantTranscript) for (const s of audioSegs) { previousTx.set(s, s.tx); s.tx = { done: 0, parts: [] }; }
+  if (!docsOnly) total += audioSegs.length + nPeople * 4 + 2 + videoSegs.length * 8 + shares.length * 4;
+  if (wantTranscript) total += 4;
   total += 1;
 
   if (!docsOnly) {
@@ -596,12 +600,21 @@ async function processTakeUntraced(roomId, takeId, opts = {}) {
       finish();
     }
 
-    // --- finish the transcript (most of it was done live while recording) ---
-    if (transcriber.enabled()) {
-      begin('Finishing the transcript', 4);
-      try { await transcriber.finishTake(t, report); } catch (e) { errors.push('Transcript: ' + e.message); }
-      finish();
+  }
+
+  // --- finish the transcript (most of it was done live while recording) ---
+  if (wantTranscript) {
+    begin(opts.transcribe ? 'Making the transcript' : 'Finishing the transcript', 4);
+    try { await transcriber.finishTake(t, report); } catch (e) { errors.push('Transcript: ' + e.message); }
+    finish();
+    for (const s of audioSegs) {
+      const prev = previousTx.get(s);
+      if (s.tx && s.tx.error && prev && prev.parts && prev.parts.length) s.tx = { ...prev, error: s.tx.error + ' (kept the previous transcript)' };
     }
+    // a transcript that failed must say so — never just "no file"
+    const failed = audioSegs.filter(s => s.tx && s.tx.error);
+    const lines = audioSegs.reduce((n, s) => n + ((s.tx && s.tx.parts.length) || 0), 0);
+    if (failed.length) errors.push(`Transcript ${lines ? 'partly failed' : 'failed'} — ${failed.map(s => `${s._person}: ${s.tx.error}`).join('; ')}`);
   }
 
   // --- documents: transcript, chapters, markers, level report, chat, session files ---
@@ -826,17 +839,32 @@ app.post('/api/settings/test-email', needAdmin, express.json(), async (req, res)
   try { await tr.sendMail({ from: settings.smtp.from || settings.smtp.user, to: cleanText((req.body || {}).to, 200), subject: `${STUDIO_NAME}: test email`, text: 'Email from your Podcast Studio works ✓' }); res.json({ ok: true }); }
   catch (e) { res.status(400).json({ error: e.message }); }
 });
+app.post('/api/settings/test-transcribe', needAdmin, async (req, res) => {
+  try { res.json({ ok: true, ...(await transcriber.selfTest()) }); }
+  catch (e) { res.status(400).json({ error: e.message }); }
+});
 app.post('/api/settings/test-turn', needAdmin, async (req, res) => {
   if (!settings.turn.keyId || !settings.turn.token) return res.status(400).json({ error: 'Fill in the Key ID and API token first.' });
   try { const l = await cloudflareIce(true); res.json({ ok: true, servers: (l || []).reduce((a, x) => a + x.urls.length, 0) }); }
   catch (e) { res.status(400).json({ error: e.message }); }
 });
 
+function transcriptStatus(t) {
+  const segs = Object.values(t.segs).filter(s => s.audio && s.audio.end);
+  const lines = segs.reduce((n, s) => n + ((s.tx && s.tx.parts.length) || 0), 0);
+  return {
+    engine: transcriber.available(), on: transcriber.enabled(),
+    pct: transcriber.progress(t), lines,
+    failed: segs.filter(s => s.tx && s.tx.error).map(s => ({ who: s.name, error: s.tx.error })),
+    hasFile: (t.outputs || []).some(o => o.kind === 'transcript'),
+    canMake: transcriber.enabled() && !t.compacted && segs.length > 0,
+  };
+}
 function takeSummary(t) {
   return { id: t.id, n: t.n, started: t.started, stopped: t.stopped, status: t.status, progress: t.progress, error: t.error,
     people: [...new Set(Object.values(t.segs).map(s => s.name))], outputs: t.outputs || [], markers: t.markers || [], backup: t.backup || null,
     pct: t.pct || 0, levels: t.levels || {}, episode: t.episode || null, compacted: !!t.compacted,
-    transcript: transcriber.enabled() ? transcriber.progress(t) : null,
+    transcript: transcriptStatus(t),
     totalSize: (t.outputs || []).reduce((a, o) => a + o.size, 0) };
 }
 function roomSummary(r) {
@@ -932,6 +960,17 @@ app.post('/api/rooms/:id/takes/:take/markers', express.json(), (req, res) => {
   t.markers = list.filter(m => Number.isFinite(+m.at)).map(m => ({ at: +m.at, label: cleanText(m.label, 80) || 'Marker', by: cleanText(m.by, 40) })).sort((a, b) => a.at - b.at);
   saveTake(t, true);
   if (t.status !== 'recording') queueProcess(r.id, t.id, { docsOnly: true });
+  res.json({ ok: true });
+});
+app.post('/api/rooms/:id/takes/:take/transcribe', (req, res) => {
+  const r = loadRoom(req.params.id);
+  if (!canManage(req, r)) return res.status(403).json({ error: 'Not allowed' });
+  const t = loadTake(r.id, req.params.take);
+  if (!t) return res.status(404).json({ error: 'Not found' });
+  if (!transcriber.enabled()) return res.status(409).json({ error: transcriber.available() ? 'Transcripts are switched off in Studio settings' : 'The transcription engine is not installed — re-run the installer' });
+  if (t.compacted) return res.status(409).json({ error: 'This take\'s raw audio was deleted to save space, so it can\'t be transcribed now' });
+  if (['recording', 'processing', 'queued'].includes(t.status)) return res.status(409).json({ error: 'Busy — try again when the take is ready' });
+  queueProcess(r.id, t.id, { docsOnly: true, transcribe: true });
   res.json({ ok: true });
 });
 app.post('/api/rooms/:id/takes/:take/compact', express.json(), async (req, res) => {
@@ -1146,8 +1185,16 @@ function scheduleEmptyStop(roomId, lr, minutes) {
   setTimeout(() => { if (lr.peers.size === 0 && lr.take === take) { log.info('rec', 'nobody came back — stopping take'); stopRecording(roomId, lr); } }, minutes * 60 * 1000);
 }
 setInterval(() => { for (const ws of wss.clients) { if (!ws.isAlive) { ws.terminate(); continue; } ws.isAlive = false; try { ws.ping(); } catch (e) { log.ignore('ws', 'ping')(e); } } }, 20000);
-// live transcription: every 20 s, transcribe new audio from takes that are recording
-setInterval(() => { const takes = []; for (const [id, lr] of live) if (lr.take) { const t = loadTake(id, lr.take); if (t) takes.push(t); } transcriber.tickLive(takes); }, 20000);
+// live transcription: every 10 s, transcribe new audio from takes that are recording and tell hosts how far it has got
+setInterval(() => {
+  const takes = [];
+  for (const [id, lr] of live) if (lr.take) {
+    const t = loadTake(id, lr.take); if (!t) continue;
+    takes.push(t);
+    toHosts(lr, { t: 'tx', take: t.id, ...transcriptStatus(t) });
+  }
+  transcriber.tickLive(takes);
+}, (Number(process.env.LIVE_TX_SECONDS) || 10) * 1000);
 // hosts get server health every 30 s
 setInterval(async () => { const d = await diskInfo(); for (const lr of live.values()) if (lr.peers.size) toHosts(lr, { t: 'server', disk: d }); }, 30000);
 

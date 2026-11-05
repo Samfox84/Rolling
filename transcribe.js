@@ -52,10 +52,10 @@ module.exports = function createTranscriber({ settings, FFMPEG, takeDir, saveTak
     for (let i = 0; i + win <= x.length; i += win) { let e = 0; for (let j = i; j < i + win; j++) e += x[j] * x[j]; if (e < bestE) { bestE = e; best = from + i + (win >> 1); } }
     return best;
   }
-  function whisper(wav, prefix) {
+  function whisper(wav, prefix, timeoutMs = 20 * 60 * 1000) {
     const m = cfg().model, lang = /\.en$/.test(m) ? 'en' : (cfg().language || 'auto');
     const args = ['-m', modelPath(m), '-f', wav, '-oj', '-of', prefix, '-t', String(threads), '-l', lang, '-np', '-nth', '0.6'];
-    return run(BIN, args, { stdout: 'ignore', timeoutMs: 20 * 60 * 1000, nice: fs.existsSync('/usr/bin/nice') });
+    return run(BIN, args, { stdout: 'ignore', timeoutMs, nice: fs.existsSync('/usr/bin/nice') });
   }
   function ffExtract(file, rate, from, to, wav) {
     return run(FFMPEG, ['-hide_banner', '-loglevel', 'error', '-nostdin', '-y', '-f', 's24le', '-ar', String(rate), '-ac', '1',
@@ -126,5 +126,22 @@ module.exports = function createTranscriber({ settings, FFMPEG, takeDir, saveTak
     for (const s of Object.values(t.segs)) if (s.audio && s.audio.end) { total += s.audio.end; done += Math.min(s.audio.end, (s.tx && s.tx.done) || 0); }
     return total ? Math.round((100 * done) / total) : 0;
   }
-  return { available, enabled, installedModels, tickLive, finishTake: log.trace('transcribe', finishTake), progress, catchUp };
+  // run the engine on 3 seconds of test audio — proves it starts, loads the model and writes its output
+  async function selfTest() {
+    if (!fs.existsSync(BIN)) throw new Error(`The engine isn't installed (${BIN} is missing) — re-run the installer`);
+    if (!fs.existsSync(modelPath())) throw new Error(`The speech model '${cfg().model}' isn't downloaded — run: sudo rolling-get-model ${cfg().model}`);
+    const id = 'selftest-' + Date.now(), wav = path.join(tmpDir, id + '.wav'), prefix = path.join(tmpDir, id);
+    try {
+      await run(FFMPEG, ['-hide_banner', '-loglevel', 'error', '-nostdin', '-y', '-f', 'lavfi', '-i', 'sine=frequency=300:duration=3', '-ar', '16000', '-ac', '1', '-c:a', 'pcm_s16le', wav], { stdout: 'ignore', timeoutMs: 30000 });
+      const t0 = Date.now();
+      await whisper(wav, prefix, 80000); // under Cloudflare's 100 s limit, so the page always gets an answer
+      const j = JSON.parse(await fsp.readFile(prefix + '.json', 'utf8'));
+      if (!Array.isArray(j.transcription)) throw new Error('the engine ran but its output had no transcription list');
+      return { seconds: +((Date.now() - t0) / 1000).toFixed(1), model: cfg().model, threads };
+    } finally {
+      fsp.rm(wav, { force: true }).catch(log.ignore('transcribe', 'remove self-test wav'));
+      fsp.rm(prefix + '.json', { force: true }).catch(log.ignore('transcribe', 'remove self-test json'));
+    }
+  }
+  return { available, enabled, installedModels, tickLive, finishTake: log.trace('transcribe', finishTake), progress, catchUp, selfTest };
 };

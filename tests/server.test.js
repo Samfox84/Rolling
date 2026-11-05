@@ -83,6 +83,10 @@ test('full take: record, upload lossless audio, build every file', { skip: !hasW
   assert.equal((await fetch(`${srv.url}/up/${room.id}/${start.take}/${start.seg}/audio?tok=${start.tok}&s=0&t=1`, { method: 'POST', body: Buffer.alloc(4) })).status, 400);
 
   for (const s of [start, gstart]) assert.equal((await fetch(`${srv.url}/up/${room.id}/${s.take}/${s.seg}/done?tok=${s.tok}`, { method: 'POST' })).status, 200);
+  // while recording, the host is told how far the live transcript has got
+  const tx = await waitFor(() => host.msgs.find(m => m.t === 'tx'), 10000, 50);
+  assert.equal(tx.engine, true); assert.equal(tx.on, true); assert.ok(tx.pct >= 0 && tx.pct <= 100);
+  assert.equal(guest.msgs.filter(m => m.t === 'tx').length, 0, 'only hosts get transcript progress');
   const before = host.msgs.length;
   host.send({ t: 'record', on: false });
   await host.next('record-stop', before);
@@ -117,6 +121,9 @@ test('full take: record, upload lossless audio, build every file', { skip: !hasW
   assert.match(txt, /Steve: Sentence at 0 seconds\./);
   assert.match(txt, /Guest: /);
   assert.doesNotMatch(txt, /Thank you/);
+  // the Recordings page is told the transcript is there, and how big it is
+  assert.equal(take.transcript.hasFile, true); assert.equal(take.transcript.pct, 100); assert.ok(take.transcript.lines > 5); assert.deepEqual(take.transcript.failed, []);
+  assert.equal(take.transcript.canMake, true);
   // session files are valid XML and reference the people
   const sesx = fs.readFileSync(path.join(out, 'Test Show - Ep 7 - Testing (Audition).sesx'), 'utf8');
   assert.ok(xmlWellFormed(sesx)); assert.match(sesx, /relativePath="Steve.wav"/);
@@ -136,6 +143,25 @@ test('full take: record, upload lossless audio, build every file', { skip: !hasW
   await waitFor(() => /The big question/.test(fs.readFileSync(path.join(out, 'Chapters.json'), 'utf8')), 30000, 20);
   assert.equal(fs.statSync(path.join(out, 'Steve.wav')).mtimeMs, wavTime);
 
+  // "Make transcript" with a broken engine: the take says so plainly, and the good transcript is kept
+  const ready2 = async () => waitFor(async () => { const x = (await (await fetch(`${srv.url}/api/rooms/${room.id}?k=${room.hostKey}`)).json()).takes[0]; return x.status === 'ready' && x; }, 60000);
+  await ready2();
+  fs.writeFileSync(path.join(srv.dataDir, 'whisper-fail'), '');
+  assert.equal((await fetch(`${srv.url}/api/rooms/${room.id}/takes/${take.id}/transcribe?k=${room.hostKey}`, { method: 'POST' })).status, 200);
+  await waitFor(async () => (await (await fetch(`${srv.url}/api/rooms/${room.id}?k=${room.hostKey}`)).json()).takes[0].status !== 'ready', 5000, 20).catch(() => {});
+  const broken = await ready2();
+  assert.match(broken.error, /Transcript (partly )?failed — .*failed to load model/);
+  assert.equal(broken.transcript.failed.length, 2);
+  assert.equal(broken.transcript.hasFile, true, 'previous transcript kept');
+  assert.match(fs.readFileSync(path.join(out, 'Transcript.txt'), 'utf8'), /Steve: Sentence at 0 seconds\./);
+  // engine fixed → make it again: error gone, transcript rebuilt from scratch
+  fs.rmSync(path.join(srv.dataDir, 'whisper-fail'));
+  await fetch(`${srv.url}/api/rooms/${room.id}/takes/${take.id}/transcribe?k=${room.hostKey}`, { method: 'POST' });
+  await waitFor(async () => { const x = (await (await fetch(`${srv.url}/api/rooms/${room.id}?k=${room.hostKey}`)).json()).takes[0]; return x.status === 'ready' && !x.error && x; }, 60000);
+  assert.equal(fs.statSync(path.join(out, 'Steve.wav')).mtimeMs, wavTime, 'making a transcript does not rebuild the audio');
+  // only the host may ask
+  assert.equal((await fetch(`${srv.url}/api/rooms/${room.id}/takes/${take.id}/transcribe?k=wrong`, { method: 'POST' })).status, 403);
+
   // freeing space removes the raw data; a later rebuild only refreshes documents and keeps every file
   await waitFor(async () => (await (await fetch(`${srv.url}/api/rooms/${room.id}?k=${room.hostKey}`)).json()).takes[0].status === 'ready', 30000);
   const c = await (await fetch(`${srv.url}/api/rooms/${room.id}/takes/${take.id}/compact?k=${room.hostKey}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ what: 'rebuild-data' }) })).json();
@@ -144,6 +170,9 @@ test('full take: record, upload lossless audio, build every file', { skip: !hasW
   await fetch(`${srv.url}/api/rooms/${room.id}/takes/${take.id}/rebuild?k=${room.hostKey}`, { method: 'POST' });
   await waitFor(async () => (await (await fetch(`${srv.url}/api/rooms/${room.id}?k=${room.hostKey}`)).json()).takes[0].status === 'ready', 30000);
   assert.ok(fs.existsSync(path.join(out, 'Steve.wav')), 'finished audio survives');
+  // once the raw audio is gone a transcript can't be made, and the page is told why
+  const gone = await fetch(`${srv.url}/api/rooms/${room.id}/takes/${take.id}/transcribe?k=${room.hostKey}`, { method: 'POST' });
+  assert.equal(gone.status, 409); assert.match((await gone.json()).error, /deleted to save space/);
 
   host.ws.close(); guest.ws.close();
 });

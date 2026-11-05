@@ -54,6 +54,10 @@ test('host sees live loudness (LUFS) on every tile and in the Health panel; gues
   await waitFor(async () => (await host.p.$$eval('.tile:not(.hidden) .tloud', els => els.filter(e => /LUFS/.test(e.textContent)).length)) >= 2, 20000);
   assert.match(await guest.p.textContent('#tile-me .tloud'), /LUFS/);
   assert.equal(await guest.p.$$eval('.tile:not(#tile-me) .tloud', els => els.filter(e => e.textContent).length), 0, 'guests only see their own reading');
+  // live level bars: everyone sees a moving bar on every person's tile (their own and everyone else's)
+  for (const who of [host, guest]) {
+    await waitFor(async () => (await who.p.$$eval('.tile:not(.hidden):not(.screen) .vu .cover', els => els.filter(e => e.style.height && parseFloat(e.style.height) < 95).length)) >= 2, 15000);
+  }
   await host.p.click('#healthBtn');
   await waitFor(async () => (await host.p.$$eval('.lnums', els => els.length)) >= 2, 10000);
   assert.deepEqual([...host.errors, ...guest.errors], []);

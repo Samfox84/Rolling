@@ -82,3 +82,17 @@ test('an engine failure is recorded on the person, not swallowed, and the transc
   assert.ok(t.segs.S1.tx.error, 'the error is kept on the person');
   assert.equal(t.segs.S1.tx.done, t.segs.S1.audio.end, 'and it does not retry forever');
 });
+
+test('self-test runs the engine for real and reports how long it took', async () => {
+  const { tr } = setup(1, () => 0);
+  const r = await tr.selfTest();
+  assert.equal(r.model, 'base.en'); assert.ok(r.seconds >= 0);
+});
+test('self-test explains a missing model or a broken engine in plain words', async () => {
+  const { tr } = setup(1, () => 0);
+  const tr2 = createTranscriber({ settings: { transcribe: { model: 'small.en' } }, FFMPEG: 'ffmpeg', takeDir: () => '/x', saveTake: () => {} });
+  await assert.rejects(tr2.selfTest(), /rolling-get-model small\.en/);
+  const flag = path.join(tmpDir('flag'), 'fail'); fs.writeFileSync(flag, '');
+  process.env.FAKE_WHISPER_FAIL_FLAG = flag;
+  try { await assert.rejects(tr.selfTest(), /failed to load model/); } finally { delete process.env.FAKE_WHISPER_FAIL_FLAG; }
+});

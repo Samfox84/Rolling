@@ -133,6 +133,19 @@ curl -fL --retry 3 --progress-bar -o "\$f.part" "https://huggingface.co/ggergano
 chown "$RUN_USER" "\$f"; echo "Model \$m ready — pick it in Studio settings > Transcripts."
 GETEOF
   chmod 755 /usr/local/bin/rolling-get-model
+  # self-test: run the engine for real on 2 seconds of test audio, as the user the studio runs as
+  if [ -x "$WHISPER_BIN" ] && [ -s "$WHISPER_DIR/models/ggml-${WHISPER_MODEL:-base.en}.bin" ]; then
+    T=$(mktemp -d); chmod 777 "$T"
+    if ffmpeg -hide_banner -loglevel error -nostdin -y -f lavfi -i sine=frequency=300:duration=2 -ar 16000 -ac 1 -c:a pcm_s16le "$T/t.wav" \
+       && sudo -u "$RUN_USER" timeout 120 "$WHISPER_BIN" -m "$WHISPER_DIR/models/ggml-${WHISPER_MODEL:-base.en}.bin" -f "$T/t.wav" -oj -of "$T/t" -np >"$T/log" 2>&1 \
+       && [ -s "$T/t.json" ]; then
+      echo "✓ Transcription engine tested and working."
+    else
+      warn "The transcription engine is installed but failed its test — transcripts won't be made. Last lines:"
+      tail -n 5 "$T/log" 2>/dev/null || true
+    fi
+    rm -rf "$T"
+  fi
 fi
 
 # ---------- 7. run as a service (starts on boot, restarts if it crashes) ----------

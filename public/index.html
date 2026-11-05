@@ -66,6 +66,7 @@
       <p class="muted small-text" style="margin:0">Made on this server (whisper.cpp) — free and private. Runs quietly in the background while you record, so it's nearly done when you press Stop.</p>
       <div id="txStatus" class="small-text" style="margin-top:6px"></div>
       <label class="check" style="margin-top:8px"><input type="checkbox" id="txOn"> <span>Make a transcript of every take</span></label>
+      <div class="row" style="margin-top:8px"><button class="small" id="testTx">Test transcription</button><span id="txTest" class="small-text"></span></div>
       <div class="grid2">
         <div><label>Model (bigger = more accurate, slower)</label><select id="txModel"></select></div>
         <div><label>Language</label><select id="txLang"><option value="auto">Detect automatically</option><option value="en">English</option><option value="es">Spanish</option><option value="fr">French</option><option value="de">German</option><option value="it">Italian</option><option value="nl">Dutch</option><option value="pt">Portuguese</option></select></div>
@@ -203,6 +204,12 @@ $('#testTurn').onclick = async () => {
   $('#turnStatus').textContent = 'Testing…';
   const res = await api('/api/settings/test-turn', { method: 'POST' });
   $('#turnStatus').innerHTML = res.ok ? `<span style="color:var(--ok)">✓ Relay working (${res.data.servers} addresses)</span>` : `<span style="color:var(--rec)">${esc(res.error)}</span>`;
+};
+$('#testTx').onclick = async () => {
+  if (!(await saveSettings())) return;
+  $('#txTest').textContent = 'Testing… (can take up to a minute)';
+  const res = await api('/api/settings/test-transcribe', { method: 'POST', timeout: 95000 });
+  $('#txTest').innerHTML = res.ok ? `<span style="color:var(--ok)">✓ Working — the ${esc(res.data.model)} model ran in ${res.data.seconds} s</span>` : `<span style="color:var(--rec)">${esc(res.error)}</span>`;
 };
 $('#pwBtn').onclick = async () => {
   const res = await api('/api/settings/password', { json: { current: $('#pwCur').value, next: $('#pwNew').value } });

@@ -57,7 +57,7 @@ async function startServer(extraEnv = {}) {
   const models = tmpDir('models'); fs.writeFileSync(path.join(models, 'ggml-base.en.bin'), 'test');
   const port = 20000 + Math.floor(Math.random() * 20000);
   const env = { ...process.env, PORT: String(port), BIND: '127.0.0.1', DATA_DIR: dataDir, ADMIN_PASSWORD: 'testpass', SECRET: 'testsecret',
-    ROOM_TONE_SECONDS: '3', LATE_REBUILD_SECONDS: '2', NO_EXTERNAL_CALLS: '1', WHISPER_BIN: FAKE_WHISPER, WHISPER_MODELS: models, LOG_LEVEL: 'warn', ...extraEnv };
+    ROOM_TONE_SECONDS: '3', LATE_REBUILD_SECONDS: '2', LIVE_TX_SECONDS: '1', FAKE_WHISPER_FAIL_FLAG: path.join(dataDir, 'whisper-fail'), NO_EXTERNAL_CALLS: '1', WHISPER_BIN: FAKE_WHISPER, WHISPER_MODELS: models, LOG_LEVEL: 'warn', ...extraEnv };
   const proc = spawn(process.execPath, [path.join(ROOT, 'server.js')], { env, stdio: ['ignore', 'pipe', 'pipe'], cwd: os.tmpdir() });
   let logs = '';
   proc.stdout.on('data', d => { logs += d; });

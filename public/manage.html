@@ -113,7 +113,7 @@ async function load() {
           ${t.outputs.length ? `<a href="/zip/${roomId}/${t.id}${q}"><button class="small primary">⬇ Download everything (${mb(t.totalSize)})</button></a>` : ''}</div>
       </div>
       ${busy ? `<div class="small-text muted" style="margin-top:6px">${esc(t.progress || label)} — ${t.pct || 0}%</div><div class="pbar big"><span style="width:${t.pct || 0}%"></span></div>` : ''}
-      ${t.status === 'recording' && t.transcript != null ? `<div class="small-text muted" style="margin-top:6px">📝 Live transcript: ${t.transcript}% done so far</div>` : ''}
+      ${txLine(t)}
       ${t.error ? `<p class="small-text" style="color:var(--rec);white-space:pre-wrap">${esc(t.error)}</p>` : ''}
       ${t.backup && !t.backup.ok ? `<p class="small-text" style="color:var(--warn)">Backup: ${esc(t.backup.error)}</p>` : ''}
       ${levels.length ? `<table class="levels"><tr><th>Levels (EBU R128)</th><th>Loudness</th><th>True peak</th><th>Range</th><th></th></tr>${levels.map(([who, l]) => { const [c, v] = verdictView(l); return `<tr><td>${esc(who)}</td><td>${f1(l.I)} LUFS</td><td>${f1(l.TP)} dBTP</td><td>${f1(l.LRA)} LU</td><td class="${c}">${v}</td></tr>`; }).join('')}</table>` : ''}
@@ -126,11 +126,28 @@ async function load() {
           <td><a href="/dl/${roomId}/${t.id}/${encodeURIComponent(o.file)}${q}"><button class="small">⬇ Download</button></a></td></tr>`).join('')}</table>` : ''}
       <div class="row" style="justify-content:flex-end; margin-top:8px">
         ${t.status === 'ready' && !t.compacted ? `<button class="small ghost" data-compact="${t.id}" data-what="camera-originals">Free space: delete camera originals</button><button class="small ghost" data-compact="${t.id}" data-what="rebuild-data">Free space: delete rebuild data</button>` : ''}
+        ${t.transcript && t.transcript.canMake && ['ready', 'error'].includes(t.status) ? `<button class="small ghost" data-transcribe="${t.id}">📝 ${t.transcript.hasFile ? 'Make the transcript again' : 'Make transcript'}</button>` : ''}
         ${['ready', 'error', 'waiting'].includes(t.status) ? `<button class="small ghost" data-rebuild="${t.id}">${t.compacted ? 'Update documents' : 'Rebuild files'}</button>` : ''}
         ${!['recording', 'processing', 'queued'].includes(t.status) ? `<button class="small ghost" data-del="${t.id}" data-n="${t.n}">Delete take</button>` : ''}
       </div>`;
     box.appendChild(el);
   }
+}
+// one plain line saying where the transcript is at — never just a missing file
+function txLine(t) {
+  const x = t.transcript; if (!x) return '';
+  const line = (txt, color) => `<div class="small-text" style="margin-top:6px;${color ? 'color:' + color : ''}">📝 ${txt}</div>`;
+  if (!x.engine) return line('Transcript: the transcription engine isn\'t installed on this server — re-run the installer, then press “Test transcription” in Studio settings.', 'var(--warn)');
+  if (!x.on) return line('Transcript: switched off in Studio settings.', '');
+  const fails = x.failed.map(f => `${esc(f.who)}: ${esc(f.error)}`).join(' · ');
+  if (t.status === 'recording') return line(`Live transcript: ${x.pct}% of the audio so far · ${x.lines} line${x.lines === 1 ? '' : 's'}${fails ? ' · ⚠ ' + fails : ''}`, fails ? 'var(--warn)' : '');
+  if (['queued', 'processing'].includes(t.status)) return line(`Transcript: ${x.pct}% done — files appear below when it finishes.`, '');
+  if (x.hasFile) return line(`Transcript ready — ${x.lines} lines (Transcript.txt / .srt / .vtt below)${fails ? ' · ⚠ some parts failed: ' + fails : ''}`, fails ? 'var(--warn)' : '');
+  if (fails) return line(`Transcript failed — ${fails}. Press “Test transcription” in Studio settings to check the engine, then “Make transcript”.`, 'var(--rec)');
+  if (t.compacted) return line('No transcript — this take\'s raw audio was deleted to save space.', '');
+  if (t.status === 'ready' && x.pct >= 100) return line('No transcript — nobody was heard clearly enough to transcribe.', '');
+  if (t.status === 'ready') return line('No transcript for this take yet (it may have been recorded before transcripts were switched on) — press “Make transcript”.', '');
+  return '';
 }
 async function saveRoom(body) {
   const res = await api(`/api/rooms/${roomId}/settings${q}`, { json: body });
@@ -161,6 +178,7 @@ document.addEventListener('click', async e => {
     const res = await api(`/api/rooms/${roomId}/takes/${b.dataset.take}/markers${q}`, { json: { markers } });
     toast(res.ok ? 'Markers saved — updating files…' : 'Could not save: ' + res.error); editing = false; lastJson = ''; load();
   }
+  if (b.dataset.transcribe) { const r = await api(`/api/rooms/${roomId}/takes/${b.dataset.transcribe}/transcribe${q}`, { method: 'POST' }); toast(r.ok ? 'Making the transcript — the progress bar shows how far it has got' : r.error); lastJson = ''; load(); }
   if (b.dataset.rebuild) { const r = await api(`/api/rooms/${roomId}/takes/${b.dataset.rebuild}/rebuild${q}`, { method: 'POST' }); if (!r.ok) toast(r.error); lastJson = ''; load(); }
   if (b.dataset.compact) {
     const what = b.dataset.what;

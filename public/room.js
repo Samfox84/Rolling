@@ -444,11 +444,26 @@ function levelLoop() {
     let pk = 0; for (const v of p.buf) pk = Math.max(pk, Math.abs(v));
     p.level = Math.max((p.level || 0) * 0.85, pk);
     if (p.tile) p.tile.classList.toggle('speaking', pk > 0.04);
+    drawVu(p.tile, p.state && p.state.mic === false ? 0 : p.level);
   }
+  drawVu(meTile, micOn ? localPeak : 0);
   localPeak *= 0.85;
   requestAnimationFrame(levelLoop);
 }
 requestAnimationFrame(levelLoop);
+// live level bar on a tile: −60 to 0 dBFS, green → amber (−12) → red (−3), peak hold 1.5 s, CLIP light for 3 s
+const VU_FLOOR = -60;
+function drawVu(tile, peak) {
+  const vu = tile && tile.querySelector('.vu'); if (!vu) return;
+  const now = performance.now(), db = 20 * Math.log10(Math.max(peak, 1e-6));
+  const pos = Math.max(0, Math.min(1, (db - VU_FLOOR) / -VU_FLOOR));
+  const st = vu._st || (vu._st = { hold: 0, holdAt: 0, clipAt: -1e9 });
+  if (pos >= st.hold || now - st.holdAt > 1500) { st.hold = pos >= st.hold ? pos : Math.max(pos, st.hold - 0.01); if (pos >= st.hold) st.holdAt = now; }
+  if (peak >= 0.989) st.clipAt = now; // about −0.1 dBFS
+  vu.children[0].style.height = ((1 - pos) * 100).toFixed(1) + '%'; // covers the unlit part of the green→amber→red scale
+  vu.children[1].style.bottom = (st.hold * 100).toFixed(1) + '%';
+  vu.classList.toggle('clip', now - st.clipAt < 3000);
+}
 
 // =====================================================================
 // 4. Joining + messages from the server
@@ -552,6 +567,7 @@ function onMsg(m) {
     case 'server': serverDisk = m.disk; break;
     case 'meter': { const p = peers.get(m.id); if (p) p.loud = m.m; break; }
     case 'build': build = m; renderBuild(); break;
+    case 'tx': txLive = m; break;
   }
 }
 
@@ -665,6 +681,7 @@ function makeTile(id, name, isMe) {
   el.className = 'tile' + (isMe ? ' me' : ''); el.id = 'tile-' + id;
   el.innerHTML = `<video autoplay playsinline ${isMe ? 'muted' : ''}></video><div class="avatar"></div>
     <div class="label"><span class="micicon"></span><span class="name"></span></div><div class="status"></div>
+    <div class="vu" title="Live level (peak, dBFS). Green is good, amber is loud, red at the top = too loud"><span class="cover"></span><span class="hold"></span></div>
     ${isMe ? '' : '<div class="conn">Connecting…</div>'}`;
   el.querySelector('.name').textContent = name + (isMe ? ' (you)' : '');
   el.querySelector('.avatar').textContent = initials(name);
@@ -859,6 +876,15 @@ function loudMeter(L, muted) {
       <div class="lmark" style="left:${pos(-23)}%" title="-23 LUFS (EBU R128)"></div><div class="lmark" style="left:${pos(-16)}%" title="-16 LUFS (podcast)"></div></div>
     <div class="lnums">M <b>${fmtL(L.M)}</b> · S <b class="${loudClass(L.S)}">${fmtL(L.S)}</b> · I <b>${fmtL(L.I)}</b> LUFS · TP <b class="${tpBad ? 'bad' : ''}">${fmtL(L.TPmax)}</b> dBTP${tpBad ? ' ⚠ too hot' : ''}</div>`;
 }
+// live transcript progress (hosts get it from the server every 10 s while recording)
+let txLive = null;
+function txHtml() {
+  const x = txLive; if (!x || !recStartedAt) return '';
+  if (!x.engine) return '<div class="hrow"><b>📝 Transcript</b><div class="warnc">Engine not installed — re-run the installer</div></div>';
+  if (!x.on) return '<div class="hrow"><b>📝 Transcript</b><div class="muted">Switched off in Studio settings</div></div>';
+  const fail = x.failed.length ? `<div class="hwarn">⚠ ${x.failed.map(f => esc(f.who) + ': ' + esc(f.error)).join(' · ')}</div>` : '';
+  return `<div class="hrow ${fail ? 'has-warn' : ''}"><b>📝 Live transcript</b><div class="small-text muted">${x.pct}% of the audio so far · ${x.lines} line${x.lines === 1 ? '' : 's'} (runs ~30 s behind)</div><div class="pbar"><span style="width:${x.pct}%"></span></div>${fail}</div>`;
+}
 function renderHealth() {
   let totalWarn = warns.size;
   for (const p of peers.values()) totalWarn += ((p.state && p.state.warnings) || []).length;
@@ -872,9 +898,9 @@ function renderHealth() {
     $('#healthServer').innerHTML = `<div class="hrow"><b>Studio server</b><div class="${hrs < 1 ? 'bad' : hrs < 3 ? 'warnc' : 'goodc'}">${gb.toFixed(0)} GB free · about ${hrs >= 10 ? Math.floor(hrs) : hrs.toFixed(1)} h of recording left</div></div>`;
     setWarn('disk', isHost && !!recStartedAt && hrs < 0.5);
   }
+  $('#healthTx').innerHTML = txHtml();
   $('#healthRows').innerHTML = rows.map(r => {
     const s = r.s, ws = s.warnings || [];
-    const lvl = Math.min(100, Math.sqrt(r.level) * 110);
     const n = s.net || {};
     const rec = s.rec === 'recording' ? '<span class="pill rec">● REC</span>' : s.rec === 'uploading' ? `<span class="pill warn">↑ uploading ${fmtMB(s.pending || 0)}</span>` : s.rec === 'saved' ? '<span class="pill ok">✓ saved</span>' : '<span class="pill">idle</span>';
     const behind = s.pendingAudio > 1048576 ? ` · audio ${fmtMB(s.pendingAudio)} behind` : '';

@@ -16,11 +16,11 @@ Version: see [CHANGELOG.md](CHANGELOG.md). Licence: [GNU AGPL-3.0](LICENSE) — 
 - **Session file** — open in Audition (File › Open), Premiere or Resolve to get every file on its own track, with markers. Plus an Audition markers CSV.
 
 **Post-production**
-- **Broadcast loudness meters** (EBU R128) for everyone, live in the host's Health panel.
+- **Live level bars** on every person's video tile (green / amber / red, peak hold, clip light) and **broadcast loudness meters** (EBU R128) for everyone, live in the host's Health panel.
 - **Level report + normalised copies** of every person at −16 LUFS (podcast) and −23 LUFS (broadcast), alongside the untouched recordings.
 - **Intro & outro** per show, added to the session files and a −16 LUFS rough mix.
 - **Native Audition session (.sesx)** plus XML for Premiere / Resolve.
-- **Transcripts** (TXT, SRT, VTT, with speaker names) made on your own server with [whisper.cpp](https://github.com/ggml-org/whisper.cpp), transcribed live in the background while you record.
+- **Transcripts** (TXT, SRT, VTT, with speaker names) made on your own server with [whisper.cpp](https://github.com/ggml-org/whisper.cpp), transcribed live in the background while you record. The Recordings page shows each transcript's progress or why it failed, with a **Make transcript** button for older takes.
 - **Chapters** from markers, **episode numbers and titles** in file names, progress bars for everything.
 - **Control room** — the host can run the show without being on camera.
 
@@ -100,7 +100,7 @@ Each install gets its own random password, shown at the end of the install. Chan
 
 ## Tests
 ```bash
-npm test            # 44 tests: loudness meter accuracy, transcripts, documents, a full recording through the real server
+npm test            # 46 tests: loudness meter accuracy, transcripts, documents, a full recording through the real server
 npm run test:e2e    # real browsers (needs: npm i -g playwright && npx playwright install chromium)
 ```
 Tests never touch the internet (`NO_EXTERNAL_CALLS=1`) and use a stand-in for whisper.cpp.
