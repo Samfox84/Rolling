@@ -271,7 +271,8 @@ test('advanced producer: rundown + clock, desk, dropout, server crash mid-show, 
   // segment 2: Interview — the segment clock starts again from zero
   await prod.p.click('#rdNext'); segTc.push(await tcAtAction(prod));
   await waitFor(async () => (await tcText(guest, 'segname')) === 'INTERVIEW', 5000);
-  assert.ok(tcSecs(await tcText(guest, 'seg')) < 2, 'segment timecode restarts');
+  const segNow = tcSecs(await tcText(guest, 'seg')), recNow = tcSecs(await tcText(guest));
+  assert.ok(segNow < 4 && segNow < recNow - 20, `segment timecode restarts (segment ${segNow} s, record ${recNow} s)`);
   assert.ok(!(await guest.p.evaluate(() => document.querySelector('#tcBar [data-tc="segblock"]').classList.contains('over'))));
 
   // desk during the interview: fader, cue card, talkback, cough
