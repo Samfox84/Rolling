@@ -275,10 +275,13 @@ test('advanced producer: rundown + clock, desk, dropout, server crash mid-show, 
   assert.ok(segNow < 4 && segNow < recNow - 20, `segment timecode restarts (segment ${segNow} s, record ${recNow} s)`);
   assert.ok(!(await guest.p.evaluate(() => document.querySelector('#tcBar [data-tc="segblock"]').classList.contains('over'))));
 
-  // desk during the interview: fader, cue card, talkback, cough
-  await prod.p.click('.drawer-tabs [data-tab="desk"]');
-  await prod.p.waitForSelector('#deskStrips .strip:nth-child(2)');
-  await prod.p.$eval('#deskStrips .strip:first-child .sfader', f => { f.value = '-6'; f.dispatchEvent(new Event('input')); });
+  // the audio Console during the interview: keyboard fader ride, EQ, cue card, talkback, cough
+  await prod.p.click('#consoleBtn');
+  await prod.p.waitForSelector('#conStrips .cstrip:nth-child(2)');
+  await prod.p.click('#conStrips .cstrip:first-child .cs-name');
+  for (let i = 0; i < 6; i++) await prod.p.keyboard.press('ArrowDown');            // Steve's fader −6 dB
+  assert.equal(await prod.p.textContent('#conStrips .cstrip:first-child .cs-db'), '-6.0 dB');
+  await prod.p.keyboard.press('q');                                                 // low cut on
   await prod.p.selectOption('#cueTo', { label: 'Steve' });
   await prod.p.click('#cuePresets button:has-text("2 minutes")');
   await steve.p.waitForSelector('#cue:not(.hidden)');
@@ -289,6 +292,8 @@ test('advanced producer: rundown + clock, desk, dropout, server crash mid-show, 
   await new Promise(r => setTimeout(r, 800)); await prod.p.mouse.up();
   await steve.p.keyboard.down('c'); await new Promise(r => setTimeout(r, 1500)); await steve.p.keyboard.up('c');
   await prod.p.keyboard.press('2'); const cutTc = await tcAtAction(prod);   // quick tag: Cut this
+  await prod.p.keyboard.press('Escape');                                           // back to the studio
+  await prod.p.waitForSelector('#console.hidden', { state: 'attached' });
 
   // ---- the guest's laptop drops out (page reloads) and they come back: recording carries on as "part 2" ----
   await guest.p.reload();
@@ -328,6 +333,10 @@ test('advanced producer: rundown + clock, desk, dropout, server crash mid-show, 
   assert.equal(take.error, '', take.error);
   assert.deepEqual([...new Set(take.people)].sort(), ['Guest', 'Steve'], 'the control room is not in the recording');
 
+  // the Console's fader ride and low cut for Steve went into the take
+  const raw = JSON.parse(fs.readFileSync(path.join(srv.dataDir, 'rooms', room.id, 'takes', take.id, 'take.json'), 'utf8'));
+  assert.ok(Object.values(raw.rides).flat().some(r => r.db === -6), 'fader ride saved');
+  assert.ok(Object.values(raw.channels).some(c => c.hpf && c.db === -6), 'Console settings saved');
   // markers: tags and segments are where the clock said
   const m = take.markers;
   const segs = m.filter(x => x.tag === 'segment');
