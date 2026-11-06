@@ -258,3 +258,54 @@ body.tally-tone .studio::after { border-color: var(--warn); }
 body.clockwin { margin: 0; background: #000; overflow: hidden; }
 body.clockwin .bigclock { cursor: default; }
 .clockhint { position: fixed; bottom: 4px; left: 0; right: 0; text-align: center; color: #555; font: 12px system-ui, sans-serif; margin: 0; z-index: 71; }
+
+/* ---------- the Console (control room audio desk) ---------- */
+.console { position: fixed; inset: 0; z-index: 50; background: #0d0f12; display: flex; flex-direction: column; color: #eee; }
+body.console-open .studio { visibility: hidden; }
+.con-top { display: flex; align-items: stretch; border-bottom: 1px solid #fff1; }
+.con-top .tcbar { flex: 1; border: 0; }
+.con-actions { display: flex; gap: 8px; align-items: center; padding: 6px 12px; background: #000; }
+.con-thumbs { display: flex; gap: 8px; padding: 8px 12px; overflow-x: auto; background: #08090b; border-bottom: 1px solid #fff1; }
+.con-thumb { position: relative; width: 120px; flex: none; border-radius: 6px; overflow: hidden; outline: 2px solid transparent; }
+.con-thumb.speaking { outline-color: var(--ok); }
+.con-thumb video { width: 100%; aspect-ratio: 16/9; object-fit: cover; display: block; background: #000; }
+.con-thumb span { position: absolute; left: 4px; bottom: 3px; font-size: 11px; font-weight: 700; text-shadow: 0 1px 2px #000; }
+.con-main { flex: 1; display: grid; grid-template-columns: minmax(0, 1fr) 190px 300px; min-height: 0; }
+.con-strips { display: flex; gap: 6px; padding: 10px; overflow-x: auto; align-items: stretch; }
+.cstrip { width: 112px; flex: none; background: #1a1d22; border: 1px solid #fff1; border-radius: 8px; padding: 8px 6px; display: flex; flex-direction: column; gap: 6px; align-items: stretch; }
+.cstrip.cut { background: #2a1515; }
+.cstrip.sel { border-color: var(--ok); box-shadow: 0 0 0 2px var(--ok); }
+.con-keys { font-size: 11px; color: #888; padding: 4px 12px 8px; }
+.con-keys kbd { font-size: 10px; }
+.cs-name { font-weight: 800; font-size: 13px; display: flex; justify-content: space-between; gap: 4px; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.cs-loud { font: 700 11px ui-monospace, monospace; color: #8cf; text-align: center; }
+.cstrip button { padding: 4px 2px; font-size: 11px; font-weight: 800; letter-spacing: .04em; }
+.cstrip button.on { background: var(--warn); color: #000; }
+.cstrip .cs-mute.on { background: var(--rec); color: #fff; }
+.cstrip .cs-solo.on { background: #fd3; color: #000; }
+.cs-eq { display: grid; grid-template-columns: 34px minmax(0, 1fr) 30px; align-items: center; gap: 2px; }
+.cs-eq input { width: 100%; margin: 0; }
+.cs-lbl { font: 700 9px system-ui, sans-serif; color: #999; letter-spacing: .06em; }
+.cs-val { font: 10px ui-monospace, monospace; text-align: right; color: #ccc; }
+.cs-comprow { display: grid; grid-template-columns: 1fr 1fr; gap: 4px; align-items: center; }
+.cs-gr { height: 8px; background: #000; border-radius: 3px; overflow: hidden; direction: rtl; }
+.cs-gr span { display: block; height: 100%; width: 0; background: var(--warn); }
+.cs-faderwrap { flex: 1; min-height: 160px; display: flex; gap: 6px; justify-content: center; }
+.cs-meter { width: 10px; border-radius: 4px; overflow: hidden; position: relative; background: linear-gradient(to top, var(--ok) 0 80%, var(--warn) 80% 95%, var(--rec) 95%); }
+.cs-meter span { position: absolute; left: 0; right: 0; top: 0; height: 100%; background: #111d; }
+.cs-fader { writing-mode: vertical-lr; direction: rtl; width: 36px; height: 100%; margin: 0; }
+.cs-db { font: 700 12px ui-monospace, monospace; text-align: center; }
+.cs-btns { display: grid; grid-template-columns: 1fr 1fr; gap: 4px; }
+.con-master { border-left: 1px solid #fff1; padding: 10px; display: flex; flex-direction: column; gap: 8px; }
+.pm-wrap { flex: 1; min-height: 160px; display: flex; gap: 6px; }
+.pm-scale { position: relative; width: 26px; font: 10px ui-monospace, monospace; color: #888; }
+.pm-scale span { position: absolute; right: 0; transform: translateY(50%); }
+.pm-bar { position: relative; flex: 1; background: #000; border-radius: 6px; overflow: hidden; border: 1px solid #fff2; }
+.pm-fill { position: absolute; left: 0; right: 0; bottom: 0; height: 0; background: #555; transition: height 60ms linear; }
+.pm-fill.ok { background: var(--ok); } .pm-fill.low { background: #48a; } .pm-fill.hot { background: var(--rec); }
+.pm-target { position: absolute; left: 0; right: 0; height: 2px; background: #fff; }
+.pm-nums { display: grid; gap: 3px; font-size: 12px; }
+.pm-nums div { display: flex; justify-content: space-between; } .pm-nums b { font-family: ui-monospace, monospace; }
+.rec-text { color: var(--rec); }
+.con-side { border-left: 1px solid #fff1; padding: 10px; overflow-y: auto; }
+@media (max-width: 1100px) { .con-main { grid-template-columns: minmax(0, 1fr) 170px; } .con-side { grid-column: 1 / -1; border-left: 0; border-top: 1px solid #fff1; max-height: 40vh; } }

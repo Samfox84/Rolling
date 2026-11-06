@@ -159,6 +159,7 @@
     <button class="ghost hostonly hidden" id="markerBtn" title="Drop a marker for editing (or press M)">📍 Marker</button>
     <button class="ghost hostonly hidden" id="toneBtn" title="Everyone stays silent while a noise print is recorded">🤫 Room tone</button>
     <button class="ghost hostonly hidden" id="deskBtn" title="Producer desk: faders, cue cards, talkback, quick tags">🎚 Desk</button>
+    <button class="primary hidden" id="consoleBtn" title="Full-screen audio mixing console (control room)">🎛 Console</button>
     <button class="ghost" id="coughBtn" title="Hold to mute your live sound for a cough (or hold C). Your recording is untouched — the edit list marks it.">🤧 Cough</button>
     <button class="ghost" id="chatBtn">💬 Chat <span class="badge hidden" id="chatBadge"></span></button>
     <button class="ghost hostonly hidden" id="healthBtn">🩺 Health <span class="badge hidden" id="healthBadge"></span></button>
@@ -199,6 +200,42 @@
 </div>
 
 <div id="countdown" class="countdown hidden"></div>
+
+<!-- the producer's audio Console (control room): full screen -->
+<div id="console" class="console hidden">
+  <div class="con-top">
+    <div class="tcbar" id="conClock"></div>
+    <div class="con-actions">
+      <button class="primary recbtn" id="conRec">● Record</button>
+      <button class="ghost" id="conTone" title="Everyone stays silent while a noise print is recorded">🤫 Room tone</button>
+      <button class="ghost" id="conNext" title="Start the next segment of the rundown">▶ Next segment</button>
+      <button class="ghost" id="conClose" title="Back to the studio (Esc)">✕ Close</button>
+    </div>
+  </div>
+  <div class="con-thumbs" id="conThumbs"></div>
+  <div class="con-keys">Keyboard: <kbd>←</kbd><kbd>→</kbd> pick a channel · <kbd>↑</kbd><kbd>↓</kbd> fader (hold Shift for fine) · <kbd>0</kbd> 0 dB · <kbd>X</kbd> mute · <kbd>S</kbd> solo · <kbd>Q</kbd> low cut · <kbd>W</kbd> compressor · hold <kbd>T</kbd> talk to them · <kbd>1</kbd>–<kbd>4</kbd> quick tags · <kbd>M</kbd> marker · scroll on a fader for 0.5 dB</div>
+  <div class="con-main">
+    <div class="con-strips" id="conStrips"></div>
+    <div class="con-master">
+      <div class="desk-h">MASTER</div>
+      <div class="pm-wrap" title="Short-term loudness of your mix (LUFS). The line is your target.">
+        <div class="pm-scale"><span style="bottom:100%">0</span><span style="bottom:75%">−10</span><span style="bottom:50%">−20</span><span style="bottom:25%">−30</span><span style="bottom:0">−40</span></div>
+        <div class="pm-bar"><span class="pm-fill" id="pmFill"></span><span class="pm-target" id="pmTarget"></span></div>
+      </div>
+      <div class="pm-nums">
+        <div><span class="muted">Momentary</span><b id="pmM">–</b></div>
+        <div><span class="muted">Short-term</span><b id="pmS">–</b></div>
+        <div><span class="muted">Integrated</span><b id="pmI">–</b></div>
+        <div><span class="muted">True peak</span><b id="pmTP">–</b></div>
+      </div>
+      <select id="pmTargetSel" class="small" title="Loudness target"><option value="-16">Target −16 LUFS (podcast)</option><option value="-23">Target −23 LUFS (broadcast)</option></select>
+      <button class="small ghost" id="pmReset" title="Start measuring the integrated loudness again">Reset integrated</button>
+      <label class="small-text" style="margin:8px 0 0">🎧 Listening volume</label>
+      <input type="range" id="conVol" min="0" max="100" value="50">
+    </div>
+    <div class="con-side" id="conSide"></div>
+  </div>
+</div>
 
 <!-- full-screen clock (like a broadcast monitor): click or Esc to close -->
 <div id="bigClock" class="bigclock hidden" title="Click or press Esc to close"></div>

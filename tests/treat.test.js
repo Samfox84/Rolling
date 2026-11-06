@@ -77,7 +77,8 @@ test('mixing applies each person\'s envelope and can\'t clip (32-bit float)', as
   const len = await treat.mixWithEnvelopes([{ file: a, gain: treat.envelope([{ at: 2000, db: null }], []) }, { file: b, gain: treat.envelope([], []) }], out);
   assert.ok(Math.abs(len - 4) < 0.01);
   const first = rms(out, 0.2, 1.5), muted = rms(out, 2.5, 1.2);
-  assert.ok(first > rms(a, 0.2, 1.5) + 5, `both voices together are louder (and not clipped): ${first}`);
+  // two equal voices (+6 dB) panned centre (−3 dB each side, the browser's equal-power law) = +3 dB, unclipped
+  assert.ok(Math.abs(first - (rms(a, 0.2, 1.5) + 3)) < 0.3, `both voices together, centre: ${first} vs one alone ${rms(a, 0.2, 1.5)}`);
   assert.ok(muted < -90 || muted === -Infinity, `fader off + other person finished = silence: ${muted}`);
   // float WAV that ffmpeg reads back at the right length
   const d = parseFloat(execFileSync('ffprobe', ['-v', 'error', '-show_entries', 'format=duration', '-of', 'csv=p=0', out]).toString());
@@ -94,4 +95,19 @@ test('long pauses are found from ffmpeg\'s silence detector', () => {
   assert.equal(p.length, 1);
   assert.ok(Math.abs(p[0].at - 2) < 0.1 && Math.abs(p[0].dur - 4) < 0.1, JSON.stringify(p));
   assert.deepEqual(treat.parsePauses('lavfi.silence_start=5\n'), [], 'an unfinished pause at the very end is ignored');
+});
+
+test('Console pan is baked into the stereo Producer mix (and EQ/compressor become the same ffmpeg filters)', async () => {
+  const dir = tmpDir('pan');
+  const a = path.join(dir, 'a.wav'), out = path.join(dir, 'mix.wav');
+  ffmpeg('-f', 'lavfi', '-i', 'sine=f=300:d=2', '-ar', '48000', '-ac', '1', '-c:a', 'pcm_s24le', a);
+  await treat.mixWithEnvelopes([{ file: a, gain: treat.envelope([], []), pan: -1 }], out);
+  const r = require('child_process').spawnSync('ffmpeg', ['-hide_banner', '-nostdin', '-i', out, '-af', 'astats', '-f', 'null', '-'], { encoding: 'utf8' }).stderr;
+  const [left, right] = [...r.matchAll(/Channel: \d[\s\S]*?RMS level dB:\s*(-?[\d.]+|-inf)/g)].map(m => (m[1] === '-inf' ? -Infinity : parseFloat(m[1])));
+  assert.ok(left > -30 && (right === -Infinity || right < left - 60), `hard left: L ${left} R ${right}`);
+  assert.equal(treat.channelFilter({}), '', 'a flat channel adds no processing');
+  assert.equal(treat.channelFilter({ hpf: true, low: -3, pres: 4, high: 2, comp: true }),
+    'highpass=f=80,lowshelf=f=120:g=-3,equalizer=f=2500:t=q:w=1:g=4,highshelf=f=8000:g=2,acompressor=threshold=-24dB:ratio=3:attack=10:release=200');
+  assert.deepEqual(treat.cleanChannel({ db: 99, pan: -7, low: 50, mute: 1 }), { db: 10, mute: true, pan: -1, hpf: false, low: 12, pres: 0, high: 0, comp: false });
+  ffmpeg('-i', a, '-af', treat.channelFilter({ hpf: true, low: -3, pres: 4, high: 2, comp: true }), '-f', 'null', '-'); // ffmpeg accepts the chain
 });

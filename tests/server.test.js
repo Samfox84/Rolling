@@ -66,6 +66,8 @@ test('full take: record, upload lossless audio, build every file', { skip: !hasW
   const hostId = host.msgs.find(m => m.t === 'welcome').id;
   host.send({ t: 'ride', id: hostId, db: null });            // Steve's fader right down: the Producer mix should be the guest only
   host.send({ t: 'ride', id: guestId, db: 99 });             // out of range: ignored
+  host.send({ t: 'chan', id: guestId, s: { pan: -1, hpf: true, pres: 3, db: 0 } }); // Console: guest hard left, low cut, presence
+  guest.send({ t: 'chan', id: guestId, s: { pan: 1 } });     // guests can't touch the Console
   guest.send({ t: 'ride', id: guestId, db: -10 });           // guests can't ride faders
   host.send({ t: 'segment', idx: 0 });                       // rundown clock (everyone sees it) + a chapter marker
   assert.equal((await guest.next('segment')).segment.name, 'Interview');
@@ -150,6 +152,14 @@ test('full take: record, upload lossless audio, build every file', { skip: !hasW
   const quietStart = spawnSync('ffmpeg', ['-hide_banner', '-nostdin', '-ss', '1', '-t', '7', '-i', pm, '-af', 'astats=measure_perchannel=none', '-f', 'null', '-'], { encoding: 'utf8' }).stderr.match(/RMS level dB:\s*(-?[\d.]+|-inf)/)[1];
   assert.ok(quietStart === '-inf' || parseFloat(quietStart) < -60, `Steve should be faded out of the Producer mix: ${quietStart}`);
   assert.ok(Math.abs(ffMeasure(pm).I - -16) < 1);
+  // the Console's settings are baked in: the Producer mix is stereo and the guest (panned hard left) is only on the left
+  const chans = [...spawnSync('ffmpeg', ['-hide_banner', '-nostdin', '-ss', '15', '-t', '20', '-i', pm, '-af', 'astats', '-f', 'null', '-'], { encoding: 'utf8' }).stderr
+    .matchAll(/Channel: \d[\s\S]*?RMS level dB:\s*(-?[\d.]+|-inf)/g)].map(x => (x[1] === '-inf' ? -200 : parseFloat(x[1])));
+  assert.equal(chans.length, 2, 'stereo');
+  assert.ok(chans[0] > -40 && chans[1] < chans[0] - 40, `guest panned left: L ${chans[0]} R ${chans[1]}`);
+  // and remembered for next time, by name
+  const savedRoom = JSON.parse(fs.readFileSync(path.join(srv.dataDir, 'rooms', room.id, 'room.json'), 'utf8'));
+  assert.deepEqual(savedRoom.channels.Guest, { db: 0, mute: false, pan: -1, hpf: true, low: 0, pres: 3, high: 0, comp: false });
   // edit list: tags, segment, the guest's cough, the host's talkback
   const edl = fs.readFileSync(path.join(out, 'Edit list.txt'), 'utf8');
   for (const want of [/Great bit 1/, /Interview/, /Cough — Guest/, /Talkback — Steve/]) assert.match(edl, want);

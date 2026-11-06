@@ -22,7 +22,7 @@ const createTranscriber = require('./transcribe');
 let nodemailer = null;
 try { nodemailer = require('nodemailer'); } catch { /* email optional */ }
 
-const VERSION = '1.4.2';
+const VERSION = '1.5.0';
 
 // ---------- settings (from .env next to this file) ----------
 (function loadEnv() {
@@ -663,7 +663,7 @@ async function treatTakeUntraced(t, segs, out, add, assets, errors, { begin, fin
   t.outputs = t.outputs.filter(o => !['cleaned', 'producermix', 'roughmix'].includes(o.kind));
   t.pauses = [];
   const voices = t.outputs.filter(o => o.kind === 'audio' && fs.existsSync(path.join(out, o.file)));
-  const sources = [];
+  const sources = [], temps = [];
   for (const o of voices) {
     const person = o.person;
     let file = o.file, baseDb = 0;
@@ -688,10 +688,19 @@ async function treatTakeUntraced(t, segs, out, add, assets, errors, { begin, fin
     // everyone this person was (one person can have several browser ids if they rejoined from another device)
     const ids = new Set(segs.filter(sg => sg._person === person).map(sg => sg.clientId));
     const rides = [], coughs = [];
-    for (const id of ids) { rides.push(...((t.rides || {})[id] || [])); coughs.push(...((t.coughs || {})[id] || [])); }
-    sources.push({ file: path.join(out, file), gain: treat.envelope(rides, coughs, baseDb) });
+    let chan = null;
+    for (const id of ids) { rides.push(...((t.rides || {})[id] || [])); coughs.push(...((t.coughs || {})[id] || [])); chan = (t.channels || {})[id] || chan; }
+    // the Console's EQ / compressor for this person, as set at the end of the take
+    let src = path.join(out, file);
+    const cf = chan && treat.channelFilter(chan);
+    if (cf) {
+      const tmp = path.join(out, `.${person} - console.wav`);
+      try { await ff(['-i', src, '-af', cf, '-c:a', 'pcm_f32le', tmp], null, takeSecs); src = tmp; temps.push(tmp); }
+      catch (e) { errors.push(`Console EQ for ${person}: ${e.message.slice(0, 200)} — mixed without it`); }
+    }
+    sources.push({ file: src, gain: treat.envelope(rides, coughs, baseDb), pan: chan ? chan.pan : 0 });
   }
-  if (!sources.length) return;
+  if (!sources.length) { for (const f of temps) await fsp.rm(f, { force: true }).catch(log.ignore('treat', 'remove temp console file')); return; }
   begin('Making the Producer mix', 2);
   const rawMix = path.join(out, '.producer-mix.wav'), pausesTxt = path.join(out, '.pauses.txt');
   try {
@@ -710,6 +719,7 @@ async function treatTakeUntraced(t, segs, out, add, assets, errors, { begin, fin
   finally {
     await fsp.rm(rawMix, { force: true }).catch(log.ignore('treat', 'remove temp mix'));
     await fsp.rm(pausesTxt, { force: true }).catch(log.ignore('treat', 'remove temp pauses list'));
+    for (const f of temps) await fsp.rm(f, { force: true }).catch(log.ignore('treat', 'remove temp console file'));
   }
   finish();
 }
@@ -1192,7 +1202,7 @@ wss.on('connection', ws => {
       peers: [...lr.peers.values()].filter(p => p !== peer).map(peerInfo),
       recording: t ? { take: t.id, started: t.started, n: t.n, markers: (t.markers || []).length } : null, nextEpisode: (room.lastEpisode || 0) + 1,
       roomToneSeconds: ROOM_TONE_SECONDS, roomTone: lr.roomTone && lr.roomTone.end > Date.now() ? lr.roomTone : null,
-      rundown: room.rundown || [], segment: lr.segment || null, fps: settings.fps, coughing: [...lr.peers.values()].filter(p => p.coughing).map(p => p.id),
+      rundown: room.rundown || [], segment: lr.segment || null, fps: settings.fps, channels: peer.isHost ? room.channels || {} : undefined, coughing: [...lr.peers.values()].filter(p => p.coughing).map(p => p.id),
       chat: lr.chat.slice(-100), waiting: peer.isHost ? [...lr.waiting.values()].map(w => ({ id: w.id, name: w.name })) : [],
       disk: peer.isHost ? await diskInfo() : null, gbPerPersonHour: GB_PER_PERSON_HOUR, minFreeGB: MIN_FREE_GB });
     if (t && !peer.control) {
@@ -1268,6 +1278,15 @@ wss.on('connection', ws => {
         const mk = { at: Math.max(0, pressedAt(m.at) - t.started), label: cleanText(m.label, 80) || (tag ? `${post.TAGS[tag]} ${same}` : `Marker ${same}`), by: peer.name, ...(tag ? { tag } : {}) };
         t.markers.push(mk); saveTake(t, true);
         toHosts(lr, { t: 'marker', n: t.markers.length, ...mk });
+        return;
+      }
+      case 'chan': { // the producer's Console settings for one person — remembered for next time, baked into the Producer mix
+        const target = lr.peers.get(m.id); if (!target || target.control) return;
+        const st = treat.cleanChannel(m.s);
+        const room = loadRoom(roomId);
+        if (room) { room.channels = room.channels || {}; room.channels[target.name] = st; saveRoom(room); }
+        const t = lr.take && loadTake(roomId, lr.take);
+        if (t) { t.channels = t.channels || {}; t.channels[target.clientId] = st; saveTake(t); }
         return;
       }
       case 'ride': { // the host moved a fader on the producer desk — baked into the Producer mix

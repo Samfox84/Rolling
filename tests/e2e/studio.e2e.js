@@ -163,3 +163,47 @@ test('producer desk: faders, listening mute, cue card, talkback, cough button, q
   assert.deepEqual([...host.errors, ...guest.errors], []);
   await host.b.close(); await guest.b.close();
 });
+
+test('audio Console (control room): channels, keyboard faders, mute/solo, EQ, live master loudness', { skip }, async () => {
+  const host = await person('Producer', true, { control: true });
+  const a = await person('Steve', false), b = await person('Guest', false);
+  for (let i = 0; i < 2; i++) await host.p.waitForSelector('.knock button.primary', { timeout: 8000 }).then(x => x.click()).catch(e => assert.ok(/Timeout/.test(e.message)));
+  await a.p.waitForSelector('#studio:not(.hidden)'); await b.p.waitForSelector('#studio:not(.hidden)');
+  await host.p.waitForSelector('#consoleBtn:not(.hidden)');
+  await host.p.click('#consoleBtn');
+  await host.p.waitForSelector('#conStrips .cstrip:nth-child(2)');
+  // sound reaches the Console: everyone's call audio goes through it (the video players are muted) and the master meter reads it
+  assert.ok(await host.p.evaluate(() => [...document.querySelectorAll('.tile:not(.me) video')].every(v => v.muted)));
+  await waitFor(async () => /^-\d+\.\d$/.test(await host.p.textContent('#pmS')), 15000);
+  await waitFor(async () => (await host.p.$$eval('#conStrips .cs-meter span', els => els.filter(e => parseFloat(e.style.height) < 90).length)) === 2, 10000);
+  // keyboard: → picks the 2nd channel, ↑ ×3 = +3 dB, Shift+↓ = −0.25, X mutes, S solos, Q low cut, 0 back to 0 dB
+  await host.p.click('#conStrips .cstrip:first-child .cs-name');
+  await host.p.keyboard.press('ArrowRight');
+  const second = '#conStrips .cstrip:nth-child(2)';
+  assert.ok(await host.p.$eval(second, el => el.classList.contains('sel')));
+  for (let i = 0; i < 3; i++) await host.p.keyboard.press('ArrowUp');
+  await host.p.keyboard.press('Shift+ArrowDown');
+  assert.equal(await host.p.textContent(`${second} .cs-db`), '+2.8 dB');
+  await host.p.keyboard.press('x'); assert.equal(await host.p.textContent(`${second} .cs-db`), 'MUTED');
+  assert.ok(await host.p.$eval(second, el => el.classList.contains('cut')));
+  await host.p.keyboard.press('x');
+  await host.p.keyboard.press('s'); assert.ok(await host.p.$eval(`${second} .cs-solo`, el => el.classList.contains('on')));
+  await host.p.keyboard.press('s');
+  await host.p.keyboard.press('q'); assert.ok(await host.p.$eval(`${second} .cs-hpf`, el => el.classList.contains('on')));
+  await host.p.keyboard.press('0'); assert.equal(await host.p.textContent(`${second} .cs-db`), '0.0 dB');
+  // the Web Audio channel really follows the controls
+  const name = await host.p.$eval(`${second} .cs-name span`, el => el.textContent);
+  await host.p.$eval(`${second} .cs-pres`, el => { el.value = '4'; el.dispatchEvent(new Event('input')); });
+  await new Promise(r => setTimeout(r, 300));
+  const n = await host.p.evaluate(nm => { const p = [...window.__studio.peers.values()].find(x => x.name === nm); return { hpf: p.chan.hpf.frequency.value, pres: p.chan.pres.gain.value, fader: p.chan.fader.gain.value }; }, name);
+  assert.ok(Math.abs(n.hpf - 80) < 1 && Math.abs(n.pres - 4) < 0.1 && Math.abs(n.fader - 1) < 0.01, JSON.stringify(n));
+  // remembered on the server by name, for next time
+  await waitFor(async () => { const r = JSON.parse(require('fs').readFileSync(require('path').join(srv.dataDir, 'rooms', room.id, 'room.json'), 'utf8')); return r.channels && r.channels[name] && r.channels[name].pres === 4 && r.channels[name].hpf; }, 5000);
+  // quick tags / cue cards / talkback moved into the Console; Esc goes back to the studio and puts them back
+  assert.ok(await host.p.$('#conSide #cueForm'));
+  await host.p.keyboard.press('Escape');
+  await host.p.waitForSelector('#console.hidden', { state: 'attached' });
+  assert.ok(await host.p.$('#tab-desk #cueForm'));
+  assert.deepEqual([...host.errors, ...a.errors, ...b.errors], []);
+  await host.b.close(); await a.b.close(); await b.b.close();
+});

@@ -3,8 +3,8 @@
  * Rolling — "treatment" made after each take, next to the untouched recordings (which are never changed):
  *   • a cleaned copy of each voice (declip, rumble + mains hum, noise reduction set from the room tone's measured noise level,
  *     optional gate, de-ess, gentle compression), normalised to −16 LUFS
- *   • the Producer mix: everyone mixed with the host's live fader moves and each person's cough-button
- *     presses applied, exactly as they happened during the show
+ *   • the Producer mix (stereo): everyone mixed with the host's live fader + mute moves and each person's
+ *     cough-button presses applied exactly as they happened, plus each channel's Console EQ, compressor and pan
  *   • long pauses, found in the Producer mix, for quick tightening in the edit
  */
 const fs = require('fs');
@@ -45,6 +45,33 @@ function cleanFilter(c, noiseDb) {
   if (c.compress) f.push('acompressor=threshold=-24dB:ratio=3:attack=10:release=200:knee=4');
   return f.length ? f.join(',') : 'anull';
 }
+
+// ---------- the producer's Console channel settings ----------
+const EQ_LIMIT = 12;
+const num = (v, lo, hi, d) => (Number.isFinite(Number(v)) ? Math.max(lo, Math.min(hi, Number(v))) : d);
+/** a channel's settings, checked: { db (null = off), mute, pan -1…1, hpf, low/pres/high dB, comp } */
+function cleanChannel(s) {
+  s = s || {};
+  return {
+    db: s.db === null ? null : num(s.db, -60, 10, 0), mute: !!s.mute, pan: +num(s.pan, -1, 1, 0).toFixed(2),
+    hpf: !!s.hpf, low: num(s.low, -EQ_LIMIT, EQ_LIMIT, 0), pres: num(s.pres, -EQ_LIMIT, EQ_LIMIT, 0), high: num(s.high, -EQ_LIMIT, EQ_LIMIT, 0), comp: !!s.comp,
+  };
+}
+/**
+ * the same processing the Console applies live (Web Audio), as an ffmpeg filter chain — '' if the channel is flat.
+ * Matches: highpass 80 Hz · low shelf 120 Hz · presence peak 2.5 kHz (Q 1) · high shelf 8 kHz · compressor −24 dB 3:1
+ */
+function channelFilter(s) {
+  const c = cleanChannel(s), f = [];
+  if (c.hpf) f.push('highpass=f=80');
+  if (c.low) f.push(`lowshelf=f=120:g=${c.low}`);
+  if (c.pres) f.push(`equalizer=f=2500:t=q:w=1:g=${c.pres}`);
+  if (c.high) f.push(`highshelf=f=8000:g=${c.high}`);
+  if (c.comp) f.push('acompressor=threshold=-24dB:ratio=3:attack=10:release=200');
+  return f.join(',');
+}
+/** equal-power pan, the same law as the browser's stereo panner: centre = −3 dB in each side */
+function panGains(pan) { const a = (num(pan, -1, 1, 0) + 1) * Math.PI / 4; return [Math.cos(a), Math.sin(a)]; }
 
 /**
  * gain(t) for one person in the Producer mix.
@@ -102,23 +129,23 @@ async function openWav(file) {
     throw new Error(`${file}: no audio data found`);
   } catch (e) { await fh.close(); throw e; }
 }
-function wavHeader(frames, rate) {
-  const h = Buffer.alloc(44), bytes = frames * 4;
+function wavHeader(frames, rate, ch = 2) {
+  const h = Buffer.alloc(44), bytes = frames * 4 * ch;
   h.write('RIFF', 0); h.writeUInt32LE(36 + bytes, 4); h.write('WAVE', 8);
-  h.write('fmt ', 12); h.writeUInt32LE(16, 16); h.writeUInt16LE(3, 20); h.writeUInt16LE(1, 22);
-  h.writeUInt32LE(rate, 24); h.writeUInt32LE(rate * 4, 28); h.writeUInt16LE(4, 32); h.writeUInt16LE(32, 34);
+  h.write('fmt ', 12); h.writeUInt32LE(16, 16); h.writeUInt16LE(3, 20); h.writeUInt16LE(ch, 22);
+  h.writeUInt32LE(rate, 24); h.writeUInt32LE(rate * 4 * ch, 28); h.writeUInt16LE(4 * ch, 32); h.writeUInt16LE(32, 34);
   h.write('data', 36); h.writeUInt32LE(bytes, 40);
   return h;
 }
 
 /**
- * Mix mono WAVs, each with its own gain envelope, into one 32-bit float WAV (can't clip).
- * inputs: [{ file, gain: envelope(...) }]  → resolves to the length in seconds
+ * Mix mono WAVs, each with its own gain envelope and pan, into one stereo 32-bit float WAV (can't clip).
+ * inputs: [{ file, gain: envelope(...), pan: -1…1 }]  → resolves to the length in seconds
  */
 async function mixWithEnvelopes(inputs, outFile, onProgress) {
   const srcs = [];
   try {
-    for (const i of inputs) srcs.push({ ...(await openWav(i.file)), gain: i.gain });
+    for (const i of inputs) { const [l, r] = panGains(i.pan || 0); srcs.push({ ...(await openWav(i.file)), gain: i.gain, l, r }); }
     if (!srcs.length) throw new Error('nothing to mix');
     const rate = srcs[0].rate;
     if (srcs.some(s => s.rate !== rate)) throw new Error('the voices have different sample rates');
@@ -126,19 +153,20 @@ async function mixWithEnvelopes(inputs, outFile, onProgress) {
     const out = await fsp.open(outFile, 'w');
     try {
       await out.write(wavHeader(frames, rate), 0, 44, 0);
-      const acc = new Float32Array(BLOCK), raw = Buffer.alloc(BLOCK * 4);
+      const acc = new Float32Array(BLOCK), st = new Float32Array(BLOCK * 2), raw = Buffer.alloc(BLOCK * 4);
       for (let pos = 0; pos < frames; pos += BLOCK) {
         const n = Math.min(BLOCK, frames - pos);
-        acc.fill(0, 0, n);
+        st.fill(0, 0, n * 2);
         for (const s of srcs) {
           const m = Math.min(n, s.frames - pos); if (m <= 0) continue;
           const { bytesRead } = await s.fh.read(raw, 0, m * s.bps, s.offset + pos * s.bps);
           const got = Math.floor(bytesRead / s.bps);
-          if (s.float) { const f = new Float32Array(raw.buffer.slice(raw.byteOffset, raw.byteOffset + got * 4)); for (let k = 0; k < got; k++) acc[k] += f[k] * s.gain.at((pos + k) / rate); }
-          else for (let k = 0, b = 0; k < got; k++, b += 3) acc[k] += ((((raw[b] | (raw[b + 1] << 8) | (raw[b + 2] << 16)) << 8) >> 8) / 8388608) * s.gain.at((pos + k) / rate);
+          if (s.float) { const f = new Float32Array(raw.buffer.slice(raw.byteOffset, raw.byteOffset + got * 4)); for (let k = 0; k < got; k++) acc[k] = f[k] * s.gain.at((pos + k) / rate); }
+          else for (let k = 0, b = 0; k < got; k++, b += 3) acc[k] = ((((raw[b] | (raw[b + 1] << 8) | (raw[b + 2] << 16)) << 8) >> 8) / 8388608) * s.gain.at((pos + k) / rate);
+          for (let k = 0; k < got; k++) { st[2 * k] += acc[k] * s.l; st[2 * k + 1] += acc[k] * s.r; }
         }
-        const ob = Buffer.from(acc.buffer, 0, n * 4);
-        await out.write(ob, 0, n * 4, 44 + pos * 4);
+        const ob = Buffer.from(st.buffer, 0, n * 8);
+        await out.write(ob, 0, n * 8, 44 + pos * 8);
         if (onProgress) onProgress((pos + n) / frames);
       }
     } finally { await out.close(); }
@@ -163,4 +191,4 @@ function parsePauses(text) {
 }
 function pauseFilter(seconds, file) { return `silencedetect=n=-45dB:d=${seconds},ametadata=mode=print:file='${file.replace(/\\/g, '/').replace(/'/g, '')}'`; }
 
-module.exports = { cfg, cleanFilter, envelope, mixWithEnvelopes, parseRms, parsePauses, pauseFilter };
+module.exports = { cfg, cleanFilter, cleanChannel, channelFilter, envelope, mixWithEnvelopes, parseRms, parsePauses, pauseFilter };

@@ -68,3 +68,17 @@ test('a glitch (audio clock jump) is reported and filled with silence to keep th
   const total = msgs.filter(m => m.type === 'pcm').reduce((n, m) => n + m.data.length, 0);
   assert.equal(total, 128 + 1024 + 128);
 });
+
+test('stereo (the Console master bus): both channels count — the same -20 dBFS tone in L and R reads -20.0 LUFS', () => {
+  const src = fs.readFileSync(path.join(__dirname, '..', 'public', 'recorder-worklet.js'), 'utf8');
+  let Proc = null; const msgs = [];
+  const G = { sampleRate: 48000, currentFrame: 0, currentTime: 0, registerProcessor: (n, c) => { Proc = c; },
+    AudioWorkletProcessor: class { constructor() { this.port = { postMessage: m => msgs.push(m), onmessage: null }; } } };
+  new Function('G', 'with (G) {' + src + '}')(new Proxy(G, { has: () => true, get: (t, k) => (k in t ? t[k] : globalThis[k]), set: (t, k, v) => { t[k] = v; return true; } }));
+  const p = new Proc({ processorOptions: { meterOnly: true } }); // meters without "recording" — never sends audio
+  const a = sine(0.1, 1000, 6);
+  for (let i = 0; i + 128 <= a.length; i += 128) { G.currentFrame = i; p.process([[a.subarray(i, i + 128), a.subarray(i, i + 128)]]); }
+  const L = lastLoud(msgs);
+  assert.ok(Math.abs(L.I - -20.0) < 0.05, `stereo I was ${L.I}`);
+  assert.equal(msgs.filter(m => m.type === 'pcm').length, 0, 'meter-only never records');
+});

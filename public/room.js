@@ -32,6 +32,9 @@ const markers = [];
 // producer desk (host): per person { db (null = fader off), mute, solo } — mute/solo are for the host's ears only
 const desk = new Map();
 let monVol = 0.5;
+let chanMemory = {};                // the Console settings saved for each person's name (from the server)
+let mixBus = null;                  // control room: { program, monitor, out, meter } Web Audio buses
+let progLoud = null, progPeak = 0;  // the master meter
 let coughing = false;               // my cough button is held: my live sound is muted (recording untouched)
 let talking = null;                 // host: peer id I'm doing talkback to
 let talkMic = null;                 // host in the control room: a mic just for talkback
@@ -556,6 +559,8 @@ function onMsg(m) {
       if (m.roomTone) startToneOverlay(m.roomTone);
       if (screenStream) wsSend({ t: 'screen', on: true, streamId: screenStream.id });
       rundown = m.rundown || []; segment = m.segment || null; renderRundown(); if (m.fps) fps = m.fps;
+      chanMemory = m.channels || {};
+      $('#consoleBtn').classList.toggle('hidden', !(isHost && controlMode));
       for (const id of m.coughing || []) { const p = peers.get(id); if (p) { p.coughing = true; p.tile.classList.add('coughing'); } }
       renderDesk();
       updateRecUI(); sendState(true); layout();
@@ -629,9 +634,12 @@ function addPeer(info, initiator) {
     }
     const v = p.tile.querySelector('video');
     if (v.srcObject !== st) v.srcObject = st;
+    v.muted = controlMode; // in the control room everyone is heard through the Console instead
     playOrAsk(v);
     if (e.track.kind === 'audio' && !p.analyser) {
-      try { const src = ctx.createMediaStreamSource(new MediaStream([e.track])); p.analyser = ctx.createAnalyser(); p.analyser.fftSize = 512; p.buf = new Float32Array(512); src.connect(p.analyser); } catch (e) { quiet('level meter for ' + p.name)(e); }
+      // taken from the stream the video element plays: Chrome only delivers call audio to Web Audio that way
+      try { const src = ctx.createMediaStreamSource(st); p.analyser = ctx.createAnalyser(); p.analyser.fftSize = 512; p.buf = new Float32Array(512); src.connect(p.analyser); } catch (e) { quiet('level meter for ' + p.name)(e); }
+      if (controlMode) buildChannel(p, st);
     }
   };
   pc.onnegotiationneeded = async () => {
@@ -675,6 +683,7 @@ function removePeer(id) {
   try { p.pc.close(); } catch (e) { quiet('close connection to ' + p.name)(e); }
   if (p.tile) p.tile.remove();
   removeScreenTile(id);
+  if (p.chan) for (const n of Object.values(p.chan)) try { n.disconnect(); } catch (e) { quiet('disconnect console channel')(e); }
   tuneSenders();
 }
 // lower the live call's quality as more people join (the recordings are always full quality)
@@ -853,7 +862,7 @@ addEventListener('keydown', e => {
   if (k === 'm') dropMarker();
   else if (TAG_KEYS[k] && isHost) dropMarker(TAG_KEYS[k]);
   else if (k === 'c' && !e.repeat && !controlMode) setCough(true);
-  else if (k === 't' && !e.repeat && isHost) startTalk();
+  else if (k === 't' && !e.repeat && isHost && $('#console').classList.contains('hidden')) startTalk();
 });
 addEventListener('keyup', e => {
   const k = e.key.toLowerCase();
@@ -935,10 +944,19 @@ $('#cueForm').onsubmit = e => { e.preventDefault(); sendCue($('#cueText').value)
 
 // ---------- producer desk: faders (what I hear + the Producer mix), mute/solo for my ears ----------
 const FADER_MIN = -40; // bottom of the fader = off
-const deskOf = id => { if (!desk.has(id)) desk.set(id, { db: 0, mute: false, solo: false }); return desk.get(id); };
+// per person: db (null = fader off) · mute/solo = your ears only · cut = Console MUTE (out of the mix) · pan · hpf · low/pres/high (dB) · comp
+const deskOf = id => {
+  if (!desk.has(id)) {
+    const p = peers.get(id), saved = (p && chanMemory[p.name]) || {};
+    desk.set(id, { db: saved.db === undefined ? 0 : saved.db, mute: false, solo: false, cut: !!saved.mute, pan: saved.pan || 0, hpf: !!saved.hpf, low: saved.low || 0, pres: saved.pres || 0, high: saved.high || 0, comp: !!saved.comp });
+  }
+  return desk.get(id);
+};
+const mixDb = d => (d.cut ? null : d.db); // what goes into the Producer mix
 const dbText = db => (db === null ? 'off' : `${db > 0 ? '+' : ''}${db.toFixed(1)} dB`);
 function applyMonitor() {
   if (!isHost) return;
+  if (controlMode) return applyConsole();
   const anySolo = [...desk.values()].some(d => d.solo);
   for (const p of peers.values()) {
     const v = p.tile && p.tile.querySelector('video'); if (!v) continue;
@@ -949,13 +967,16 @@ function applyMonitor() {
 const rideTimers = new Map();
 function sendRide(id) { // at most ~12 a second per fader; the last position always goes
   if (rideTimers.has(id)) { rideTimers.get(id).again = true; return; }
-  const go = () => wsSend({ t: 'ride', id, db: deskOf(id).db, at: serverNow() });
+  const go = () => wsSend({ t: 'ride', id, db: mixDb(deskOf(id)), at: serverNow() });
   go();
   const st = { again: false };
   st.timer = setTimeout(function next() { if (st.again) { st.again = false; go(); st.timer = setTimeout(next, 80); } else rideTimers.delete(id); }, 80);
   rideTimers.set(id, st);
 }
-function sendAllRides() { if (!isHost) return; for (const id of [myId, ...peers.keys()]) if (id && desk.has(id)) wsSend({ t: 'ride', id, db: desk.get(id).db, at: serverNow() }); }
+function sendAllRides() { // a take starts from where the faders (and the Console) are now
+  if (!isHost) return;
+  for (const id of [myId, ...peers.keys()]) if (id && desk.has(id)) { wsSend({ t: 'ride', id, db: mixDb(desk.get(id)), at: serverNow() }); if (controlMode) sendChan(id); }
+}
 function renderDesk() {
   // who can be talked to / cued
   const people = [...peers.values()].filter(p => !p.control);
@@ -963,7 +984,13 @@ function renderDesk() {
   const keep = (sel, extra) => { const v = sel.value; sel.innerHTML = extra + opts; if ([...sel.options].some(o => o.value === v)) sel.value = v; };
   keep($('#cueTo'), '<option value="all">Everyone</option>'); keep($('#talkTo'), '');
   if (!isHost) return;
-  const list = [...(controlMode ? [] : [{ id: myId, name: $('#nameInput').value.trim() + ' (you)' }]), ...people.map(p => ({ id: p.id, name: p.name }))];
+  if (controlMode) { // the full Console replaces the small faders in the control room
+    if (!$('#deskStrips').querySelector('#deskToConsole')) $('#deskStrips').innerHTML = '<button class="primary" id="deskToConsole" style="margin-top:6px">🎛 Open the Console</button>';
+    $('#deskToConsole').onclick = openConsole;
+    renderConsole();
+    return;
+  }
+  const list = [{ id: myId, name: $('#nameInput').value.trim() + ' (you)' }, ...people.map(p => ({ id: p.id, name: p.name }))];
   const box = $('#deskStrips');
   const have = [...box.children].map(c => c.dataset.id).join(','), want = list.map(x => x.id).join(',');
   if (have === want) return applyMonitor(); // don't rebuild while someone may be dragging a fader
@@ -986,11 +1013,205 @@ function renderDesk() {
   }
   applyMonitor();
 }
-$('#monVol').oninput = () => { monVol = Number($('#monVol').value) / 100; LS.set('ps_monvol', String($('#monVol').value)); applyMonitor(); };
-if (LS.get('ps_monvol')) { $('#monVol').value = LS.get('ps_monvol'); monVol = Number(LS.get('ps_monvol')) / 100; }
+$('#monVol').oninput = () => { monVol = Number($('#monVol').value) / 100; $('#conVol').value = $('#monVol').value; LS.set('ps_monvol', String($('#monVol').value)); applyMonitor(); };
+if (LS.get('ps_monvol')) { $('#monVol').value = $('#conVol').value = LS.get('ps_monvol'); monVol = Number(LS.get('ps_monvol')) / 100; }
 setInterval(() => { // show who is coughing on the desk
   for (const el of document.querySelectorAll('#deskStrips .strip')) { const p = peers.get(el.dataset.id), c = el.dataset.id === myId ? coughing : !!(p && p.coughing); el.querySelector('.scough').classList.toggle('hidden', !c); }
 }, 300);
+
+// ---------- the Console (control room): a full audio desk through Web Audio ----------
+// Each person: low cut → low shelf → presence → high shelf → compressor → fader → pan → programme bus (metered, = the
+// Producer mix) and → solo → your headphones. Fader + mute moves are baked exactly; EQ/compressor/pan as set at the end.
+const EQ_BANDS = [['high', 'HIGH', 8000], ['pres', 'PRES', 2500], ['low', 'LOW', 120]];
+function ensureMixBus() {
+  if (mixBus || !ctx) return mixBus;
+  const program = ctx.createGain(), monitor = ctx.createGain(), out = ctx.createGain();
+  monitor.connect(out).connect(ctx.destination);
+  let meter = null;
+  try {
+    meter = new AudioWorkletNode(ctx, 'studio-recorder', { numberOfInputs: 1, numberOfOutputs: 1, channelCount: 2, channelCountMode: 'explicit', processorOptions: { meterOnly: true } });
+    const silent = ctx.createGain(); silent.gain.value = 0;
+    program.connect(meter).connect(silent).connect(ctx.destination);
+    meter.port.onmessage = e => { if (e.data.type === 'loud') progLoud = e.data; else if (e.data.type === 'level') progPeak = Math.max(progPeak * 0.6, e.data.peak); };
+  } catch (e) { quiet('master meter')(e); toast('⚠ The master meter could not start in this browser — mixing still works', 6000); }
+  mixBus = { program, monitor, out, meter };
+  return mixBus;
+}
+function buildChannel(p, st) {
+  if (p.chan || !ensureMixBus()) return;
+  try {
+    const n = { src: ctx.createMediaStreamSource(st), hpf: ctx.createBiquadFilter(), low: ctx.createBiquadFilter(), pres: ctx.createBiquadFilter(), high: ctx.createBiquadFilter(),
+      comp: ctx.createDynamicsCompressor(), fader: ctx.createGain(), pan: ctx.createStereoPanner(), solo: ctx.createGain() };
+    n.hpf.type = 'highpass'; n.hpf.Q.value = 0.7071;
+    n.low.type = 'lowshelf'; n.low.frequency.value = 120;
+    n.pres.type = 'peaking'; n.pres.frequency.value = 2500; n.pres.Q.value = 1;
+    n.high.type = 'highshelf'; n.high.frequency.value = 8000;
+    n.comp.knee.value = 6; n.comp.attack.value = 0.01; n.comp.release.value = 0.2;
+    n.src.connect(n.hpf).connect(n.low).connect(n.pres).connect(n.high).connect(n.comp).connect(n.fader).connect(n.pan);
+    n.pan.connect(mixBus.program); n.pan.connect(n.solo).connect(mixBus.monitor);
+    p.chan = n;
+    applyConsole();
+  } catch (e) { quiet('console channel for ' + p.name)(e); toast(`⚠ Couldn't add ${p.name} to the Console — you'll still record them`, 6000); }
+}
+function applyConsole() {
+  if (!mixBus) return;
+  const anySolo = [...peers.values()].some(p => !p.control && deskOf(p.id).solo);
+  const set = (param, v) => param.setTargetAtTime(v, ctx.currentTime, 0.01); // smooth, no clicks
+  for (const p of peers.values()) {
+    if (!p.chan) continue;
+    const d = deskOf(p.id), n = p.chan, db = mixDb(d);
+    set(n.hpf.frequency, d.hpf ? 80 : 10);
+    set(n.low.gain, d.low); set(n.pres.gain, d.pres); set(n.high.gain, d.high);
+    set(n.comp.threshold, d.comp ? -24 : 0); set(n.comp.ratio, d.comp ? 3 : 1);
+    set(n.fader.gain, db === null ? 0 : 10 ** (db / 20));
+    set(n.pan.pan, d.pan);
+    set(n.solo.gain, anySolo && !d.solo ? 0 : 1);
+  }
+  set(mixBus.out.gain, monVol * 2); // 50 % = as recorded
+}
+const chanTimers = new Map();
+function sendChan(id) { // remembered for next time + baked into the Producer mix (at most ~4 a second)
+  clearTimeout(chanTimers.get(id));
+  chanTimers.set(id, setTimeout(() => {
+    const d = deskOf(id), st = { db: d.db, mute: d.cut, pan: d.pan, hpf: d.hpf, low: d.low, pres: d.pres, high: d.high, comp: d.comp }, p = peers.get(id);
+    if (p) chanMemory[p.name] = st; // so if they drop out and rejoin, their channel comes back as you left it
+    wsSend({ t: 'chan', id, s: st });
+  }, 250));
+}
+const sideSecs = () => [...document.querySelectorAll('#tab-desk .desk-sec, #conSide .desk-sec')].filter(e => !e.querySelector('#deskStrips'));
+function openConsole() {
+  ensureMixBus();
+  if (ctx) ctx.resume().catch(quiet('resume console audio'));
+  for (const sec of sideSecs()) $('#conSide').appendChild(sec); // the same quick tags / cue cards / talkback, moved in
+  $('#console').classList.remove('hidden'); document.body.classList.add('console-open');
+  renderConsole(true);
+}
+function closeConsole() {
+  const faders = $('#deskStrips').closest('.desk-sec');
+  for (const sec of sideSecs()) $('#tab-desk').insertBefore(sec, faders);
+  $('#console').classList.add('hidden'); document.body.classList.remove('console-open');
+}
+$('#consoleBtn').onclick = openConsole;
+$('#conClose').onclick = closeConsole;
+addEventListener('keydown', e => { if (e.key === 'Escape' && !$('#console').classList.contains('hidden') && $('#bigClock').classList.contains('hidden')) closeConsole(); });
+$('#conRec').onclick = () => $('#recBtn').click();
+$('#conTone').onclick = () => $('#toneBtn').click();
+$('#conNext').onclick = () => $('#rdNext').click();
+$('#conClock').innerHTML = clockMarkup();
+$('#conVol').oninput = () => { $('#monVol').value = $('#conVol').value; $('#monVol').oninput(); };
+$('#pmReset').onclick = () => { if (mixBus && mixBus.meter) mixBus.meter.port.postMessage({ cmd: 'resetLoud' }); };
+$('#pmTargetSel').onchange = () => LS.set('ps_target', $('#pmTargetSel').value);
+if (LS.get('ps_target')) $('#pmTargetSel').value = LS.get('ps_target');
+function renderConsole(force) {
+  if (!controlMode || !isHost) return;
+  const people = [...peers.values()].filter(p => !p.control);
+  const box = $('#conStrips');
+  if (!force && [...box.children].map(c => c.dataset.id).join(',') === people.map(p => p.id).join(',')) return applyConsole();
+  box.innerHTML = ''; $('#conThumbs').innerHTML = '';
+  if (!people.length) box.innerHTML = '<p class="muted" style="padding:20px">Nobody here yet — their channel appears as soon as they join.</p>';
+  for (const p of people) {
+    const d = deskOf(p.id), el = document.createElement('div');
+    el.className = 'cstrip'; el.dataset.id = p.id;
+    el.innerHTML = `<div class="cs-name"><span></span><span class="cs-cough hidden" title="Holding their cough button">🤧</span></div>
+      <div class="cs-loud" title="Their short-term loudness (LUFS)">–</div>
+      <button class="small cs-hpf" title="Low cut: removes rumble below 80 Hz">LOW CUT</button>
+      ${EQ_BANDS.map(([k, label, hz]) => `<div class="cs-eq"><span class="cs-lbl" title="${hz >= 1000 ? hz / 1000 + ' kHz' : hz + ' Hz'}">${label}</span><input type="range" class="cs-${k}" min="-12" max="12" step="0.5" title="Double-click for 0"><span class="cs-val" data-v="${k}"></span></div>`).join('')}
+      <div class="cs-comprow"><button class="small cs-comp" title="Compressor: evens out loud and quiet moments">COMP</button><div class="cs-gr" title="Gain reduction"><span></span></div></div>
+      <div class="cs-eq"><span class="cs-lbl">PAN</span><input type="range" class="cs-pan" min="-1" max="1" step="0.05" title="Double-click for centre"><span class="cs-val" data-v="pan"></span></div>
+      <div class="cs-faderwrap"><div class="cs-meter" title="Their live level (peak)"><span></span></div><input type="range" class="cs-fader" min="${FADER_MIN}" max="10" step="0.5" title="Double-click for 0 dB"></div>
+      <div class="cs-db"></div>
+      <div class="cs-btns"><button class="small cs-mute" title="Take them out of the mix (baked into the Producer mix)">MUTE</button><button class="small cs-solo" title="Hear only them — your headphones only">SOLO</button></div>
+      <div class="cs-btns"><button class="small ghost cs-talk" title="Hold to talk to them privately">TALK</button><button class="small ghost cs-cue" title="Send them a cue card">CUE</button></div>`;
+    el.querySelector('.cs-name span').textContent = p.name;
+    const q = c => el.querySelector(c);
+    const show = () => {
+      q('.cs-fader').value = d.db === null ? FADER_MIN : d.db; q('.cs-db').textContent = d.cut ? 'MUTED' : dbText(d.db);
+      for (const [k] of EQ_BANDS) { q('.cs-' + k).value = d[k]; q(`[data-v="${k}"]`).textContent = (d[k] > 0 ? '+' : '') + d[k]; }
+      q('.cs-pan').value = d.pan; q('[data-v="pan"]').textContent = Math.abs(d.pan) < 0.03 ? 'C' : (d.pan < 0 ? 'L' : 'R') + Math.round(Math.abs(d.pan) * 100);
+      q('.cs-hpf').classList.toggle('on', d.hpf); q('.cs-comp').classList.toggle('on', d.comp);
+      q('.cs-mute').classList.toggle('on', d.cut); q('.cs-solo').classList.toggle('on', d.solo); el.classList.toggle('cut', d.cut);
+    };
+    const changed = (ride) => { show(); applyConsole(); sendChan(p.id); if (ride && recStartedAt) sendRide(p.id); };
+    q('.cs-fader').oninput = () => { const v = Number(q('.cs-fader').value); d.db = v <= FADER_MIN ? null : v; changed(true); };
+    q('.cs-fader').ondblclick = () => { d.db = 0; changed(true); };
+    for (const [k] of EQ_BANDS) { q('.cs-' + k).oninput = () => { d[k] = Number(q('.cs-' + k).value); changed(); }; q('.cs-' + k).ondblclick = () => { d[k] = 0; changed(); }; }
+    q('.cs-pan').oninput = () => { d.pan = Number(q('.cs-pan').value); changed(); };
+    q('.cs-pan').ondblclick = () => { d.pan = 0; changed(); };
+    q('.cs-hpf').onclick = () => { d.hpf = !d.hpf; changed(); };
+    q('.cs-comp').onclick = () => { d.comp = !d.comp; changed(); };
+    q('.cs-mute').onclick = () => { d.cut = !d.cut; changed(true); };
+    q('.cs-solo').onclick = () => { d.solo = !d.solo; show(); applyConsole(); };
+    hold(q('.cs-talk'), () => { $('#talkTo').value = p.id; startTalk(); }, stopTalk);
+    q('.cs-cue').onclick = () => { $('#cueTo').value = p.id; $('#cueText').focus(); toast(`Cue card for ${p.name}: tap one on the right, or type your own`); };
+    el.addEventListener('pointerdown', () => selectStrip(p.id));
+    q('.cs-fader').addEventListener('wheel', e => { e.preventDefault(); nudge(p.id, e.deltaY < 0 ? 0.5 : -0.5); }, { passive: false });
+    show(); el._show = show; box.appendChild(el);
+    // small picture so you can see who's talking
+    const v = document.createElement('video'); v.muted = true; v.autoplay = true; v.playsInline = true;
+    const src = p.tile && p.tile.querySelector('video'); if (src && src.srcObject) v.srcObject = src.srcObject;
+    const th = document.createElement('div'); th.className = 'con-thumb'; th.dataset.id = p.id; th.appendChild(v);
+    const nm = document.createElement('span'); nm.textContent = p.name; th.appendChild(nm);
+    $('#conThumbs').appendChild(th); v.play().catch(quiet('console thumbnail'));
+  }
+  if (!people.some(p => p.id === selected)) selected = people[0] ? people[0].id : null;
+  selectStrip(selected);
+  applyConsole();
+}
+// ---------- Console from the keyboard (no hardware needed) ----------
+// ← → pick a channel · ↑ ↓ fader 1 dB (Shift: 0.25 dB) · 0 = 0 dB · X mute · S solo · Q low cut · W compressor · T hold to talk
+let selected = null;
+function selectStrip(id) {
+  selected = id;
+  for (const el of document.querySelectorAll('#conStrips .cstrip')) el.classList.toggle('sel', el.dataset.id === id);
+}
+function stripChanged(id, ride) {
+  const el = document.querySelector(`#conStrips .cstrip[data-id="${id}"]`); if (el && el._show) el._show();
+  applyConsole(); sendChan(id); if (ride && recStartedAt) sendRide(id);
+}
+function nudge(id, step) {
+  const d = deskOf(id), from = d.db === null ? FADER_MIN : d.db;
+  const v = Math.max(FADER_MIN, Math.min(10, Math.round((from + step) * 4) / 4));
+  d.db = v <= FADER_MIN ? null : v;
+  stripChanged(id, true);
+}
+addEventListener('keydown', e => {
+  if ($('#console').classList.contains('hidden') || typing(e) || !selected) return;
+  const ids = [...document.querySelectorAll('#conStrips .cstrip')].map(el => el.dataset.id), i = ids.indexOf(selected), d = deskOf(selected);
+  const k = e.key, handled = () => e.preventDefault();
+  if (k === 'ArrowRight' || k === 'ArrowLeft') { handled(); selectStrip(ids[(i + (k === 'ArrowRight' ? 1 : -1) + ids.length) % ids.length]); }
+  else if (k === 'ArrowUp' || k === 'ArrowDown') { handled(); nudge(selected, (k === 'ArrowUp' ? 1 : -1) * (e.shiftKey ? 0.25 : 1)); }
+  else if (k === '0') { handled(); d.db = 0; stripChanged(selected, true); }
+  else if (k === 'x' || k === 'X') { handled(); d.cut = !d.cut; stripChanged(selected, true); }
+  else if (k === 's' || k === 'S') { handled(); d.solo = !d.solo; stripChanged(selected); }
+  else if (k === 'q' || k === 'Q') { handled(); d.hpf = !d.hpf; stripChanged(selected); }
+  else if (k === 'w' || k === 'W') { handled(); d.comp = !d.comp; stripChanged(selected); }
+  else if ((k === 't' || k === 'T') && !e.repeat) { handled(); $('#talkTo').value = selected; startTalk(); }
+});
+// Console meters: input peak, gain reduction, their loudness, master loudness — redrawn ~20 times a second
+const lufsText = v => (Number.isFinite(v) ? v.toFixed(1) : '–');
+setInterval(() => {
+  if ($('#console').classList.contains('hidden')) return;
+  renderClock($('#conClock'));
+  $('#conRec').textContent = recStartedAt ? '■ Stop recording' : '● Record';
+  for (const el of document.querySelectorAll('#conStrips .cstrip')) {
+    const p = peers.get(el.dataset.id); if (!p) continue;
+    const pk = p.level || 0, db = 20 * Math.log10(Math.max(pk, 1e-6));
+    el.querySelector('.cs-meter span').style.height = ((1 - Math.max(0, Math.min(1, (db + 60) / 60))) * 100).toFixed(1) + '%';
+    const gr = p.chan ? -p.chan.comp.reduction : 0; // dB of gain reduction (positive)
+    el.querySelector('.cs-gr span').style.width = Math.min(100, gr / 20 * 100).toFixed(0) + '%';
+    el.querySelector('.cs-loud').textContent = p.loud && Number.isFinite(p.loud.S) ? `${p.loud.S.toFixed(1)} LUFS` : '–';
+    el.querySelector('.cs-cough').classList.toggle('hidden', !p.coughing);
+    document.querySelector(`.con-thumb[data-id="${p.id}"]`)?.classList.toggle('speaking', pk > 0.04);
+  }
+  const L = progLoud || {}, target = Number($('#pmTargetSel').value);
+  const pos = v => Math.max(0, Math.min(1, (v + 40) / 40)) * 100;
+  $('#pmFill').style.height = (Number.isFinite(L.S) ? pos(L.S) : 0).toFixed(1) + '%';
+  $('#pmFill').className = 'pm-fill ' + (!Number.isFinite(L.S) ? '' : L.S > target + 3 ? 'hot' : L.S < target - 6 ? 'low' : 'ok');
+  $('#pmTarget').style.bottom = pos(target) + '%';
+  $('#pmM').textContent = lufsText(L.M); $('#pmS').textContent = lufsText(L.S); $('#pmI').textContent = lufsText(L.I);
+  $('#pmTP').textContent = Number.isFinite(L.TPmax) ? L.TPmax.toFixed(1) + ' dBTP' : '–';
+  $('#pmTP').classList.toggle('rec-text', Number.isFinite(L.TPmax) && L.TPmax > -1);
+}, 50);
 
 // ---------- rundown + show clock ----------
 const mmss = ms => { const s = Math.round(Math.abs(ms) / 1000); return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`; };

@@ -1,5 +1,20 @@
 # Changelog
 
+## 1.5.0 — the audio Console (stage 1 of Rolling Desk)
+For the producer in the control room: **🎛 Console**, a full-screen audio mixing desk. Everyone is heard through it.
+- **Channel strip per person:** low cut (80 Hz), 3-band EQ (low 120 Hz · presence 2.5 kHz · high 8 kHz, ±12 dB),
+  compressor with gain-reduction meter, pan, vertical fader with level meter, their live loudness, MUTE (out of the mix),
+  SOLO (your headphones), TALK (hold) and CUE
+- **Master section:** live EBU R128 loudness of your mix — momentary, short-term, integrated and true peak — against a
+  −16 (podcast) or −23 (broadcast) LUFS target; reset integrated; listening volume
+- **Keyboard control (no hardware needed):** ← → pick a channel · ↑ ↓ fader 1 dB (Shift 0.25) · 0 = 0 dB · X mute ·
+  S solo · Q low cut · W compressor · hold T to talk to them · scroll on a fader for 0.5 dB
+- **What you hear is what you get:** fader and mute moves are baked into the Producer mix exactly as you made them;
+  each channel's EQ, compressor and pan as set at the end of the take. **The Producer mix is now stereo.**
+- **Remembered:** each person's channel settings are saved by name and come back next show (and if they drop out and rejoin)
+- Quick tags, cue cards, talkback, rundown clock, record and room tone are all on the same screen
+- The untouched recordings, cleaned files and video are made exactly as before
+
 ## 1.4.2 — whole-workflow testing and the fixes it found
 Two new end-to-end tests drive real browsers through the whole job, then download and open every file:
 basic user (dashboard → room → guest → room tone → record → marker → stop → Recordings → downloads) and
