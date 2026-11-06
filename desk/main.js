@@ -9,11 +9,12 @@ const { app, BrowserWindow, Menu, dialog, shell, session, powerSaveBlocker, ipcM
 const fs = require('fs');
 const path = require('path');
 const { Mirror, parseHostLink } = require('./mirror');
+const { Updater } = require('./updater');
 
 if (process.env.ROLLING_DESK_HOME) app.setPath('userData', process.env.ROLLING_DESK_HOME); // for tests
 const CONFIG = () => path.join(app.getPath('userData'), 'config.json');
 let config = { link: '', folder: '', removeLive: true };
-let win = null, mirror = null, lastStatus = null, blocker = null, quitting = false;
+let win = null, mirror = null, lastStatus = null, blocker = null, quitting = false, updater = null, offerWhenSafe = false;
 
 const log = (level, msg, err) => { (level === 'error' || level === 'warn' ? console.error : console.log)(`[${level}] ${msg}${err ? ' — ' + (err.stack || err.message) : ''}`); };
 function loadConfig() {
@@ -33,8 +34,33 @@ function startMirror() {
     // keep the computer awake while recording or saving; let it sleep when everything is safe
     if (s.busy && blocker === null) blocker = powerSaveBlocker.start('prevent-app-suspension');
     if (!s.busy && blocker !== null) { powerSaveBlocker.stop(blocker); blocker = null; }
+    if (!s.busy && offerWhenSafe) offerRestart();
   });
   mirror.start().catch(e => log('error', 'local saving could not start', e));
+}
+
+// ---------- updates from GitHub (never while recording or saving) ----------
+async function checkForUpdates(byHand = false) {
+  if (!updater) return;
+  try {
+    const info = await updater.check();
+    if (!info) { if (byHand) dialog.showMessageBox({ message: `Rolling Desk ${app.getVersion()} is the newest version.` }); return; }
+    if (updater.kind() === 'manual' || !info.asset || !updater.canReplace()) {
+      const c = await dialog.showMessageBox({ type: 'info', buttons: ['Open the download page', 'Later'], defaultId: 0, cancelId: 1, message: `Rolling Desk ${info.version} is out`, detail: 'This copy can\'t update itself (it was installed from the .deb, or its folder is read-only). Download the new version from GitHub.' });
+      if (c.response === 0) shell.openExternal(info.page);
+      return;
+    }
+    if (!updater.ready || updater.ready.version !== info.version) await updater.download(info);
+    offerRestart();
+  } catch (e) { log('warn', 'update check: ' + e.message, e); if (byHand) dialog.showMessageBox({ type: 'warning', message: 'Couldn\'t check for updates', detail: e.message }); }
+}
+function offerRestart() {
+  if (!updater || !updater.ready) return;
+  if (lastStatus && lastStatus.busy) { offerWhenSafe = true; return; } // ask again once everything is saved
+  offerWhenSafe = false;
+  dialog.showMessageBox({ type: 'info', buttons: ['Restart now', 'Later'], defaultId: 0, cancelId: 1, message: `Rolling Desk ${updater.ready.version} is ready`, detail: 'Restart to start using it. Your settings and recordings are kept.' })
+    .then(c => { if (c.response === 0) { updater.apply(); quitting = true; app.quit(); } })
+    .catch(e => log('warn', 'update prompt', e));
 }
 
 // ---------- windows ----------
@@ -101,6 +127,7 @@ function buildMenu() {
     { label: 'File', submenu: [
       { label: 'Open recordings folder', accelerator: 'CmdOrCtrl+Shift+O', click: () => shell.openPath(config.folder) },
       { label: 'Connect to a different studio or show…', click: () => openConnect() },
+      { label: 'Check for updates…', click: () => checkForUpdates(true) },
       { type: 'separator' },
       { label: 'Remove live copies once the finished files are saved', type: 'checkbox', checked: config.removeLive,
         click: i => { config.removeLive = i.checked; saveConfig(); if (mirror) mirror.removeLive = i.checked; } },
@@ -119,6 +146,8 @@ else {
   app.on('second-instance', () => { if (win) { if (win.isMinimized()) win.restore(); win.focus(); } });
   app.whenReady().then(() => {
     loadConfig(); buildMenu();
+    updater = new Updater({ current: app.getVersion(), workDir: app.getPath('userData'), log, ...(process.env.ROLLING_DESK_UPDATE_API ? { api: process.env.ROLLING_DESK_UPDATE_API } : {}) });
+    if (app.isPackaged || process.env.ROLLING_DESK_UPDATE_API) { setTimeout(() => checkForUpdates(), 15000); setInterval(() => checkForUpdates(), 6 * 3600 * 1000); }
     let ok = false;
     try { ok = !!config.link && !!parseHostLink(config.link); } catch (e) { log('warn', 'saved studio link is not usable', e); }
     if (ok) openStudio(); else openConnect();

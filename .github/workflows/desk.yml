@@ -55,6 +55,8 @@ jobs:
           path: out
           merge-multiple: true
       - run: ls -la out && test -n "$(ls out)"
+      - name: Fingerprints for the app's self-updater
+        run: cd out && sha256sum * > SHA256SUMS.txt && cat SHA256SUMS.txt
       - uses: softprops/action-gh-release@v2
         with:
           tag_name: desk-v${{ steps.v.outputs.version }}

@@ -1,7 +1,7 @@
 {
   "name": "rolling-desk",
   "productName": "Rolling Desk",
-  "version": "1.0.0",
+  "version": "0.1.0",
   "description": "The producer's desk for a Rolling studio: the audio Console, show control, and every recording saved on this computer too.",
   "main": "main.js",
   "author": "Sam Fox (made with Claude, Anthropic)",
@@ -25,7 +25,8 @@
       "connect.html",
       "connect-preload.js",
       "mirror.js",
-      "icon.png"
+      "icon.png",
+      "updater.js"
     ],
     "directories": {
       "output": "dist"
