@@ -54,9 +54,12 @@ module.exports = function createTranscriber({ settings, FFMPEG, takeDir, saveTak
     for (let i = 0; i + win <= x.length; i += win) { let e = 0; for (let j = i; j < i + win; j++) e += x[j] * x[j]; if (e < bestE) { bestE = e; best = from + i + (win >> 1); } }
     return best;
   }
+  const FILLER_PROMPT = 'Umm, so, uh, let me think... hmm. Er, okay, I mean, like, um, yeah.';
   function whisper(wav, prefix, timeoutMs = 20 * 60 * 1000) {
     const m = cfg().model, lang = /\.en$/.test(m) ? 'en' : (cfg().language || 'auto');
     const args = ['-m', modelPath(m), '-f', wav, '-oj', '-of', prefix, '-t', String(threads), '-l', lang, '-np', '-nth', '0.6'];
+    // whisper tidies away "um" and "uh" unless the prompt shows them — keep them, so the edit list can point at them
+    if (lang === 'en' || lang === 'auto') args.push('--prompt', FILLER_PROMPT);
     return run(BIN, args, { stdout: 'ignore', timeoutMs, nice: fs.existsSync('/usr/bin/nice') });
   }
   function ffExtract(file, rate, from, to, wav) {

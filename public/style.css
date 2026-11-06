@@ -281,8 +281,8 @@ body.console-open .studio { visibility: hidden; }
 .con-thumb video { width: 100%; aspect-ratio: 16/9; object-fit: cover; display: block; background: #000; }
 .con-thumb span { position: absolute; left: 4px; bottom: 3px; font-size: 11px; font-weight: 700; text-shadow: 0 1px 2px #000; }
 .con-main { flex: 1; display: grid; grid-template-columns: minmax(0, 1fr) 190px 300px; min-height: 0; }
-.con-strips { display: flex; gap: 6px; padding: 10px; overflow-x: auto; align-items: stretch; }
-.cstrip { width: 112px; flex: none; background: #1a1d22; border: 1px solid #fff1; border-radius: 8px; padding: 8px 6px; display: flex; flex-direction: column; gap: 6px; align-items: stretch; }
+.con-strips { display: flex; gap: 6px; padding: 10px; overflow: auto; align-items: flex-start; min-height: 0; }
+.cstrip { min-height: 100%; box-sizing: border-box; width: 112px; flex: none; background: #1a1d22; border: 1px solid #fff1; border-radius: 8px; padding: 8px 6px; display: flex; flex-direction: column; gap: 6px; align-items: stretch; }
 .cstrip.cut { background: #2a1515; }
 .cstrip.sel { border-color: var(--ok); box-shadow: 0 0 0 2px var(--ok); }
 .con-keys { font-size: 11px; color: #888; padding: 4px 12px 8px; }
@@ -306,7 +306,7 @@ body.console-open .studio { visibility: hidden; }
 .cs-fader { writing-mode: vertical-lr; direction: rtl; width: 36px; height: 100%; margin: 0; }
 .cs-db { font: 700 12px ui-monospace, monospace; text-align: center; }
 .cs-btns { display: grid; grid-template-columns: 1fr 1fr; gap: 4px; }
-.con-master { border-left: 1px solid #fff1; padding: 10px; display: flex; flex-direction: column; gap: 8px; }
+.con-master { border-left: 1px solid #fff1; padding: 10px; display: flex; flex-direction: column; gap: 8px; overflow-y: auto; min-height: 0; }
 .pm-wrap { flex: 1; min-height: 160px; display: flex; gap: 6px; }
 .pm-scale { position: relative; width: 26px; font: 10px ui-monospace, monospace; color: #888; }
 .pm-scale span { position: absolute; right: 0; transform: translateY(50%); }
@@ -335,3 +335,39 @@ body.console-open .studio { visibility: hidden; }
 /* Rolling Desk app: local saving status */
 .deskSave { max-width: 360px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .deskSave.warnc { background: var(--warn); color: #000; }
+
+/* ---------- Console extras: ON AIR key, limiter, scenes, notes, live transcript, gate, peaks ---------- */
+.onair { display: flex; flex-direction: column; align-items: center; justify-content: center; min-width: 150px; padding: 6px 16px; background: #1a0b0b; border: 2px solid #5a2020; border-radius: 10px; color: #8a5050; cursor: pointer; }
+.onair .oa-lamp { font: 900 22px/1 system-ui, sans-serif; letter-spacing: .12em; }
+.onair small { font-size: 10px; margin-top: 3px; color: #aaa; }
+.onair.live { background: #c0141c; border-color: #ff4d55; color: #fff; box-shadow: 0 0 22px #ff2a33aa, inset 0 0 12px #ff8a8a55; animation: onairpulse 2s ease-in-out infinite; }
+.onair.live small { color: #ffd6d6; }
+@keyframes onairpulse { 50% { box-shadow: 0 0 34px #ff2a33dd, inset 0 0 12px #ff8a8a55; } }
+.limit-row { display: flex; align-items: center; gap: 8px; }
+.limit-led { font: 900 10px system-ui; letter-spacing: .08em; padding: 3px 6px; border-radius: 4px; background: #222; color: #555; border: 1px solid #333; }
+.limit-led.on { background: var(--rec); color: #fff; border-color: #f66; }
+#autoMix.on, #autoLevel.on { background: var(--ok); color: #000; }
+.scenes { display: grid; grid-template-columns: repeat(4, 1fr); gap: 4px; }
+.scenes button { font-weight: 800; }
+.scenes button.has { border-color: var(--ok); }
+.scenes button.armed, #sceneStore.on { background: var(--warn); color: #000; }
+.con-sec { margin-bottom: 14px; }
+.notelist { font-size: 12px; margin-top: 6px; max-height: 120px; overflow-y: auto; }
+.notelist div { padding: 2px 0; border-bottom: 1px solid #fff1; }
+.notelist b { font-family: ui-monospace, monospace; color: #8cf; margin-right: 6px; }
+.livetx { font-size: 12px; line-height: 1.4; max-height: 180px; overflow-y: auto; background: #000; border-radius: 6px; padding: 6px 8px; }
+.livetx p { margin: 0 0 4px; } .livetx b { color: #8cf; }
+.livetx .filler { background: #fd36; border-radius: 3px; padding: 0 2px; }
+.cstrip .cs-gate.on { background: #7cf; color: #000; }
+.cstrip .cs-gate.shut { box-shadow: inset 0 -3px 0 var(--rec); }
+.cs-toprow { display: grid; grid-template-columns: 1fr 1fr; gap: 4px; }
+.cs-peak { font: 700 10px ui-monospace, monospace; text-align: center; color: #aaa; cursor: pointer; }
+.cs-peak.hot { color: var(--rec); }
+.cs-auto { font: 700 9px ui-monospace, monospace; text-align: center; color: #7cf; min-height: 11px; }
+.prompter { position: fixed; z-index: 58; right: 16px; bottom: 80px; width: min(560px, calc(100vw - 32px)); height: min(60vh, 520px); background: #0b0c0f; border: 1px solid #fff3; border-radius: 12px; box-shadow: 0 10px 40px #000c; display: flex; flex-direction: column; }
+.pr-bar { cursor: move; display: flex; flex-wrap: wrap; gap: 6px; align-items: center; padding: 8px 10px; border-bottom: 1px solid #fff2; }
+.pr-bar b { margin-right: auto; }
+.pr-text { flex: 1; min-height: 0; overflow-y: auto; padding: 16px 22px; white-space: pre-wrap; font: 600 26px/1.45 system-ui, sans-serif; color: #fff; }
+.pr-text::after { content: ''; display: block; height: 40vh; } /* so the last line can scroll up to the top */
+.pr-editor { padding: 10px; border-top: 1px solid #fff2; }
+.pr-editor textarea { width: 100%; height: min(160px, 22vh); box-sizing: border-box; font: 14px/1.4 system-ui, sans-serif; }

@@ -10,6 +10,8 @@ if (!wav || !prefix || !a.includes('-oj')) { process.stderr.write('fake-whisper:
 if (process.env.FAKE_WHISPER_FAIL_FLAG && fs.existsSync(process.env.FAKE_WHISPER_FAIL_FLAG)) { process.stderr.write('error: failed to load model\n'); process.exit(3); }
 const secs = (fs.statSync(wav).size - 44) / 32000; // 16 kHz 16-bit mono
 const transcription = [];
-for (let s = 0; s + 1 < secs; s += 5) transcription.push({ offsets: { from: Math.round(s * 1000), to: Math.round(Math.min(secs, s + 4.5) * 1000) }, text: ` Sentence at ${s} seconds.` });
+// like the real engine, "um" and "uh" only survive when the prompt shows them
+const keepsFillers = a.includes('--prompt') && /\bum/i.test(get('--prompt'));
+for (let s = 0; s + 1 < secs; s += 5) transcription.push({ offsets: { from: Math.round(s * 1000), to: Math.round(Math.min(secs, s + 4.5) * 1000) }, text: keepsFillers && s === 10 ? ` Um, sentence at ${s} seconds, uh.` : ` Sentence at ${s} seconds.` });
 transcription.push({ offsets: { from: 0, to: 500 }, text: ' Thank you.' }); // classic whisper hallucination
 fs.writeFileSync(prefix + '.json', JSON.stringify({ transcription }));

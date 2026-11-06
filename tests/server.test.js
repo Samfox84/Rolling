@@ -20,14 +20,15 @@ test.before(async () => {
 test.after(async () => { if (srv) await srv.stop(); });
 
 /** connect like a browser and collect messages */
-function client(name, key) {
+function client(name, key, r = room) {
   const ws = new WebSocket(srv.url.replace('http', 'ws') + '/ws');
   const msgs = [];
   ws.onmessage = e => msgs.push(JSON.parse(e.data));
   const opened = new Promise(r => { ws.onopen = r; });
   return {
     ws, msgs,
-    async join() { await opened; ws.send(JSON.stringify({ t: 'join', room: room.id, key, name, clientId: 'C' + name.replace(/\W/g, '') + 'xxxx', camId: 'cam-' + name })); return waitFor(() => msgs.find(m => m.t === 'welcome'), 10000, 50); },
+    async knock(clientId) { await opened; ws.send(JSON.stringify({ t: 'join', room: r.id, key, name, clientId: clientId || 'C' + name.replace(/\W/g, '') + 'xxxx', camId: 'cam-' + name })); },
+    async join() { await this.knock(); return waitFor(() => msgs.find(m => m.t === 'welcome'), 10000, 50); },
     send(m) { ws.send(JSON.stringify(m)); },
     next(t, after = 0) { return waitFor(() => msgs.slice(after).find(m => m.t === t), 20000, 50); },
   };
@@ -110,6 +111,10 @@ test('full take: record, upload lossless audio, build every file', { skip: !hasW
   host.send({ t: 'marker' });
   const mk = await waitFor(() => host.msgs.find(m => m.t === 'marker' && !m.tag), 10000, 50);
   assert.equal(mk.label, 'Marker 1');
+  // a producer note: a longer label, timed from when they started typing
+  const note = 'Great story about the AOL disks — use it as the trailer, and ask for a photo of the box for the show notes';
+  host.send({ t: 'marker', tag: 'note', label: note, at: Date.now() - 2000 });
+  assert.equal((await waitFor(() => host.msgs.find(m => m.t === 'marker' && m.tag === 'note'), 5000, 20)).label, note);
 
   // things that must be refused
   assert.equal((await fetch(`${srv.url}/up/${room.id}/${start.take}/${start.seg}/audio?tok=bad&s=0&t=1`, { method: 'POST', body: Buffer.alloc(3) })).status, 403);
@@ -119,6 +124,10 @@ test('full take: record, upload lossless audio, build every file', { skip: !hasW
   // while recording, the host is told how far the live transcript has got
   const tx = await waitFor(() => host.msgs.find(m => m.t === 'tx'), 10000, 50);
   assert.equal(tx.engine, true); assert.equal(tx.on, true); assert.ok(tx.pct >= 0 && tx.pct <= 100);
+  // the Console's live transcript: the latest lines, with who said them
+  const txLines = await waitFor(() => host.msgs.find(m => m.t === 'tx' && m.recent && m.recent.length), 20000, 50);
+  assert.ok(txLines.recent.every(l => ['Steve', 'Guest'].includes(l.who) && typeof l.text === 'string' && Number.isFinite(l.at)));
+  assert.ok(txLines.recent.length <= 8);
   assert.equal(guest.msgs.filter(m => m.t === 'tx').length, 0, 'only hosts get transcript progress');
   const before = host.msgs.length;
   host.send({ t: 'record', on: false });
@@ -159,10 +168,15 @@ test('full take: record, upload lossless audio, build every file', { skip: !hasW
   assert.ok(chans[0] > -40 && chans[1] < chans[0] - 40, `guest panned left: L ${chans[0]} R ${chans[1]}`);
   // and remembered for next time, by name
   const savedRoom = JSON.parse(fs.readFileSync(path.join(srv.dataDir, 'rooms', room.id, 'room.json'), 'utf8'));
-  assert.deepEqual(savedRoom.channels.Guest, { db: 0, mute: false, pan: -1, hpf: true, low: 0, pres: 3, high: 0, comp: false });
+  assert.deepEqual(savedRoom.channels.Guest, { db: 0, mute: false, pan: -1, hpf: true, low: 0, pres: 3, high: 0, comp: false, gate: false });
   // edit list: tags, segment, the guest's cough, the host's talkback
   const edl = fs.readFileSync(path.join(out, 'Edit list.txt'), 'utf8');
   for (const want of [/Great bit 1/, /Interview/, /Cough — Guest/, /Talkback — Steve/]) assert.match(edl, want);
+  // producer notes and filler words ("um", "uh" — kept by the transcript engine's prompt) are in the edit list…
+  assert.match(edl, /PRODUCER NOTE \(1\)\s+[\d:.]+\s+Great story about the AOL disks/);
+  assert.match(edl, /FILLER WORDS \(\d+\)\s+[\d:.]+\s+to [\d:.]+\s+um, uh — (Steve|Guest)/);
+  // …but neither becomes a chapter
+  assert.equal(JSON.parse(fs.readFileSync(path.join(out, 'Chapters.json'), 'utf8')).chapters.some(c => /AOL disks|um,/.test(c.title)), false);
   assert.match(fs.readFileSync(path.join(out, 'Markers (Audition).csv'), 'utf8'), /Cough — Guest\t[\d:.]+\t0:00\.[2-9]/);
   assert.equal(JSON.parse(fs.readFileSync(path.join(out, 'Chapters.json'), 'utf8')).chapters.some(c => /Great bit/.test(c.title)), false, 'edit notes are not chapters');
   // the level verdict travels with the levels (one rule, used by report and page)
@@ -252,6 +266,85 @@ test('full take: record, upload lossless audio, build every file', { skip: !hasW
   assert.equal(gone.status, 409); assert.match((await gone.json()).error, /deleted to save space/);
 
   host.ws.close(); guest.ws.close();
+});
+
+test('green room, remote guest help, scenes and the shared script', { skip: !hasWS && 'needs Node 22+ (built-in WebSocket)' }, async () => {
+  const r2 = await (await fetch(srv.url + '/api/rooms', { method: 'POST', headers: { cookie, 'Content-Type': 'application/json' }, body: JSON.stringify({ name: 'Green Room Show' }) })).json();
+  const host = client('Sam', r2.hostKey, r2), steve = client('Steve', '', r2), guest = client('Visitor', '', r2);
+  await host.join();
+  // Steve is let in normally
+  await steve.knock('CSteve2xxxx');
+  let knock = await host.next('knock');
+  host.send({ t: 'admit', id: knock.id, allow: true });
+  const sw = await steve.next('welcome');
+  assert.equal(sw.green, false);
+  // the visitor goes to the green room: they see only the host, Steve doesn't see them at all
+  await guest.knock();
+  knock = await host.next('knock', host.msgs.indexOf(knock) + 1);
+  host.send({ t: 'admit', id: knock.id, allow: true, green: true });
+  const gw = await guest.next('welcome');
+  assert.equal(gw.green, true);
+  assert.deepEqual(gw.peers.map(p => p.name), ['Sam'], 'the green room only sees the hosts');
+  const joinedForHost = await waitFor(() => host.msgs.find(m => m.t === 'peer-joined' && m.peer.name === 'Visitor'), 5000, 20);
+  assert.equal(joinedForHost.peer.green, true);
+  const visitorId = joinedForHost.peer.id, steveId = host.msgs.find(m => m.t === 'peer-joined' && m.peer.name === 'Steve').peer.id;
+  // signals between the green room and other guests are dropped
+  guest.send({ t: 'signal', to: steveId, data: { x: 1 } });
+  // recording: Steve is recorded, the green room isn't
+  host.send({ t: 'record', on: true });
+  await steve.next('record-start');
+  await new Promise(r => setTimeout(r, 400));
+  assert.equal(guest.msgs.filter(m => m.t === 'record-start').length, 0, 'not recorded in the green room');
+  assert.equal(steve.msgs.some(m => m.t === 'peer-joined' && m.peer.name === 'Visitor'), false);
+  assert.equal(steve.msgs.some(m => m.t === 'signal'), false);
+  // the guest tells the producer their microphones; the producer can switch, set headphones mode, mute
+  guest.send({ t: 'devices', mics: [{ id: 'mic-a', label: 'Built-in' }, { id: 'mic-b', label: 'USB mic' }], mic: 'mic-a', headphones: false, micOn: true });
+  const dev = await host.next('devices');
+  assert.equal(dev.id, visitorId); assert.deepEqual(dev.devices.mics.map(m => m.label), ['Built-in', 'USB mic']);
+  host.send({ t: 'control', to: visitorId, action: 'mic', value: 'mic-b' });
+  assert.deepEqual(await guest.next('control'), { t: 'control', action: 'mic', value: 'mic-b', from: 'Sam' });
+  host.send({ t: 'control', to: visitorId, action: 'rm -rf' });         // unknown actions are dropped
+  steve.send({ t: 'control', to: visitorId, action: 'mute' });          // only hosts can help
+  await new Promise(r => setTimeout(r, 300));
+  assert.equal(guest.msgs.filter(m => m.t === 'control').length, 1);
+  // bring them on air: everyone meets, and they join the running recording
+  steve.send({ t: 'onair', id: visitorId });                            // guests can't
+  await new Promise(r => setTimeout(r, 200));
+  assert.equal(guest.msgs.some(m => m.t === 'onair'), false);
+  host.send({ t: 'onair', id: visitorId });
+  const oa = await guest.next('onair');
+  assert.deepEqual(oa.peers.map(p => p.name), ['Steve']);
+  assert.equal((await steve.next('peer-joined')).peer.name, 'Visitor');
+  assert.ok((await guest.next('record-start')).seg, 'recorded from the moment they are on air');
+  host.send({ t: 'record', on: false });
+  await host.next('record-stop');
+
+  // scenes: stored for the show, by name, cleaned up, and sent to hosts only
+  host.send({ t: 'scene', slot: 'B', data: { Steve: { db: -3, gate: true, pan: 9 }, Visitor: { db: 2 } } });
+  const sc = await host.next('scenes');
+  assert.deepEqual(sc.scenes.B.data.Steve, { db: -3, mute: false, pan: 1, hpf: false, low: 0, pres: 0, high: 0, comp: false, gate: true });
+  steve.send({ t: 'scene', slot: 'A', data: { Steve: { db: 10 } } });
+  host.send({ t: 'scene', slot: 'Z', data: {} });
+  await new Promise(r => setTimeout(r, 300));
+  assert.equal(steve.msgs.some(m => m.t === 'scenes'), false);
+  let saved = JSON.parse(fs.readFileSync(path.join(srv.dataDir, 'rooms', r2.id, 'room.json'), 'utf8'));
+  assert.deepEqual(Object.keys(saved.scenes), ['B']);
+
+  // script: hosts-only first (guests get nothing), then shared with everyone
+  host.send({ t: 'script', text: 'INTRO\r\nWelcome to the show', share: 'hosts' });
+  assert.equal((await host.next('script')).script.text, 'INTRO\nWelcome to the show');
+  await new Promise(r => setTimeout(r, 200));
+  assert.equal(steve.msgs.filter(m => m.t === 'script').pop().script, null, 'hosts only');
+  steve.send({ t: 'script', text: 'hacked', share: 'all' });
+  host.send({ t: 'script', text: 'INTRO\nWelcome to the show', share: 'all' });
+  await waitFor(() => steve.msgs.filter(m => m.t === 'script').pop().script, 5000, 20);
+  assert.equal(steve.msgs.filter(m => m.t === 'script').pop().script.text, 'INTRO\nWelcome to the show');
+  // …and it's there for anyone joining later
+  const late = client('Sam', r2.hostKey, r2);
+  assert.equal((await late.join()).script.text, 'INTRO\nWelcome to the show');
+  saved = JSON.parse(fs.readFileSync(path.join(srv.dataDir, 'rooms', r2.id, 'room.json'), 'utf8'));
+  assert.equal(saved.script.share, 'all');
+  for (const c of [host, steve, guest, late]) c.ws.close();
 });
 
 test('a damaged take file is reported and kept, and the server carries on', async () => {

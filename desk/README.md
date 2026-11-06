@@ -2,7 +2,7 @@
 
 The producer's desktop app for a Rolling studio, for Mac and Linux.
 
-- **Your studio in its own window.** Join as the control room and the **audio Console** opens by itself. It has faders, EQ, a compressor, pan, mute and solo, the live loudness of your mix, talkback, cue cards, quick tags and the rundown clock, all usable from the keyboard.
+- **Your studio in its own window.** Join as the control room and the **audio Console** opens by itself. It has faders, EQ, a gate, a compressor, pan, mute and solo, auto level and auto mix, scenes, the soundboard, the green room, the live loudness of your mix, talkback, cue cards, quick tags, producer notes, the script/teleprompter and the rundown clock, all usable from the keyboard.
 - **Every recording is saved on this computer as well as on the server:**
   - **While recording:** a live copy of everyone's full-quality audio (24-bit WAV, exactly what their browser recorded) and camera, a few seconds behind. Only audio that has arrived complete with no gaps is copied, so nothing already saved ever changes.
   - **When the take is ready:** every finished file is downloaded and checked: untouched and cleaned voices, the Producer mix, video, edit list, transcript and session files. If the take changes later (Clean again, marker edits), the changed files are fetched again.
@@ -24,6 +24,11 @@ The Mac app isn't signed by Apple (that costs £79 a year). The first time you o
 ```
 xattr -dr com.apple.quarantine "/Applications/Rolling Desk.app"
 ```
+
+## Updates
+The app **updates itself**. It checks GitHub for a new version when it starts and every 6 hours (or **Check for updates…** in the menu). It downloads the new version, checks its fingerprint against the Release's `SHA256SUMS.txt`, and asks you to restart — never while you're recording or still saving. If anything goes wrong while swapping, the old version is put back.
+- Works for the Mac app and the Linux AppImage. The `.deb` can't replace itself, so it tells you there's a new version and opens the download page.
+- Needs the Rolling project on GitHub to be **public** (GitHub doesn't show releases of private projects without signing in).
 
 ## Use
 1. Open Rolling Desk and paste your show's **host link**, from the dashboard under "Open studio as host".

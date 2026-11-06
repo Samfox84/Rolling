@@ -106,9 +106,10 @@ test('Console pan is baked into the stereo Producer mix (and EQ/compressor becom
   const [left, right] = [...r.matchAll(/Channel: \d[\s\S]*?RMS level dB:\s*(-?[\d.]+|-inf)/g)].map(m => (m[1] === '-inf' ? -Infinity : parseFloat(m[1])));
   assert.ok(left > -30 && (right === -Infinity || right < left - 60), `hard left: L ${left} R ${right}`);
   assert.equal(treat.channelFilter({}), '', 'a flat channel adds no processing');
+  assert.match(treat.channelFilter({ hpf: true, gate: true }), /^highpass=f=80,agate=threshold=0\.0056:range=0\.1:/, 'the gate sits after the low cut, like the Console');
   assert.equal(treat.channelFilter({ hpf: true, low: -3, pres: 4, high: 2, comp: true }),
     'highpass=f=80,lowshelf=f=120:g=-3,equalizer=f=2500:t=q:w=1:g=4,highshelf=f=8000:g=2,acompressor=threshold=-24dB:ratio=3:attack=10:release=200');
-  assert.deepEqual(treat.cleanChannel({ db: 99, pan: -7, low: 50, mute: 1 }), { db: 10, mute: true, pan: -1, hpf: false, low: 12, pres: 0, high: 0, comp: false });
+  assert.deepEqual(treat.cleanChannel({ db: 99, pan: -7, low: 50, mute: 1 }), { db: 10, mute: true, pan: -1, hpf: false, low: 12, pres: 0, high: 0, comp: false, gate: false });
   ffmpeg('-i', a, '-af', treat.channelFilter({ hpf: true, low: -3, pres: 4, high: 2, comp: true }), '-f', 'null', '-'); // ffmpeg accepts the chain
 });
 

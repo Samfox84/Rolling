@@ -22,7 +22,7 @@ const createTranscriber = require('./transcribe');
 let nodemailer = null;
 try { nodemailer = require('nodemailer'); } catch { /* email optional */ }
 
-const VERSION = '1.6.0';
+const VERSION = '0.8.0';
 
 // ---------- settings (from .env next to this file) ----------
 (function loadEnv() {
@@ -212,6 +212,8 @@ function broadcast(lr, msg, exceptId) { for (const p of lr.peers.values()) if (p
 function toHosts(lr, msg) { for (const p of lr.peers.values()) if (p.isHost) send(p.ws, msg); }
 const peerInfo = p => ({ id: p.id, name: p.name, isHost: p.isHost, control: !!p.control, state: p.state || {}, camId: p.camId, screenId: p.screenId || null, green: !!p.green, devices: p.devices || null });
 // green room: a guest there only sees and hears the hosts (and the hosts them) — nobody else, and they aren't recorded
+const SCENE_SLOTS = ['A', 'B', 'C'], SCRIPT_MAX = 60000;
+const scriptFor = (room, p) => (room.script && room.script.text && (p.isHost || room.script.share === 'all') ? room.script : null);
 const canSee = (a, b) => a === b || a.isHost || b.isHost || (!a.green && !b.green);
 
 function newSeg(t, peer) {
@@ -965,6 +967,7 @@ function transcriptStatus(t) {
   return {
     engine: transcriber.available(), on: transcriber.enabled(),
     pct: transcriber.progress(t), lines,
+    recent: segs.flatMap(s => ((s.tx && s.tx.parts) || []).slice(-8).map(p => ({ who: s.name, at: p.from, text: p.text }))).sort((a, b) => a.at - b.at).slice(-8),
     failed: segs.filter(s => s.tx && s.tx.error).map(s => ({ who: s.name, error: s.tx.error })),
     hasFile: (t.outputs || []).some(o => o.kind === 'transcript'),
     canMake: transcriber.enabled() && !t.compacted && segs.length > 0,
@@ -1327,7 +1330,7 @@ wss.on('connection', ws => {
       peers: [...lr.peers.values()].filter(p => p !== peer && canSee(peer, p)).map(peerInfo), green: peer.green,
       recording: t ? { take: t.id, started: t.started, n: t.n, markers: (t.markers || []).length } : null, nextEpisode: (room.lastEpisode || 0) + 1,
       roomToneSeconds: ROOM_TONE_SECONDS, roomTone: lr.roomTone && lr.roomTone.end > Date.now() ? lr.roomTone : null,
-      rundown: room.rundown || [], segment: lr.segment || null, fps: settings.fps, channels: peer.isHost ? room.channels || {} : undefined, sounds: peer.isHost ? room.sounds || [] : undefined, coughing: [...lr.peers.values()].filter(p => p.coughing).map(p => p.id),
+      rundown: room.rundown || [], segment: lr.segment || null, fps: settings.fps, channels: peer.isHost ? room.channels || {} : undefined, sounds: peer.isHost ? room.sounds || [] : undefined, scenes: peer.isHost ? room.scenes || {} : undefined, script: scriptFor(room, peer), coughing: [...lr.peers.values()].filter(p => p.coughing).map(p => p.id),
       chat: lr.chat.slice(-100), waiting: peer.isHost ? [...lr.waiting.values()].map(w => ({ id: w.id, name: w.name })) : [],
       disk: peer.isHost ? await diskInfo() : null, gbPerPersonHour: GB_PER_PERSON_HOUR, minFreeGB: MIN_FREE_GB });
     if (t && !peer.control && !peer.green) {
@@ -1406,7 +1409,7 @@ wss.on('connection', ws => {
         t.markers = t.markers || [];
         const tag = post.TAGS[m.tag] ? m.tag : null;
         const same = t.markers.filter(x => (x.tag || null) === tag).length + 1;
-        const mk = { at: Math.max(0, pressedAt(m.at) - t.started), label: cleanText(m.label, 80) || (tag ? `${post.TAGS[tag]} ${same}` : `Marker ${same}`), by: peer.name, ...(tag ? { tag } : {}) };
+        const mk = { at: Math.max(0, pressedAt(m.at) - t.started), label: cleanText(m.label, tag === 'note' ? 300 : 80) || (tag ? `${post.TAGS[tag]} ${same}` : `Marker ${same}`), by: peer.name, ...(tag ? { tag } : {}) };
         t.markers.push(mk); saveTake(t, true);
         toHosts(lr, { t: 'marker', n: t.markers.length, ...mk });
         return;
@@ -1418,6 +1421,27 @@ wss.on('connection', ws => {
         if (room) { room.channels = room.channels || {}; room.channels[target.name] = st; saveRoom(room); }
         const t = lr.take && loadTake(roomId, lr.take);
         if (t) { t.channels = t.channels || {}; t.channels[target.clientId] = st; saveTake(t); }
+        return;
+      }
+      case 'scene': { // store a Console scene (A/B/C) for this show: everyone's channel settings, by name
+        if (!SCENE_SLOTS.includes(m.slot)) return;
+        const room = loadRoom(roomId); if (!room) return;
+        room.scenes = room.scenes || {};
+        if (m.data === null) delete room.scenes[m.slot];
+        else {
+          const data = {};
+          for (const [name, st] of Object.entries(m.data || {}).slice(0, 12)) { const n = cleanText(name, 60); if (n) data[n] = treat.cleanChannel(st); }
+          room.scenes[m.slot] = { at: Date.now(), data };
+        }
+        saveRoom(room);
+        toHosts(lr, { t: 'scenes', scenes: room.scenes });
+        return;
+      }
+      case 'script': { // the show script / notes for the teleprompter — for the hosts only, or for everyone
+        const room = loadRoom(roomId); if (!room) return;
+        room.script = { text: String(m.text || '').replace(/\r\n?/g, '\n').slice(0, SCRIPT_MAX), share: m.share === 'all' ? 'all' : 'hosts', by: peer.name, at: Date.now() };
+        saveRoom(room);
+        for (const p of lr.peers.values()) send(p.ws, { t: 'script', script: scriptFor(room, p) });
         return;
       }
       case 'board': { // the producer played / stopped a soundboard pad — recorded so the Soundboard track matches what was heard

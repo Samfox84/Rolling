@@ -132,3 +132,35 @@ class StudioRecorder extends AudioWorkletProcessor {
   }
 }
 registerProcessor('studio-recorder', StudioRecorder);
+
+// ---------- noise gate for one Console channel (the same numbers as ffmpeg's agate in the Producer mix) ----------
+// opens at −45 dBFS, closes 5 dB lower after 200 ms, and only turns the sound down 20 dB (never fully off — sounds natural)
+class RollingGate extends AudioWorkletProcessor {
+  constructor() {
+    super();
+    this.on = false; this.env = 0; this.g = 1; this.hold = 0;
+    this.open = 10 ** (-45 / 20); this.close = 10 ** (-50 / 20); this.floor = 0.1;
+    this.att = 1 - Math.exp(-1 / (0.005 * sampleRate)); this.rel = 1 - Math.exp(-1 / (0.15 * sampleRate));
+    this.decay = Math.exp(-1 / (0.02 * sampleRate)); this.holdN = Math.round(0.2 * sampleRate); this.sent = 0;
+    this.port.onmessage = e => { if (e.data && 'on' in e.data) this.on = !!e.data.on; };
+  }
+  process(inputs, outputs) {
+    const inp = inputs[0], out = outputs[0];
+    if (!inp || !inp.length) return true;
+    const len = inp[0].length;
+    for (let i = 0; i < len; i++) {
+      let pk = 0; for (let c = 0; c < inp.length; c++) { const v = Math.abs(inp[c][i]); if (v > pk) pk = v; }
+      this.env = Math.max(pk, this.env * this.decay);
+      let target;
+      if (this.env > this.open) { this.hold = this.holdN; target = 1; }
+      else if (this.hold > 0) { this.hold--; target = 1; }
+      else target = this.env < this.close ? this.floor : this.g > 0.5 ? 1 : this.floor;
+      if (!this.on) target = 1;
+      this.g += (target - this.g) * (target > this.g ? this.att : this.rel);
+      for (let c = 0; c < out.length; c++) out[c][i] = (inp[c] || inp[0])[i] * this.g;
+    }
+    if (++this.sent >= 16) { this.sent = 0; this.port.postMessage({ closed: this.on && this.g < 0.5 }); }
+    return true;
+  }
+}
+registerProcessor('rolling-gate', RollingGate);

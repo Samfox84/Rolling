@@ -41,9 +41,11 @@ function transcriptVtt(t) {
 }
 
 // ---------- quick tags (producer desk) ----------
-const TAGS = { great: 'Great bit', cut: 'Cut this', retake: 'Retake', ad: 'Ad break', segment: 'Segment' };
+const TAGS = { great: 'Great bit', cut: 'Cut this', retake: 'Retake', ad: 'Ad break', segment: 'Segment', note: 'Producer note' };
+// "um", "uh", "erm"… in the transcript, so they're easy to find and cut
+const FILLER = /\b(u+m+|u+h+m*|e+r+m+|e+r+|a+h+|h+m+|mm+)\b/gi;
 // tags that are edit notes, not places a listener would jump to
-const NOT_CHAPTERS = new Set(['great', 'cut', 'retake']);
+const NOT_CHAPTERS = new Set(['great', 'cut', 'retake', 'note']);
 
 // ---------- chapters (from markers: plain markers, rundown segments, ad breaks) ----------
 function chapters(t, introLen) {
@@ -73,11 +75,15 @@ function editItems(t, markers, people) {
     items.push({ at: c.from / 1000, dur: (c.to - c.from) / 1000, label: `${g} — ${people[id] || 'someone'}`, group: g });
   }
   for (const p of t.pauses || []) items.push({ at: p.at, dur: p.dur, label: `Pause ${p.dur.toFixed(1)} s`, group: 'Long pause' });
+  for (const s of Object.values(t.segs || {})) for (const p of (s.tx && s.tx.parts) || []) {
+    const found = String(p.text).match(FILLER); if (!found) continue;
+    items.push({ at: p.from, dur: Math.max(0, p.to - p.from), label: `${found.map(w => w.toLowerCase()).join(', ')} — ${s.name}: “${String(p.text).slice(0, 70)}”`, group: 'Filler words' });
+  }
   for (const e of t.board || []) if (e.to != null) items.push({ at: e.from / 1000, dur: (e.to - e.from) / 1000, label: `${e.mode === 'bed' ? 'Music bed' : e.mode === 'effect' ? 'Effect' : 'Jingle'}: ${e.name}`, group: 'Soundboard' });
   return items.sort((a, b) => a.at - b.at);
 }
 function editList(items, title) {
-  const groups = ['Cut this', 'Retake', 'Great bit', 'Ad break', 'Segment', 'Marker', 'Soundboard', 'Cough', 'Talkback', 'Long pause'];
+  const groups = ['Cut this', 'Retake', 'Great bit', 'Producer note', 'Ad break', 'Segment', 'Marker', 'Soundboard', 'Filler words', 'Cough', 'Talkback', 'Long pause'];
   const lines = [`${title} — edit list`, 'Times are from the start of the recordings (the untouched and cleaned files). Coughs and talkback are already muted in the Producer mix.', ''];
   for (const g of groups) {
     const list = items.filter(i => i.group === g); if (!list.length) continue;

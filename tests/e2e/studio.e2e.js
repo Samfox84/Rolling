@@ -111,7 +111,7 @@ test('producer desk: faders, listening mute, cue card, talkback, cough button, q
   await host.p.selectOption('#talkTo', { label: 'Steve' });
   await host.p.hover('#talkBtn'); await host.p.mouse.down();
   await guest.p.waitForSelector('#talkIn:not(.hidden)');
-  assert.ok(await guest.p.evaluate(() => [...window.__studio.peers.values()].some(p => p.talkEl && p.talkEl.srcObject && p.talkEl.srcObject.getAudioTracks().length)));
+  assert.ok(await guest.p.evaluate(() => [...window.__studio.peers.values()].some(p => p.extraAudio && Object.values(p.extraAudio).some(el => el.srcObject && el.srcObject.getAudioTracks().length))));
   await waitFor(() => host.p.evaluate(() => [...window.__studio.peers.values()].every(p => p.mainAudio.track === null && p.talkTr.sender.track)), 5000);
   await host.p.mouse.up();
   await guest.p.waitForSelector('#talkIn.hidden', { state: 'attached' });
@@ -162,6 +162,83 @@ test('producer desk: faders, listening mute, cue card, talkback, cough button, q
   assert.ok(take.outputs.some(o => o.kind === 'producermix'));
   assert.deepEqual([...host.errors, ...guest.errors], []);
   await host.b.close(); await guest.b.close();
+});
+
+test('Console extras: green room, soundboard, gate, auto mix, auto level, scenes, ON AIR, notes, live script', { skip, timeout: 180000 }, async () => {
+  // a 3-second jingle for pad F1
+  const wav = path.join(require('os').tmpdir(), `rolling-e2e-jingle-${process.pid}.wav`);
+  require('child_process').spawnSync('ffmpeg', ['-hide_banner', '-loglevel', 'error', '-y', '-f', 'lavfi', '-i', 'sine=frequency=660:duration=3', wav]);
+  const up = await fetch(`${srv.url}/api/rooms/${room.id}/sounds?k=${room.hostKey}`, { method: 'POST', headers: { 'X-Filename': 'Station ident.wav' }, body: require('fs').readFileSync(wav) });
+  assert.equal(up.status, 200, await up.text());
+  const host = await person('Producer', true, { control: true });
+  const steve = await person('Steve', false);
+  await host.p.waitForSelector('.knock button.primary').then(x => x.click());
+  await steve.p.waitForSelector('#studio:not(.hidden)');
+  const guest = await person('Visitor', false);
+  await host.p.waitForSelector('.knock .green-btn').then(x => x.click());       // 🟢 Green room
+  await guest.p.waitForSelector('#greenIn:not(.hidden)');
+  await host.p.click('#consoleBtn');
+  await host.p.waitForSelector('#conStrips .cstrip:nth-child(2)');
+  await host.p.waitForSelector('#conStrips .cs-green');
+  await new Promise(r => setTimeout(r, 1500));
+  assert.equal(await steve.p.evaluate(() => [...window.__studio.peers.values()].some(p => p.name === 'Visitor')), false, 'Steve can\'t see the green room');
+
+  // soundboard: F1 plays the pad to everyone
+  await host.p.waitForSelector('#pads .pad');
+  await host.p.keyboard.press('F1');
+  await waitFor(() => steve.p.evaluate(() => [...window.__studio.peers.values()].some(p => p.extraAudio && Object.values(p.extraAudio).some(a => a.srcObject && a.srcObject.getAudioTracks().some(t => t.readyState === 'live')))), 10000);
+
+  const steveStrip = await host.p.evaluateHandle(() => [...document.querySelectorAll('#conStrips .cstrip')].find(el => el.querySelector('.cs-name span').textContent === 'Steve'));
+  // gate: the live worklet is switched on, and the peak-hold number reads
+  await (await steveStrip.asElement().$('.cs-gate')).click();
+  await waitFor(() => host.p.evaluate(() => [...window.__studio.peers.values()].find(p => p.name === 'Steve').chan.gateOn === true), 3000);
+  await waitFor(async () => /^pk -?\d/.test(await (await steveStrip.asElement().$('.cs-peak')).textContent()), 10000);
+  // auto mix on: with only one person on air (the green room doesn't count) there's nothing to share
+  await host.p.click('#autoMix');
+  assert.match(await host.p.textContent('#autoMix'), /on/);
+  await new Promise(r => setTimeout(r, 800));
+  assert.equal(await host.p.evaluate(() => [...window.__studio.peers.values()].filter(p => p.autoDb).length), 0);
+  // auto level: faders set from measured loudness
+  await host.p.click('#autoLevel');
+  await waitFor(async () => /Auto level/.test(await host.p.evaluate(() => document.body.innerText)), 5000);
+  // scenes: store A, move the fader, recall A
+  await host.p.$eval('#conStrips .cstrip:first-child .cs-fader', el => { el.value = '-6'; el.dispatchEvent(new Event('input')); });
+  await host.p.click('#sceneStore'); await host.p.click('#scenes [data-s="A"]');
+  await waitFor(() => { const r = JSON.parse(require('fs').readFileSync(path.join(srv.dataDir, 'rooms', room.id, 'room.json'), 'utf8')); return r.scenes && r.scenes.A; }, 5000);
+  await host.p.waitForSelector('#scenes [data-s="A"].has');
+  await host.p.$eval('#conStrips .cstrip:first-child .cs-fader', el => { el.value = '4'; el.dispatchEvent(new Event('input')); });
+  await host.p.click('#scenes [data-s="A"]');
+  assert.equal(await host.p.textContent('#conStrips .cstrip:first-child .cs-db'), '-6.0 dB');
+
+  // ON AIR key starts the recording; a producer note lands in the list
+  await host.p.click('#conRec'); await host.p.click('#modalAlt');
+  await host.p.waitForSelector('#conRec.live');
+  await host.p.fill('#noteText', 'Lovely story — trailer');
+  await host.p.press('#noteText', 'Enter');
+  await host.p.waitForSelector('#noteList div');
+  // the script, shared with everyone, reaches Steve
+  await host.p.click('#conScript'); await host.p.click('#prEdit');
+  await host.p.fill('#prArea', 'INTRO\nWelcome to AOL Underground');
+  await host.p.selectOption('#prShare', 'all'); await host.p.click('#prSave');
+  await steve.p.waitForSelector('#scriptBtn:not(.hidden)');
+  await steve.p.click('#scriptBtn');
+  assert.match(await steve.p.textContent('#prText'), /Welcome to AOL Underground/);
+  await steve.p.click('#prPlay'); await new Promise(r => setTimeout(r, 400)); await steve.p.click('#prPlay');
+  assert.ok(await steve.p.$eval('#prText', el => el.scrollTop > 0), 'the teleprompter scrolls');
+  await host.p.click('#prClose');
+  // bring the visitor on air: now everyone meets
+  await host.p.click('#conStrips .cs-onair');
+  await guest.p.waitForSelector('#greenIn.hidden', { state: 'attached' });
+  await waitFor(() => steve.p.evaluate(() => [...window.__studio.peers.values()].some(p => p.name === 'Visitor')), 10000);
+  // …and auto mix now shares the gain between the two of them (the quieter one dips, never more than 12 dB)
+  await waitFor(() => host.p.evaluate(() => { const c = [...window.__studio.peers.values()].filter(p => p.chan); return c.length === 2 && c.every(p => Number.isFinite(p.autoDb) && p.autoDb <= 0 && p.autoDb >= -12) && c.some(p => p.autoDb < -0.5); }), 10000);
+  await host.p.click('#autoMix');
+  assert.equal(await host.p.evaluate(() => [...window.__studio.peers.values()].filter(p => p.autoDb).length), 0, 'switching off puts everyone back');
+  await host.p.click('#conRec'); await host.p.click('#modalYes');
+  await host.p.waitForSelector('#conRec:not(.live)');
+  assert.deepEqual([...host.errors, ...steve.errors, ...guest.errors], []);
+  await host.b.close(); await steve.b.close(); await guest.b.close();
+  require('fs').rmSync(wav, { force: true });
 });
 
 test('audio Console (control room): channels, keyboard faders, mute/solo, EQ, live master loudness', { skip }, async () => {

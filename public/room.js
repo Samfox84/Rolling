@@ -36,6 +36,9 @@ let chanMemory = {};                // the Console settings saved for each perso
 let mixBus = null;                  // control room: { program, monitor, out, meter } Web Audio buses
 let progLoud = null, progPeak = 0;  // the master meter
 let sounds = [];                    // soundboard pads for this show (hosts)
+let scenes = {};                    // Console scenes A/B/C for this show (hosts): { A: { at, data: { name: channel settings } } }
+let script = null;                  // the show script for the teleprompter: { text, share: 'hosts' | 'all' }
+let autoMix = false;                // gain sharing on the Console
 let board = null;                   // control room: { bus, beds, dest } — played to everyone + metered + heard
 const padBuffers = new Map();       // pad id → decoded audio
 const playingPads = new Map();      // instance → { inst, pad, src, gain, started, dur }
@@ -565,6 +568,8 @@ function onMsg(m) {
       rundown = m.rundown || []; segment = m.segment || null; renderRundown(); if (m.fps) fps = m.fps;
       chanMemory = m.channels || {};
       if (m.sounds) { sounds = m.sounds; renderPads(); }
+      if (m.scenes) { scenes = m.scenes; renderScenes(); }
+      setScript(m.script || null, false);
       $('#greenIn').classList.toggle('hidden', !m.green);
       if (!isHost && !controlMode) sendDevices();
       $('#consoleBtn').classList.toggle('hidden', !(isHost && controlMode));
@@ -591,19 +596,21 @@ function onMsg(m) {
     case 'record-stop': if (recording && recording.take === m.take) stopLocal(recording); stopToneOverlay(true); break;
     case 'roomtone': startToneOverlay(m); break;
     case 'chat': addChat(m); break;
-    case 'marker': markers.push(m); toast(`📍 ${m.label} at ${fmtTime(m.at)}`); break;
+    case 'marker': markers.push(m); if (m.tag === 'note') addNoteRow(m); else toast(`📍 ${m.label} at ${fmtTime(m.at)}`); break;
     case 'knock': showKnock(m); chime(); break;
     case 'knock-gone': { const k = document.getElementById('knock-' + m.id); if (k) k.remove(); break; }
     case 'server': serverDisk = m.disk; break;
     case 'meter': { const p = peers.get(m.id); if (p) p.loud = m.m; break; }
     case 'build': build = m; renderBuild(); break;
-    case 'tx': txLive = m; break;
+    case 'tx': txLive = m; renderLiveTx(); break;
     case 'cough': { const p = peers.get(m.id); if (p) { p.coughing = m.on; if (p.tile) p.tile.classList.toggle('coughing', m.on); } break; }
     case 'cue': showCue(m.text, m.from); break;
     case 'talk': { const p = peers.get(m.from); $('#talkName').textContent = m.name || (p && p.name) || 'The host'; $('#talkIn').classList.toggle('hidden', !m.on); if (m.on && p && p.extraAudio) for (const el of Object.values(p.extraAudio)) el.play().catch(quiet('play talkback')); break; }
     case 'segment': segment = m.segment; renderRundown(); break;
     case 'rundown': rundown = m.rundown || []; renderRundown(); break;
     case 'sounds': sounds = m.sounds || []; renderPads(); break;
+    case 'scenes': scenes = m.scenes || {}; renderScenes(); break;
+    case 'script': setScript(m.script || null, true); break;
     case 'onair': {
       if (m.peers) { // me: out of the green room — meet everyone (I'm the newcomer, so I call them)
         $('#greenIn').classList.add('hidden'); toast('🎙 You\'re on air!');
@@ -873,7 +880,7 @@ $('#toneBtn').onclick = async () => {
   if (roomTone) return;
   if (await ask('Record room tone now?', `Everyone will be asked to stay silent for ${roomToneSeconds} seconds.`, 'Start room tone')) wsSend({ t: 'roomtone' });
 };
-function dropMarker(tag) { if (!isHost) return; if (!recStartedAt) return toast('Markers work while recording'); wsSend({ t: 'marker', at: serverNow(), ...(tag ? { tag } : {}) }); }
+function dropMarker(tag, label, at) { if (!isHost) return false; if (!recStartedAt) { toast('Markers work while recording'); return false; } wsSend({ t: 'marker', at: at || serverNow(), ...(tag ? { tag } : {}), ...(label ? { label } : {}) }); return true; }
 $('#markerBtn').onclick = () => dropMarker();
 document.querySelectorAll('[data-tag]').forEach(b => { b.onclick = () => dropMarker(b.dataset.tag || null); });
 const TAG_KEYS = { 1: 'great', 2: 'cut', 3: 'retake', 4: 'ad' };
@@ -966,15 +973,17 @@ $('#cueForm').onsubmit = e => { e.preventDefault(); sendCue($('#cueText').value)
 
 // ---------- producer desk: faders (what I hear + the Producer mix), mute/solo for my ears ----------
 const FADER_MIN = -40; // bottom of the fader = off
-// per person: db (null = fader off) · mute/solo = your ears only · cut = Console MUTE (out of the mix) · pan · hpf · low/pres/high (dB) · comp
+// per person: db (null = fader off) · mute/solo = your ears only · cut = Console MUTE (out of the mix) · pan · hpf · low/pres/high (dB) · comp · gate
 const deskOf = id => {
   if (!desk.has(id)) {
     const p = peers.get(id), saved = (p && chanMemory[p.name]) || {};
-    desk.set(id, { db: saved.db === undefined ? 0 : saved.db, mute: false, solo: false, cut: !!saved.mute, pan: saved.pan || 0, hpf: !!saved.hpf, low: saved.low || 0, pres: saved.pres || 0, high: saved.high || 0, comp: !!saved.comp });
+    desk.set(id, { db: saved.db === undefined ? 0 : saved.db, mute: false, solo: false, cut: !!saved.mute, pan: saved.pan || 0, hpf: !!saved.hpf, low: saved.low || 0, pres: saved.pres || 0, high: saved.high || 0, comp: !!saved.comp, gate: !!saved.gate });
   }
   return desk.get(id);
 };
 const mixDb = d => (d.cut ? null : d.db); // what goes into the Producer mix
+// what goes into the Producer mix for one person: their fader, plus what auto mix is doing to them right now
+function rideDb(id) { const db = mixDb(deskOf(id)), p = peers.get(id); return db === null ? null : Math.max(-60, Math.min(12, +(db + ((p && p.autoDb) || 0)).toFixed(1))); }
 const dbText = db => (db === null ? 'off' : `${db > 0 ? '+' : ''}${db.toFixed(1)} dB`);
 function applyMonitor() {
   if (!isHost) return;
@@ -989,7 +998,7 @@ function applyMonitor() {
 const rideTimers = new Map();
 function sendRide(id) { // at most ~12 a second per fader; the last position always goes
   if (rideTimers.has(id)) { rideTimers.get(id).again = true; return; }
-  const go = () => wsSend({ t: 'ride', id, db: mixDb(deskOf(id)), at: serverNow() });
+  const go = () => wsSend({ t: 'ride', id, db: rideDb(id), at: serverNow() });
   go();
   const st = { again: false };
   st.timer = setTimeout(function next() { if (st.again) { st.again = false; go(); st.timer = setTimeout(next, 80); } else rideTimers.delete(id); }, 80);
@@ -997,7 +1006,7 @@ function sendRide(id) { // at most ~12 a second per fader; the last position alw
 }
 function sendAllRides() { // a take starts from where the faders (and the Console) are now
   if (!isHost) return;
-  for (const id of [myId, ...peers.keys()]) if (id && desk.has(id)) { wsSend({ t: 'ride', id, db: mixDb(desk.get(id)), at: serverNow() }); if (controlMode) sendChan(id); }
+  for (const id of [myId, ...peers.keys()]) if (id && desk.has(id)) { wsSend({ t: 'ride', id, db: rideDb(id), at: serverNow() }); if (controlMode) sendChan(id); }
 }
 function renderDesk() {
   // who can be talked to / cued
@@ -1048,28 +1057,32 @@ const EQ_BANDS = [['high', 'HIGH', 8000], ['pres', 'PRES', 2500], ['low', 'LOW',
 function ensureMixBus() {
   if (mixBus || !ctx) return mixBus;
   const program = ctx.createGain(), monitor = ctx.createGain(), out = ctx.createGain();
-  monitor.connect(out).connect(ctx.destination);
+  const limiter = () => { const c = ctx.createDynamicsCompressor(); c.threshold.value = -2; c.knee.value = 0; c.ratio.value = 20; c.attack.value = 0.002; c.release.value = 0.1; return c; };
+  const progLim = limiter(), monLim = limiter();
+  monitor.connect(monLim).connect(out).connect(ctx.destination);
   let meter = null;
   try {
     meter = new AudioWorkletNode(ctx, 'studio-recorder', { numberOfInputs: 1, numberOfOutputs: 1, channelCount: 2, channelCountMode: 'explicit', processorOptions: { meterOnly: true } });
     const silent = ctx.createGain(); silent.gain.value = 0;
-    program.connect(meter).connect(silent).connect(ctx.destination);
+    program.connect(progLim).connect(meter).connect(silent).connect(ctx.destination);
     meter.port.onmessage = e => { if (e.data.type === 'loud') progLoud = e.data; else if (e.data.type === 'level') progPeak = Math.max(progPeak * 0.6, e.data.peak); };
   } catch (e) { quiet('master meter')(e); toast('⚠ The master meter could not start in this browser — mixing still works', 6000); }
-  mixBus = { program, monitor, out, meter };
+  mixBus = { program, monitor, out, meter, progLim };
   return mixBus;
 }
 function buildChannel(p, st) {
   if (p.chan || !ensureMixBus()) return;
   try {
     const n = { src: ctx.createMediaStreamSource(st), hpf: ctx.createBiquadFilter(), low: ctx.createBiquadFilter(), pres: ctx.createBiquadFilter(), high: ctx.createBiquadFilter(),
-      comp: ctx.createDynamicsCompressor(), fader: ctx.createGain(), pan: ctx.createStereoPanner(), solo: ctx.createGain() };
+      comp: ctx.createDynamicsCompressor(), fader: ctx.createGain(), auto: ctx.createGain(), pan: ctx.createStereoPanner(), solo: ctx.createGain(), gate: null };
+    try { n.gate = new AudioWorkletNode(ctx, 'rolling-gate'); n.gate.port.onmessage = e => { n.gateShut = !!e.data.closed; }; }
+    catch (e) { quiet('noise gate for ' + p.name)(e); }
     n.hpf.type = 'highpass'; n.hpf.Q.value = 0.7071;
     n.low.type = 'lowshelf'; n.low.frequency.value = 120;
     n.pres.type = 'peaking'; n.pres.frequency.value = 2500; n.pres.Q.value = 1;
     n.high.type = 'highshelf'; n.high.frequency.value = 8000;
     n.comp.knee.value = 6; n.comp.attack.value = 0.01; n.comp.release.value = 0.2;
-    n.src.connect(n.hpf).connect(n.low).connect(n.pres).connect(n.high).connect(n.comp).connect(n.fader).connect(n.pan);
+    (n.gate ? n.src.connect(n.hpf).connect(n.gate) : n.src.connect(n.hpf)).connect(n.low).connect(n.pres).connect(n.high).connect(n.comp).connect(n.fader).connect(n.auto).connect(n.pan);
     n.pan.connect(mixBus.program); n.pan.connect(n.solo).connect(mixBus.monitor);
     p.chan = n;
     applyConsole();
@@ -1085,6 +1098,7 @@ function applyConsole() {
     set(n.hpf.frequency, d.hpf ? 80 : 10);
     set(n.low.gain, d.low); set(n.pres.gain, d.pres); set(n.high.gain, d.high);
     set(n.comp.threshold, d.comp ? -24 : 0); set(n.comp.ratio, d.comp ? 3 : 1);
+    if (n.gate && n.gateOn !== d.gate) { n.gateOn = d.gate; n.gate.port.postMessage({ on: d.gate }); }
     set(n.fader.gain, db === null ? 0 : 10 ** (db / 20));
     set(n.pan.pan, d.pan);
     set(n.solo.gain, anySolo && !d.solo ? 0 : 1);
@@ -1092,10 +1106,11 @@ function applyConsole() {
   set(mixBus.out.gain, monVol * 2); // 50 % = as recorded
 }
 const chanTimers = new Map();
+const chanState = d => ({ db: d.db, mute: d.cut, pan: d.pan, hpf: d.hpf, low: d.low, pres: d.pres, high: d.high, comp: d.comp, gate: d.gate });
 function sendChan(id) { // remembered for next time + baked into the Producer mix (at most ~4 a second)
   clearTimeout(chanTimers.get(id));
   chanTimers.set(id, setTimeout(() => {
-    const d = deskOf(id), st = { db: d.db, mute: d.cut, pan: d.pan, hpf: d.hpf, low: d.low, pres: d.pres, high: d.high, comp: d.comp }, p = peers.get(id);
+    const d = deskOf(id), st = chanState(d), p = peers.get(id);
     if (p) chanMemory[p.name] = st; // so if they drop out and rejoin, their channel comes back as you left it
     wsSend({ t: 'chan', id, s: st });
   }, 250));
@@ -1136,12 +1151,14 @@ function renderConsole(force) {
     el.className = 'cstrip'; el.dataset.id = p.id; el.dataset.green = String(!!p.green);
     el.innerHTML = `<div class="cs-name"><span></span><span class="cs-cough hidden" title="Holding their cough button">🤧</span></div>
       <div class="cs-loud" title="Their short-term loudness (LUFS)">–</div>
-      <button class="small cs-hpf" title="Low cut: removes rumble below 80 Hz">LOW CUT</button>
+      <div class="cs-toprow"><button class="small cs-hpf" title="Low cut: removes rumble below 80 Hz (Q)">LOW CUT</button><button class="small cs-gate" title="Noise gate: turns them down 20 dB when they're not talking — less room noise (G). A red line shows it's closed.">GATE</button></div>
       ${EQ_BANDS.map(([k, label, hz]) => `<div class="cs-eq"><span class="cs-lbl" title="${hz >= 1000 ? hz / 1000 + ' kHz' : hz + ' Hz'}">${label}</span><input type="range" class="cs-${k}" min="-12" max="12" step="0.5" title="Double-click for 0"><span class="cs-val" data-v="${k}"></span></div>`).join('')}
       <div class="cs-comprow"><button class="small cs-comp" title="Compressor: evens out loud and quiet moments">COMP</button><div class="cs-gr" title="Gain reduction"><span></span></div></div>
       <div class="cs-eq"><span class="cs-lbl">PAN</span><input type="range" class="cs-pan" min="-1" max="1" step="0.05" title="Double-click for centre"><span class="cs-val" data-v="pan"></span></div>
       <div class="cs-faderwrap"><div class="cs-meter" title="Their live level (peak)"><span></span></div><input type="range" class="cs-fader" min="${FADER_MIN}" max="10" step="0.5" title="Double-click for 0 dB"></div>
       <div class="cs-db"></div>
+      <div class="cs-peak" title="Highest peak in the last few seconds (dBFS) — click to reset">–</div>
+      <div class="cs-auto" title="What auto mix is doing to them"></div>
       <div class="cs-btns"><button class="small cs-mute" title="Take them out of the mix (baked into the Producer mix)">MUTE</button><button class="small cs-solo" title="Hear only them — your headphones only">SOLO</button></div>
       <div class="cs-btns"><button class="small ghost cs-talk" title="Hold to talk to them privately">TALK</button><button class="small ghost cs-cue" title="Send them a cue card">CUE</button></div>
       <div class="cs-help"><button class="small ghost cs-helpbtn" style="width:100%" title="Switch their microphone, headphones mode, mute">⚙ HELP</button></div>
@@ -1152,7 +1169,7 @@ function renderConsole(force) {
       q('.cs-fader').value = d.db === null ? FADER_MIN : d.db; q('.cs-db').textContent = d.cut ? 'MUTED' : dbText(d.db);
       for (const [k] of EQ_BANDS) { q('.cs-' + k).value = d[k]; q(`[data-v="${k}"]`).textContent = (d[k] > 0 ? '+' : '') + d[k]; }
       q('.cs-pan').value = d.pan; q('[data-v="pan"]').textContent = Math.abs(d.pan) < 0.03 ? 'C' : (d.pan < 0 ? 'L' : 'R') + Math.round(Math.abs(d.pan) * 100);
-      q('.cs-hpf').classList.toggle('on', d.hpf); q('.cs-comp').classList.toggle('on', d.comp);
+      q('.cs-hpf').classList.toggle('on', d.hpf); q('.cs-comp').classList.toggle('on', d.comp); q('.cs-gate').classList.toggle('on', d.gate);
       q('.cs-mute').classList.toggle('on', d.cut); q('.cs-solo').classList.toggle('on', d.solo); el.classList.toggle('cut', d.cut);
     };
     const changed = (ride) => { show(); applyConsole(); sendChan(p.id); if (ride && recStartedAt) sendRide(p.id); };
@@ -1162,6 +1179,8 @@ function renderConsole(force) {
     q('.cs-pan').oninput = () => { d.pan = Number(q('.cs-pan').value); changed(); };
     q('.cs-pan').ondblclick = () => { d.pan = 0; changed(); };
     q('.cs-hpf').onclick = () => { d.hpf = !d.hpf; changed(); };
+    q('.cs-gate').onclick = () => { d.gate = !d.gate; changed(); };
+    q('.cs-peak').onclick = () => { p.peakHold = 0; p.peakAt = 0; };
     q('.cs-comp').onclick = () => { d.comp = !d.comp; changed(); };
     q('.cs-mute').onclick = () => { d.cut = !d.cut; changed(true); };
     q('.cs-solo').onclick = () => { d.solo = !d.solo; show(); applyConsole(); };
@@ -1306,6 +1325,7 @@ function nudge(id, step) {
 addEventListener('keydown', e => {
   if ($('#console').classList.contains('hidden') || typing(e)) return;
   const k = e.key, handled = () => e.preventDefault();
+  if ((k === 'n' || k === 'N') && !e.repeat) { e.preventDefault(); $('#noteText').focus(); return; }
   const fk = /^F([1-9]|1[0-2])$/.exec(k);
   if (fk && !e.repeat) { handled(); const pad = sounds[Number(fk[1]) - 1]; if (pad) togglePad(pad, document.querySelector(`#pads .pad[data-id="${pad.id}"]`)); return; }
   if (!selected) return;
@@ -1316,6 +1336,7 @@ addEventListener('keydown', e => {
   else if (k === 'x' || k === 'X') { handled(); d.cut = !d.cut; stripChanged(selected, true); }
   else if (k === 's' || k === 'S') { handled(); d.solo = !d.solo; stripChanged(selected); }
   else if (k === 'q' || k === 'Q') { handled(); d.hpf = !d.hpf; stripChanged(selected); }
+  else if (k === 'g' || k === 'G') { handled(); d.gate = !d.gate; stripChanged(selected); }
   else if (k === 'w' || k === 'W') { handled(); d.comp = !d.comp; stripChanged(selected); }
   else if ((k === 't' || k === 'T') && !e.repeat) { handled(); $('#talkTo').value = selected; startTalk(); }
 });
@@ -1324,7 +1345,10 @@ const lufsText = v => (Number.isFinite(v) ? v.toFixed(1) : '–');
 setInterval(() => {
   if ($('#console').classList.contains('hidden')) return;
   renderClock($('#conClock'));
-  $('#conRec').textContent = recStartedAt ? '■ Stop recording' : '● Record';
+  $('#conRec').classList.toggle('live', !!recStartedAt);
+  $('#conRec').querySelector('small').textContent = recStartedAt ? 'press to stop' : 'press to record';
+  $('#limitLed').classList.toggle('on', !!(mixBus && mixBus.progLim && mixBus.progLim.reduction < -1));
+  const now = performance.now();
   for (const el of document.querySelectorAll('#conStrips .cstrip')) {
     const p = peers.get(el.dataset.id); if (!p) continue;
     const pk = p.level || 0, db = 20 * Math.log10(Math.max(pk, 1e-6));
@@ -1333,6 +1357,11 @@ setInterval(() => {
     el.querySelector('.cs-gr span').style.width = Math.min(100, gr / 20 * 100).toFixed(0) + '%';
     el.querySelector('.cs-loud').textContent = p.loud && Number.isFinite(p.loud.S) ? `${p.loud.S.toFixed(1)} LUFS` : '–';
     el.querySelector('.cs-cough').classList.toggle('hidden', !p.coughing);
+    if (pk >= (p.peakHold || 0) || now - (p.peakAt || 0) > 3000) { p.peakHold = pk; p.peakAt = now; }
+    const pe = el.querySelector('.cs-peak'), pdb = 20 * Math.log10(Math.max(p.peakHold || 0, 1e-6));
+    pe.textContent = pdb < -59 ? '–' : `pk ${pdb.toFixed(1)}`; pe.classList.toggle('hot', pdb > -1);
+    el.querySelector('.cs-gate').classList.toggle('shut', !!(p.chan && p.chan.gateShut));
+    el.querySelector('.cs-auto').textContent = autoMix && p.autoDb < -0.5 ? `auto ${p.autoDb.toFixed(0)} dB` : '';
     document.querySelector(`.con-thumb[data-id="${p.id}"]`)?.classList.toggle('speaking', pk > 0.04);
   }
   const L = progLoud || {}, target = Number($('#pmTargetSel').value);
@@ -1344,6 +1373,139 @@ setInterval(() => {
   $('#pmTP').textContent = Number.isFinite(L.TPmax) ? L.TPmax.toFixed(1) + ' dBTP' : '–';
   $('#pmTP').classList.toggle('rec-text', Number.isFinite(L.TPmax) && L.TPmax > -1);
 }, 50);
+
+// ---------- auto level: one press sets every fader so each person lands on the loudness target ----------
+$('#autoLevel').onclick = () => {
+  const target = Number($('#pmTargetSel').value), done = [];
+  for (const p of peers.values()) {
+    if (p.control || p.green || !p.loud) continue;
+    const L = Number.isFinite(p.loud.I) ? p.loud.I : p.loud.S; if (!Number.isFinite(L)) continue;
+    const d = deskOf(p.id); d.db = Math.max(-20, Math.min(10, Math.round((target - L) * 2) / 2));
+    stripChanged(p.id, true); done.push(`${p.name} ${dbText(d.db)}`);
+  }
+  toast(done.length ? `⚖ Auto level (${target} LUFS): ${done.join(' · ')}` : '⚖ Nobody has talked enough yet to measure — ask everyone to say a few words, then press again', 7000);
+};
+
+// ---------- auto mix (gain sharing): whoever's talking stays up, the others dip, so the room noise doesn't add up ----------
+// Each channel's share = its level ÷ the loudest channel's, at most 12 dB down. What you hear is sent as fader rides,
+// so the Producer mix gets exactly the same moves.
+const AUTO_FLOOR = -12;
+function setAutoMix(on) {
+  autoMix = on; LS.set('ps_automix', on ? '1' : '0');
+  $('#autoMix').textContent = `🤖 Auto mix: ${on ? 'on' : 'off'}`; $('#autoMix').classList.toggle('on', on);
+  if (!on) for (const p of peers.values()) if (p.autoDb) { p.autoDb = 0; if (p.chan) p.chan.auto.gain.setTargetAtTime(1, ctx.currentTime, 0.1); if (recStartedAt) sendRide(p.id); }
+}
+$('#autoMix').onclick = () => setAutoMix(!autoMix);
+setInterval(() => {
+  if (!autoMix || !mixBus) return;
+  const chans = [...peers.values()].filter(p => p.chan && !p.control && !p.green && mixDb(deskOf(p.id)) !== null);
+  if (chans.length < 2) return;
+  const power = p => { const g = 10 ** (mixDb(deskOf(p.id)) / 20) * (p.level || 0); return g * g + 1e-4; }; // 1e-4 ≈ −40 dB: quiet rooms stay level
+  const top = Math.max(...chans.map(power));
+  for (const p of chans) {
+    const want = Math.max(AUTO_FLOOR, 10 * Math.log10(power(p) / top)), was = p.autoDb || 0;
+    p.autoDb = want > was ? want : Math.max(want, was - 1.5); // comes up fast, goes down gently (~30 dB a second)
+    p.chan.auto.gain.setTargetAtTime(10 ** (p.autoDb / 20), ctx.currentTime, 0.02);
+    if (recStartedAt && Math.abs(p.autoDb - (p.autoSent || 0)) >= 1) { p.autoSent = p.autoDb; sendRide(p.id); }
+  }
+}, 50);
+if (LS.get('ps_automix') === '1') setAutoMix(true);
+
+// ---------- scenes: store / recall everyone's channel settings for this show (A, B, C) ----------
+let storeArmed = false;
+function renderScenes() {
+  for (const b of document.querySelectorAll('#scenes [data-s]')) {
+    const sc = scenes[b.dataset.s]; b.classList.toggle('has', !!sc); b.classList.toggle('armed', storeArmed);
+    b.title = sc ? `Scene ${b.dataset.s}: ${Object.keys(sc.data).join(', ')} — saved ${new Date(sc.at).toLocaleString()}` : `Scene ${b.dataset.s} is empty — press Store, then this`;
+  }
+  $('#sceneStore').classList.toggle('on', storeArmed);
+}
+$('#sceneStore').onclick = () => { storeArmed = !storeArmed; renderScenes(); if (storeArmed) toast('Now press A, B or C to save the Console into that scene'); };
+for (const b of document.querySelectorAll('#scenes [data-s]')) b.onclick = () => {
+  const slot = b.dataset.s;
+  if (storeArmed) {
+    const data = {};
+    for (const p of peers.values()) if (!p.control) data[p.name] = chanState(deskOf(p.id));
+    if (!Object.keys(data).length) return toast('Nobody is on the Console yet');
+    wsSend({ t: 'scene', slot, data }); storeArmed = false; renderScenes();
+    return toast(`💾 Scene ${slot} saved: ${Object.keys(data).join(', ')}`);
+  }
+  const sc = scenes[slot]; if (!sc) return toast(`Scene ${slot} is empty — press Store, then ${slot}`);
+  const got = [];
+  for (const p of peers.values()) {
+    const st = !p.control && sc.data[p.name]; if (!st) continue;
+    const d = deskOf(p.id);
+    Object.assign(d, { db: st.db, cut: !!st.mute, pan: st.pan || 0, hpf: !!st.hpf, low: st.low || 0, pres: st.pres || 0, high: st.high || 0, comp: !!st.comp, gate: !!st.gate });
+    stripChanged(p.id, true); got.push(p.name);
+  }
+  toast(got.length ? `🎛 Scene ${slot}: ${got.join(', ')}` : `Scene ${slot} has nobody who's here now (${Object.keys(sc.data).join(', ')})`);
+};
+
+// ---------- producer notes: a timed note that lands in the edit list (not a chapter) ----------
+let noteAt = 0;
+$('#noteText').addEventListener('input', () => { if (!noteAt && $('#noteText').value) noteAt = serverNow(); if (!$('#noteText').value) noteAt = 0; });
+$('#noteText').addEventListener('keydown', e => { if (e.key === 'Escape') { e.stopPropagation(); $('#noteText').blur(); } });
+$('#noteForm').onsubmit = e => {
+  e.preventDefault();
+  const text = $('#noteText').value.trim(); if (!text) return;
+  if (dropMarker('note', text, noteAt || serverNow())) { $('#noteText').value = ''; noteAt = 0; }
+};
+function addNoteRow(m) {
+  const row = document.createElement('div');
+  row.innerHTML = `<b>${fmtTime(m.at)}</b>`; row.append(m.label);
+  $('#noteList').prepend(row);
+}
+
+// ---------- live transcript in the Console ----------
+const FILLER_RE = /\b(u+m+|u+h+m*|e+r+m+|e+r+|a+h+|h+m+|mm+)\b/gi;
+function renderLiveTx() {
+  const box = $('#liveTx'), x = txLive; if (!box || !x) return;
+  if (!x.engine || !x.on) { box.innerHTML = `<span class="muted small-text">${!x.engine ? 'The transcript engine isn\'t installed' : 'Transcripts are switched off in Studio settings'}</span>`; return; }
+  if (!x.recent || !x.recent.length) { box.innerHTML = '<span class="muted small-text">Waiting for the first 30 seconds of talking…</span>'; return; }
+  box.innerHTML = x.recent.map(r => `<p><b>${esc(r.who)}</b> <span class="muted">${fmtTime(r.at * 1000)}</span> ${esc(r.text).replace(FILLER_RE, w => `<span class="filler">${w}</span>`)}</p>`).join('');
+  box.scrollTop = box.scrollHeight;
+}
+
+// ---------- script / show notes / teleprompter ----------
+let prPlaying = false, prLast = 0, prSize = Number(LS.get('ps_prsize')) || 26;
+function setScript(sc, announce) {
+  const had = !!script; script = sc && sc.text ? sc : null;
+  $('#scriptBtn').classList.toggle('hidden', !script && !isHost);
+  $('#prText').textContent = script ? script.text : (isHost ? 'No script yet — press ✎ Edit to write or paste one.' : '');
+  if (!script && !isHost) $('#prompter').classList.add('hidden');
+  if (announce && script && !had && !isHost) toast('📜 The producer shared a script — press 📜 Script to read it', 6000);
+}
+function openPrompter() { $('#prompter').classList.remove('hidden'); $('#prText').style.fontSize = prSize + 'px'; }
+$('#scriptBtn').onclick = () => ($('#prompter').classList.contains('hidden') ? openPrompter() : $('#prompter').classList.add('hidden'));
+$('#conScript').onclick = openPrompter;
+$('#prClose').onclick = () => { $('#prompter').classList.add('hidden'); prPlaying = false; $('#prPlay').textContent = '▶ Scroll'; };
+$('#prPlay').onclick = () => { prPlaying = !prPlaying; prLast = 0; $('#prPlay').textContent = prPlaying ? '⏸ Pause' : '▶ Scroll'; if (prPlaying) requestAnimationFrame(prStep); };
+function prStep(t) {
+  if (!prPlaying) return;
+  if (prLast) $('#prText').scrollTop += (Number($('#prSpeed').value) * (t - prLast)) / 1000; // pixels a second
+  prLast = t; requestAnimationFrame(prStep);
+}
+const prFont = d => { prSize = Math.max(14, Math.min(64, prSize + d)); $('#prText').style.fontSize = prSize + 'px'; LS.set('ps_prsize', String(prSize)); };
+$('#prSmaller').onclick = () => prFont(-3); $('#prBigger').onclick = () => prFont(3);
+$('#prTop').onclick = () => { $('#prText').scrollTop = 0; };
+$('#prEdit').onclick = () => {
+  const ed = $('#prEditor'); ed.classList.toggle('hidden');
+  if (!ed.classList.contains('hidden')) { $('#prArea').value = script ? script.text : ''; $('#prShare').value = script ? script.share : 'hosts'; $('#prArea').focus(); }
+};
+$('#prSave').onclick = () => {
+  wsSend({ t: 'script', text: $('#prArea').value, share: $('#prShare').value });
+  $('#prSaved').textContent = $('#prShare').value === 'all' ? 'Saved — everyone can read it' : 'Saved — hosts only';
+  setTimeout(() => { $('#prSaved').textContent = ''; }, 4000);
+};
+// drag the panel by its title bar, so it never sits over something you need
+$('#prompter .pr-bar').addEventListener('pointerdown', e => {
+  if (e.target.closest('button,input,select')) return;
+  const box = $('#prompter'), r = box.getBoundingClientRect(), dx = e.clientX - r.left, dy = e.clientY - r.top;
+  const move = ev => { box.style.left = Math.max(0, Math.min(innerWidth - 80, ev.clientX - dx)) + 'px'; box.style.top = Math.max(0, Math.min(innerHeight - 40, ev.clientY - dy)) + 'px'; box.style.right = 'auto'; box.style.bottom = 'auto'; };
+  const up = () => { removeEventListener('pointermove', move); removeEventListener('pointerup', up); };
+  addEventListener('pointermove', move); addEventListener('pointerup', up);
+});
+$('#prompter').addEventListener('keydown', e => { if (e.key === ' ' && !typing(e)) { e.preventDefault(); $('#prPlay').click(); } });
 
 // ---------- Rolling Desk (the desktop app): recordings saved on this computer too ----------
 if (window.rollingDesk) {

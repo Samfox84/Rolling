@@ -26,7 +26,10 @@ Version: see [CHANGELOG.md](CHANGELOG.md). Licence: [GNU AGPL-3.0](LICENSE) — 
 
 **🖥 Rolling Desk app (Mac + Linux)** — the producer's desktop app: your studio and Console in their own window, and every recording saved on your own computer too (live full-quality copy while recording, every finished file when ready). See [desk/README.md](desk/README.md).
 
-**🎛 Console (control room)** — a full-screen audio mixing desk: per-person low cut, 3-band EQ, compressor, pan, fader, mute/solo, talk and cue; live EBU loudness of your mix against −16/−23 LUFS; full keyboard control. Your moves and settings are baked into the stereo Producer mix and remembered per person.
+**🎛 Console (control room)** — a full-screen audio mixing desk: per-person low cut, noise gate, 3-band EQ, compressor, pan, fader with peak-hold, mute/solo, talk and cue; live EBU loudness of your mix against −16/−23 LUFS with a limiter light; **Auto level**, **Auto mix** (gain sharing) and **scenes A/B/C**; a big **ON AIR** key; full keyboard control. Your moves and settings are baked into the stereo Producer mix and remembered per person.
+- **Soundboard (F1–F12):** jingles, stings, ads and music beds that everyone hears live; beds loop and dip under speech. Recorded as its own track and mixed into the Producer mix.
+- **Green room:** talk to a guest privately first (not recorded), then **Bring on air**. **⚙ Help** a guest from the desk: switch their mic, headphones mode, mute.
+- **Producer notes** (timed, in the edit list), **script & teleprompter** (for hosts or everyone), **live transcript** with "um/uh" highlighted — and every filler word listed in the edit list.
 
 **Producer desk (live)**
 - **🎚 Desk** — a fader per person (what you hear + baked into the **Producer mix**), 🎧 mute/solo for your ears only.
@@ -115,7 +118,7 @@ Each install gets its own random password, shown at the end of the install. Chan
 
 ## Tests
 ```bash
-npm test            # 60 tests: loudness meter accuracy, transcripts, documents, a full recording through the real server
+npm test            # loudness meter accuracy, transcripts, documents, the soundboard track, a full recording and the green room through the real server
 npm run test:e2e    # real browsers: studio features + two whole-workflow runs (basic user, advanced producer with a
                     # dropout and a server crash) that download and open every file (needs: npm i -g playwright && npx playwright install chromium)
 ```

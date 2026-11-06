@@ -6,14 +6,17 @@ const fs = require('fs');
 const path = require('path');
 
 /** Load the worklet with the globals an AudioWorklet provides, feed it samples, return its messages. */
-function runWorklet(samples, rate = 48000, startRecording = true) {
+function loadWorklet(rate, msgs) {
   const src = fs.readFileSync(path.join(__dirname, '..', 'public', 'recorder-worklet.js'), 'utf8');
-  let Proc = null;
-  const msgs = [];
-  const G = { sampleRate: rate, currentFrame: 0, currentTime: 0, registerProcessor: (n, c) => { Proc = c; },
+  const procs = {};
+  const G = { sampleRate: rate, currentFrame: 0, currentTime: 0, registerProcessor: (n, c) => { procs[n] = c; },
     AudioWorkletProcessor: class { constructor() { this.port = { postMessage: m => msgs.push(m), onmessage: null }; } } };
   new Function('G', 'with (G) {' + src + '}')(new Proxy(G, { has: () => true, get: (t, k) => (k in t ? t[k] : globalThis[k]), set: (t, k, v) => { t[k] = v; return true; } }));
-  const p = new Proc();
+  return { procs, G };
+}
+function runWorklet(samples, rate = 48000, startRecording = true) {
+  const msgs = [], { procs, G } = loadWorklet(rate, msgs);
+  const p = new procs['studio-recorder']();
   if (startRecording) p.port.onmessage({ data: { cmd: 'start' } });
   for (let i = 0; i + 128 <= samples.length; i += 128) { G.currentFrame = i; G.currentTime = i / rate; p.process([[samples.subarray(i, i + 128)]]); }
   return { msgs, proc: p, G };
@@ -55,11 +58,8 @@ test('recording copies every sample in order (lossless) and stop flushes the rem
   assert.ok(msgs.some(m => m.type === 'stopped'));
 });
 test('a glitch (audio clock jump) is reported and filled with silence to keep the timeline', () => {
-  const src = fs.readFileSync(path.join(__dirname, '..', 'public', 'recorder-worklet.js'), 'utf8');
-  let Proc; const msgs = [];
-  const G = { sampleRate: 48000, currentFrame: 0, currentTime: 0, registerProcessor: (n, c) => { Proc = c; }, AudioWorkletProcessor: class { constructor() { this.port = { postMessage: m => msgs.push(m), onmessage: null }; } } };
-  new Function('G', 'with (G) {' + src + '}')(new Proxy(G, { has: () => true, get: (t, k) => (k in t ? t[k] : globalThis[k]), set: (t, k, v) => { t[k] = v; return true; } }));
-  const p = new Proc(); p.port.onmessage({ data: { cmd: 'start' } });
+  const msgs = [], { procs, G } = loadWorklet(48000, msgs);
+  const p = new procs['studio-recorder'](); p.port.onmessage({ data: { cmd: 'start' } });
   const block = new Float32Array(128).fill(0.5);
   G.currentFrame = 0; p.process([[block]]);
   G.currentFrame = 128 + 1024; p.process([[block]]); // 1024 frames went missing
@@ -70,15 +70,29 @@ test('a glitch (audio clock jump) is reported and filled with silence to keep th
 });
 
 test('stereo (the Console master bus): both channels count — the same -20 dBFS tone in L and R reads -20.0 LUFS', () => {
-  const src = fs.readFileSync(path.join(__dirname, '..', 'public', 'recorder-worklet.js'), 'utf8');
-  let Proc = null; const msgs = [];
-  const G = { sampleRate: 48000, currentFrame: 0, currentTime: 0, registerProcessor: (n, c) => { Proc = c; },
-    AudioWorkletProcessor: class { constructor() { this.port = { postMessage: m => msgs.push(m), onmessage: null }; } } };
-  new Function('G', 'with (G) {' + src + '}')(new Proxy(G, { has: () => true, get: (t, k) => (k in t ? t[k] : globalThis[k]), set: (t, k, v) => { t[k] = v; return true; } }));
-  const p = new Proc({ processorOptions: { meterOnly: true } }); // meters without "recording" — never sends audio
+  const msgs = [], { procs, G } = loadWorklet(48000, msgs);
+  const p = new procs['studio-recorder']({ processorOptions: { meterOnly: true } }); // meters without "recording" — never sends audio
   const a = sine(0.1, 1000, 6);
   for (let i = 0; i + 128 <= a.length; i += 128) { G.currentFrame = i; p.process([[a.subarray(i, i + 128), a.subarray(i, i + 128)]]); }
   const L = lastLoud(msgs);
   assert.ok(Math.abs(L.I - -20.0) < 0.05, `stereo I was ${L.I}`);
   assert.equal(msgs.filter(m => m.type === 'pcm').length, 0, 'meter-only never records');
+});
+
+test('Console noise gate: open while talking, 20 dB down in the gaps, untouched when switched off', () => {
+  const msgs = [], { procs } = loadWorklet(48000, msgs);
+  const run = on => {
+    const g = new procs['rolling-gate'](); g.port.onmessage({ data: { on } });
+    // 1 s of voice-level tone, then 2 s of quiet hiss (−60 dBFS)
+    const x = new Float32Array(144000); x.set(sine(0.1, 300, 1)); for (let i = 48000; i < 144000; i++) x[i] = 0.001 * Math.sin(i * 1.7);
+    const y = new Float32Array(x.length);
+    for (let i = 0; i < x.length; i += 128) { const out = [new Float32Array(128)]; g.process([[x.subarray(i, i + 128)]], [out]); y.set(out[0], i); }
+    const rms = (a, from, to) => { let e = 0; for (let i = from; i < to; i++) e += a[i] * a[i]; return Math.sqrt(e / (to - from)); };
+    return { voice: rms(y, 24000, 48000) / rms(x, 24000, 48000), gap: rms(y, 120000, 144000) / rms(x, 120000, 144000) };
+  };
+  const on = run(true), off = run(false);
+  assert.ok(Math.abs(on.voice - 1) < 0.01, `voice passes: ${on.voice}`);
+  assert.ok(Math.abs(20 * Math.log10(on.gap) - -20) < 0.5, `gap turned down 20 dB: ${20 * Math.log10(on.gap)}`);
+  assert.ok(Math.abs(off.gap - 1) < 0.001, 'switched off = no change');
+  assert.ok(msgs.some(m => m.closed === true), 'tells the Console when it is closed');
 });

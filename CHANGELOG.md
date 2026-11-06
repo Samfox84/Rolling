@@ -1,6 +1,34 @@
 # Changelog
 
-## 1.6.0 — Rolling Desk, the producer's desktop app (Mac + Linux)
+Rolling is pre-release, so versions now start at 0.x. Each earlier version is shown with its old 1.x number
+(1.0.0 → 0.1.0 … 1.6.0 → 0.7.0). The desktop app, Rolling Desk, has its own numbers, starting at 0.1.0.
+
+## 0.8.0 — a fuller producer desk
+Researched what other podcast studios offer (Riverside, SquadCast, StreamYard, Zencastr, Cleanfeed, RØDECaster)
+and added what the Console was missing:
+- **Soundboard (F1–F12):** up to 24 pads per show — jingles, stings, ads, music beds. Everyone hears them live; they're
+  recorded as their own **Soundboard** track, mixed into the Producer mix, placed in the editor sessions, and listed in
+  the edit list. **Music beds loop and dip under speech** (live and in the files)
+- **Green room:** let a guest in to the green room first — only hosts see and hear them, and they aren't recorded — then
+  **Bring on air** (they join the recording from that moment)
+- **Help a guest from the desk (⚙ HELP):** switch their microphone, turn headphones mode on/off, mute them, ask them to
+  unmute (only they can turn their mic on)
+- **Auto level:** one press sets every fader so each person lands on the loudness target
+- **Auto mix (gain sharing):** whoever is talking stays up, everyone else dips up to 12 dB — less room noise and spill.
+  Baked into the Producer mix exactly as heard
+- **Noise gate per channel (GATE, key G):** live, and the same gate in the Producer mix
+- **Peak-hold number** on every channel · **LIMIT light:** a safety limiter on your listening, lit when the mix hits the ceiling
+- **Scenes A/B/C:** store and recall everyone's channel settings for the show
+- **Big ON AIR key** that lights up while recording
+- **Producer notes (key N):** typed notes, timed from when you started typing, in the edit list (not chapters)
+- **Script & teleprompter:** write or paste the show script; keep it for hosts or share it with everyone; scrolling
+  teleprompter with speed and text size
+- **Live transcript in the Console** (about 30 s behind), with "um/uh" highlighted
+- **Filler words in the edit list:** the transcript now keeps "um", "uh", "erm"… and the edit list points at each one
+- Rolling Desk: **updates itself** from GitHub Releases (Mac + AppImage; the download's fingerprint is checked; it never
+  restarts during a show). Needs the GitHub project to be public
+
+## 0.7.0 (was 1.6.0) — Rolling Desk, the producer's desktop app (Mac + Linux)
 - **New `desk/` app** (Electron 43, the newest that runs on macOS 12 Monterey, so it works on a Mac Pro 2013):
   paste your show's host link once, and the studio opens in its own window; join the control room and the
   **audio Console opens by itself**
@@ -14,7 +42,7 @@
 - **Server:** new read-only live-copy endpoints for the app (host key): which audio is complete with no gaps, video
   pieces in order. Nothing else changes; the app isn't installed on servers
 
-## 1.5.0 — the audio Console (stage 1 of Rolling Desk)
+## 0.6.0 (was 1.5.0) — the audio Console (stage 1 of Rolling Desk)
 For the producer in the control room: **🎛 Console**, a full-screen audio mixing desk. Everyone is heard through it.
 - **Channel strip per person:** low cut (80 Hz), 3-band EQ (low 120 Hz · presence 2.5 kHz · high 8 kHz, ±12 dB),
   compressor with gain-reduction meter, pan, vertical fader with level meter, their live loudness, MUTE (out of the mix),
@@ -29,7 +57,7 @@ For the producer in the control room: **🎛 Console**, a full-screen audio mixi
 - Quick tags, cue cards, talkback, rundown clock, record and room tone are all on the same screen
 - The untouched recordings, cleaned files and video are made exactly as before
 
-## 1.4.2 — whole-workflow testing and the fixes it found
+## 0.5.2 (was 1.4.2) — whole-workflow testing and the fixes it found
 Two new end-to-end tests drive real browsers through the whole job, then download and open every file:
 basic user (dashboard → room → guest → room tone → record → marker → stop → Recordings → downloads) and
 advanced producer (control room, 3-segment rundown, show clock, quick tags, desk, cue cards, talkback, cough,
@@ -42,14 +70,14 @@ free space / delete). Fixed along the way:
 - **No more occasional failed downloads / Cloudflare 502s**: idle connections are kept open longer than Cloudflare's
 - **The show clock survives a server restart** — the current segment is remembered with the take
 
-## 1.4.1 — timecode clock and tally
+## 0.5.1 (was 1.4.1) — timecode clock and tally
 - **Timecode bar for everyone** (like a broadcast monitor): REC timecode (HH:MM:SS:FF, starts at 00:00:00:00 with the take — the same timeline as every file), current segment timecode with time left, and time of day
 - **Tally**: red frame round the whole studio while recording (amber during room tone), REC lamp in the bar, and a red frame on each person who is recording
 - **⛶ Clock** full-screen view and **↗ Pop out** window to drag onto a second screen (double-click it for full screen)
 - **Frame rate setting** (Studio settings): 25 fps (UK, now the default) or 30 fps — used for the clock, the MP4s and the Premiere/Resolve XML, so the timecode always matches the files
 - Fix: closing the full-screen clock while it was still opening could leave the screen stuck in full screen
 
-## 1.4.0 — producer desk and clean-up files
+## 0.5.0 (was 1.4.0) — producer desk and clean-up files
 **Live, while recording (host)**
 - **🎚 Desk** with a fader per person: changes what you hear *and* is recorded into the new **Producer mix**; 🎧 mute / solo for your ears only; your own listening volume
 - **Cue cards** — big on-screen messages to one person or everyone (Wrap up, 2 minutes, Go to the ad break, Speak up… or your own)
@@ -67,11 +95,11 @@ free space / delete). Fixed along the way:
 - **Edit list.txt** — tags, segments, coughs, talkback and long pauses, grouped and in time order; also in the Audition markers file (with durations)
 - **🧽 Clean again** on the Recordings page re-makes the cleaned files and Producer mix with your current settings (works even after freeing up space)
 
-## 1.3.3
+## 0.4.3 (was 1.3.3)
 - **Fix: transcripts failing with "Error opening output … No such file or directory".** The system's /tmp clean-up removed the transcription work folder while the studio was running. Work files now live with the recordings, and the folder is re-made before every job
 - A transcript that hiccups once and then carries on no longer reports the old error
 
-## 1.3.2
+## 0.4.2 (was 1.3.2)
 - **Live level bars on every tile** — everyone sees a moving green/amber/red bar for every person (−60 to 0 dBFS) with a peak-hold line and a red CLIP light that stays on for 3 s
 - **Transcripts you can see:** the Recordings page says exactly where each take's transcript is at (live %, ready with line count, failed and why, or not made yet)
 - **📝 Make transcript** button for takes recorded before transcripts were on, or to make one again — a failed re-run never throws away the old transcript
@@ -79,7 +107,7 @@ free space / delete). Fixed along the way:
 - **Test transcription** button in Studio settings, and the installer now test-runs the engine and says if it works
 - Transcript failures are listed as take errors — never just a missing file
 
-## 1.3.1 — deep audit (see docs/reviews/2026-11-03-audit-v1.3.1.toon)
+## 0.4.1 (was 1.3.1) — deep audit (see docs/reviews/2026-11-03-audit-v1.3.1.toon)
 - **Live loudness on the video tiles:** the host sees every person's LUFS while they talk; guests see their own
 - **No silent failures:** every error is logged (journalctl) or shown; corrupt files are kept and reported
 - **Every request has a timeout** — a stalled connection can no longer freeze uploads; the studio reconnects if the link goes quiet for 15 s
@@ -88,7 +116,7 @@ free space / delete). Fixed along the way:
 - One logger (log.js), one program runner (proc.js), one set of page helpers (public/common.js); duplicate code removed
 - **Automated tests:** `npm test` (44 tests: meters, transcripts, documents, full server take) and `npm run test:e2e` (real browsers)
 
-## 1.3.0
+## 0.4.0 (was 1.3.0)
 - **Control room:** the host can run the show with no camera or mic (not recorded)
 - **Broadcast loudness meters** (EBU R128 / BS.1770) for everyone in the Health panel: momentary, short-term, integrated LUFS and true peak; own loudness shown in the lobby
 - **Level check after every take** (Level report) plus **normalised copies** at −16 LUFS and −23 LUFS; untouched originals kept
@@ -101,12 +129,12 @@ free space / delete). Fixed along the way:
 - **3-2-1 countdown**, **sound check** in the lobby, **free-up-space** buttons and optional automatic tidy-up
 - "Mix - all voices" is now 32-bit float so overlapping voices can't clip
 
-## 1.2.0
+## 0.3.0 (was 1.2.0)
 - Named **Rolling**; released under AGPL-3.0
 - Change the admin password from the dashboard (stored hashed); `sudo podcast-studio-reset-password` if forgotten
 - Each install still gets its own random starting password
 
-## 1.1.0
+## 0.2.0 (was 1.1.0)
 - Crash-proof uploads (saved to the browser's disk first, resumed after a crash), auto-rebuild when late files arrive
 - Problem alerts: silent / unplugged / distorting mic, audio glitches, upload falling behind, poor connection, low disk
 - Lobby connection test; camera recording bitrate matched to the connection; audio always uploads first
@@ -115,5 +143,5 @@ free space / delete). Fixed along the way:
 - Automatic backup to a second drive, email when a take is ready, Cloudflare TURN relay
 - Takes survive a server restart; no caching of dynamic pages by Cloudflare/browsers
 
-## 1.0.0
+## 0.1.0 (was 1.0.0)
 - Video call for up to 5, lossless 24-bit WAV per person, camera video per person, room tone, lined-up files, zip download

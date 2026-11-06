@@ -54,16 +54,18 @@ function cleanChannel(s) {
   s = s || {};
   return {
     db: s.db === null ? null : num(s.db, -60, 10, 0), mute: !!s.mute, pan: +num(s.pan, -1, 1, 0).toFixed(2),
-    hpf: !!s.hpf, low: num(s.low, -EQ_LIMIT, EQ_LIMIT, 0), pres: num(s.pres, -EQ_LIMIT, EQ_LIMIT, 0), high: num(s.high, -EQ_LIMIT, EQ_LIMIT, 0), comp: !!s.comp,
+    hpf: !!s.hpf, low: num(s.low, -EQ_LIMIT, EQ_LIMIT, 0), pres: num(s.pres, -EQ_LIMIT, EQ_LIMIT, 0), high: num(s.high, -EQ_LIMIT, EQ_LIMIT, 0), comp: !!s.comp, gate: !!s.gate,
   };
 }
 /**
  * the same processing the Console applies live (Web Audio), as an ffmpeg filter chain — '' if the channel is flat.
- * Matches: highpass 80 Hz · low shelf 120 Hz · presence peak 2.5 kHz (Q 1) · high shelf 8 kHz · compressor −24 dB 3:1
+ * Matches: highpass 80 Hz · gate (opens at −45 dBFS, closes to −20 dB, 5 ms / 150 ms) · low shelf 120 Hz · presence peak 2.5 kHz (Q 1) · high shelf 8 kHz · compressor −24 dB 3:1
  */
+const GATE_OPEN = 0.0056, GATE_FLOOR = 0.1; // −45 dBFS, −20 dB — the same numbers as the Console's live gate
 function channelFilter(s) {
   const c = cleanChannel(s), f = [];
   if (c.hpf) f.push('highpass=f=80');
+  if (c.gate) f.push(`agate=threshold=${GATE_OPEN}:range=${GATE_FLOOR}:ratio=20:attack=5:release=150:detection=peak`);
   if (c.low) f.push(`lowshelf=f=120:g=${c.low}`);
   if (c.pres) f.push(`equalizer=f=2500:t=q:w=1:g=${c.pres}`);
   if (c.high) f.push(`highshelf=f=8000:g=${c.high}`);

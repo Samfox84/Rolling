@@ -160,6 +160,7 @@
     <button class="ghost hostonly hidden" id="toneBtn" title="Everyone stays silent while a noise print is recorded">🤫 Room tone</button>
     <button class="ghost hostonly hidden" id="deskBtn" title="Producer desk: faders, cue cards, talkback, quick tags">🎚 Desk</button>
     <button class="primary hidden" id="consoleBtn" title="Full-screen audio mixing console (control room)">🎛 Console</button>
+    <button class="ghost hidden" id="scriptBtn" title="The show script / teleprompter">📜 Script</button>
     <button class="ghost" id="coughBtn" title="Hold to mute your live sound for a cough (or hold C). Your recording is untouched — the edit list marks it.">🤧 Cough</button>
     <button class="ghost" id="chatBtn">💬 Chat <span class="badge hidden" id="chatBadge"></span></button>
     <button class="ghost hostonly hidden" id="healthBtn">🩺 Health <span class="badge hidden" id="healthBadge"></span></button>
@@ -206,7 +207,7 @@
   <div class="con-top">
     <div class="tcbar" id="conClock"></div>
     <div class="con-actions">
-      <button class="primary recbtn" id="conRec">● Record</button>
+      <button class="onair" id="conRec" title="Start / stop recording"><span class="oa-lamp">ON AIR</span><small>press to record</small></button>
       <button class="ghost" id="conTone" title="Everyone stays silent while a noise print is recorded">🤫 Room tone</button>
       <button class="ghost" id="conNext" title="Start the next segment of the rundown">▶ Next segment</button>
       <button class="small ghost deskSave hidden" title="Rolling Desk: recordings saved on this computer — click to open the folder"></button>
@@ -214,7 +215,7 @@
     </div>
   </div>
   <div class="con-thumbs" id="conThumbs"></div>
-  <div class="con-keys">Keyboard: <kbd>←</kbd><kbd>→</kbd> pick a channel · <kbd>↑</kbd><kbd>↓</kbd> fader (hold Shift for fine) · <kbd>0</kbd> 0 dB · <kbd>X</kbd> mute · <kbd>S</kbd> solo · <kbd>Q</kbd> low cut · <kbd>W</kbd> compressor · hold <kbd>T</kbd> talk to them · <kbd>1</kbd>–<kbd>4</kbd> quick tags · <kbd>M</kbd> marker · scroll on a fader for 0.5 dB</div>
+  <div class="con-keys">Keyboard: <kbd>←</kbd><kbd>→</kbd> pick a channel · <kbd>↑</kbd><kbd>↓</kbd> fader (hold Shift for fine) · <kbd>0</kbd> 0 dB · <kbd>X</kbd> mute · <kbd>S</kbd> solo · <kbd>Q</kbd> low cut · <kbd>W</kbd> compressor · hold <kbd>T</kbd> talk to them · <kbd>G</kbd> gate · <kbd>1</kbd>–<kbd>4</kbd> quick tags · <kbd>M</kbd> marker · <kbd>N</kbd> write a note · <kbd>F1</kbd>–<kbd>F12</kbd> soundboard · scroll on a fader for 0.5 dB</div>
   <div class="con-main">
     <div class="con-strips" id="conStrips"></div>
     <div class="con-master">
@@ -231,10 +232,25 @@
       </div>
       <select id="pmTargetSel" class="small" title="Loudness target"><option value="-16">Target −16 LUFS (podcast)</option><option value="-23">Target −23 LUFS (broadcast)</option></select>
       <button class="small ghost" id="pmReset" title="Start measuring the integrated loudness again">Reset integrated</button>
+      <div class="limit-row" title="A safety limiter keeps your headphones from clipping. It lights when the mix is hitting the ceiling — turn something down. (The Producer mix file gets its own true-peak limiting when it's made.)"><span class="limit-led" id="limitLed">LIMIT</span><span class="small-text muted">limiter</span></div>
+      <button class="small" id="autoLevel" title="Sets every fader so each person comes out at the loudness target, from how loud they've been so far">⚖ Auto level</button>
+      <button class="small" id="autoMix" title="Gain sharing: whoever is talking stays up, everyone else dips (up to 12 dB) — less room noise and spill. Baked into the Producer mix exactly as you hear it.">🤖 Auto mix: off</button>
+      <div class="desk-h" style="margin-top:6px">SCENES</div>
+      <div class="scenes" id="scenes"><button class="small" data-s="A">A</button><button class="small" data-s="B">B</button><button class="small" data-s="C">C</button><button class="small ghost" id="sceneStore" title="Press Store, then A, B or C to save everyone's channel settings for this show">Store</button></div>
       <label class="small-text" style="margin:8px 0 0">🎧 Listening volume</label>
       <input type="range" id="conVol" min="0" max="100" value="50">
     </div>
     <div class="con-side" id="conSide">
+      <div class="con-sec">
+        <div class="desk-h">Producer notes <span class="muted small-text">— timed from when you start typing · press <kbd>N</kbd></span></div>
+        <form id="noteForm" class="row" style="gap:6px"><input id="noteText" maxlength="300" placeholder="e.g. great story — use as the trailer" style="flex:1" autocomplete="off"><button class="small primary">Add</button></form>
+        <div id="noteList" class="notelist"></div>
+      </div>
+      <div class="con-sec">
+        <div class="desk-h">Live transcript <span class="muted small-text">— about 30 s behind</span></div>
+        <div id="liveTx" class="livetx"><span class="muted small-text">Appears here while recording.</span></div>
+      </div>
+      <div class="con-sec"><button class="small" id="conScript" style="width:100%">📜 Script &amp; teleprompter</button></div>
       <div class="desk-sec board-sec">
         <div class="desk-h">Soundboard <span class="muted small-text">— F1–F12 · everyone hears it, and it's recorded as its own track</span></div>
         <div class="pads" id="pads"></div>
@@ -247,6 +263,27 @@
           <label class="small primary" style="display:inline-block;margin-top:6px;cursor:pointer">+ Add sounds <input type="file" id="padFiles" accept="audio/*" multiple hidden></label>
         </div>
       </div>
+    </div>
+  </div>
+</div>
+
+<!-- script / teleprompter (everyone it's shared with) -->
+<div id="prompter" class="prompter hidden">
+  <div class="pr-bar">
+    <b>📜 Script</b>
+    <button class="small" id="prPlay" title="Start / stop scrolling (space)">▶ Scroll</button>
+    <span class="small-text muted">speed</span><input type="range" id="prSpeed" min="5" max="120" value="30" style="width:90px">
+    <button class="small ghost" id="prSmaller" title="Smaller text">A−</button><button class="small ghost" id="prBigger" title="Bigger text">A+</button>
+    <button class="small ghost" id="prTop" title="Back to the top">⤒</button>
+    <button class="small ghost hostonly hidden" id="prEdit">✎ Edit</button>
+    <button class="small ghost" id="prClose">✕</button>
+  </div>
+  <div id="prText" class="pr-text"></div>
+  <div id="prEditor" class="pr-editor hidden">
+    <textarea id="prArea" maxlength="60000" placeholder="Paste or write the running order, intro script, questions, ad reads…"></textarea>
+    <div class="row" style="gap:8px; align-items:center; margin-top:6px">
+      <select id="prShare" class="small"><option value="hosts">Hosts only</option><option value="all">Everyone (guests too)</option></select>
+      <button class="small primary" id="prSave">Save</button><span class="small-text muted" id="prSaved"></span>
     </div>
   </div>
 </div>
