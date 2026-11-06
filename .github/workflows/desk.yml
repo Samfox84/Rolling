@@ -15,8 +15,11 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: macos-latest   # GitHub's current Mac (Apple Silicon); also builds the Intel version
-            target: --mac dmg zip --x64 --arm64
+          # each Mac version on its own kind of machine: if GitHub is short of one kind, the other still builds
+          - os: macos-15-intel   # Intel Macs (e.g. Mac Pro 2013)
+            target: --mac dmg zip --x64
+          - os: macos-latest     # Apple Silicon Macs
+            target: --mac dmg zip --arm64
           - os: ubuntu-24.04
             target: --linux AppImage deb --x64
     runs-on: ${{ matrix.os }}
@@ -29,7 +32,7 @@ jobs:
         with:
           node-version: 22
       - run: npm install --no-audit --no-fund
-      - run: node --check main.js && node --check mirror.js && node --check preload.js
+      - run: node --check main.js && node --check mirror.js && node --check preload.js && node --check updater.js
       - run: npx electron-builder ${{ matrix.target }} --publish never
         env:
           CSC_IDENTITY_AUTO_DISCOVERY: 'false'
