@@ -45,7 +45,11 @@
   // browser storage can be switched off (private windows) — remembered settings are a convenience only
   const LS = { get(k) { try { return localStorage.getItem(k); } catch (e) { quiet('read saved setting')(e); return null; } }, set(k, v) { try { localStorage.setItem(k, v); } catch (e) { quiet('save setting')(e); } } };
 
-  window.Rolling = { $, esc, toast, quiet, api, fmtMB, hms, LS };
+  // where guests reach this studio: usually this page's own address; when the studio runs inside Rolling Desk on
+  // someone's computer, its public internet address (which can change, so it's asked for each time)
+  const linkBase = async () => { const r = await api('/api/info'); return (r.ok && r.data.link) || location.origin; };
+
+  window.Rolling = { $, esc, toast, quiet, api, fmtMB, hms, LS, linkBase };
   // the studio name on every page
   api('/api/info').then(r => { if (r.ok) { document.querySelectorAll('.studio-name').forEach(e => { e.textContent = r.data.name; }); window.Rolling.info = r.data; document.dispatchEvent(new CustomEvent('rolling-info', { detail: r.data })); } });
 })();

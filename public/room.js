@@ -1612,8 +1612,8 @@ $('#clockPop').onclick = () => {
   pop.document.body.ondblclick = () => pop.document.documentElement.requestFullscreen().catch(quiet('clock window full screen'));
   renderClock(pop.document.body); pop.focus();
 };
-$('#copyGuestBtn').onclick = () => {
-  const link = location.origin + '/r/' + roomId;
+$('#copyGuestBtn').onclick = async () => {
+  const link = (await Rolling.linkBase()) + '/r/' + roomId;
   navigator.clipboard.writeText(link).then(() => toast('Guest link copied')).catch(() => ask('Guest link', `<input type="text" value="${link}" readonly onclick="this.select()">`, 'Done', null));
 };
 function updateRecUI() {

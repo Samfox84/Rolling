@@ -132,7 +132,7 @@ async function load() {
   if (disk) $('#disk').textContent = `${gb(disk.free)} free of ${gb(disk.total)}`;
   $('#rooms').innerHTML = rooms.length ? '' : '<div class="card muted">No rooms yet — make one above.</div>';
   for (const r of rooms) {
-    const host = `${location.origin}/r/${r.id}?k=${r.hostKey}`, guest = `${location.origin}/r/${r.id}`, manage = `/m/${r.id}?k=${r.hostKey}`;
+    const base = info.link || location.origin, host = `${base}/r/${r.id}?k=${r.hostKey}`, guest = `${base}/r/${r.id}`, manage = `/m/${r.id}?k=${r.hostKey}`;
     const el = document.createElement('div'); el.className = 'card';
     const ready = r.takes.filter(t => t.status === 'ready').length;
     el.innerHTML = `

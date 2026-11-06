@@ -5,3 +5,5 @@ recordings/
 *.tar.gz
 package-lock.json
 desk/dist/
+desk/build/
+desk/vendor/

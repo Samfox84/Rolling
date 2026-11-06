@@ -97,7 +97,7 @@ async function load() {
   $('#roomName').textContent = r.name; document.title = r.name + ' — Recordings';
   $('#roomSub').textContent = r.recording ? '● Recording right now' : r.online.length ? `In the studio now: ${r.online.join(', ')}` : '';
   $('#studioLink').href = `/r/${roomId}?k=${encodeURIComponent(r.hostKey)}`;
-  $('#guestLink').value = `${location.origin}/r/${roomId}`;
+  Rolling.linkBase().then(b => { $('#guestLink').value = `${b}/r/${roomId}`; });
   const box = $('#takes'); box.innerHTML = r.takes.length ? '' : '<p class="muted">No recordings yet. Open the studio, then press <b>Start recording</b>.</p>';
   for (const t of r.takes) {
     const [cls, label] = STATUS[t.status] || ['', t.status];

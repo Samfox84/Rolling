@@ -1,11 +1,14 @@
-# Builds the Rolling Desk desktop app for Mac (Intel + Apple Silicon) and Linux (AppImage + .deb) and puts the
-# downloads on a GitHub Release named after the app's version (desk/package.json). Runs by itself whenever the app
-# changes on main, or by hand: Actions › "Rolling Desk app" › Run workflow.
+# Builds the Rolling Desk desktop app for Mac (Intel + Apple Silicon), Windows and Linux (AppImage + .deb) and puts
+# the downloads on a GitHub Release named after the app's version (desk/package.json). Runs by itself whenever the
+# app (or the studio it carries) changes on main, or by hand: Actions › "Rolling Desk app" › Run workflow.
+#
+# Each copy carries a whole studio for "Host it on this computer": the server (prepare-studio.js), ffmpeg/ffprobe
+# and cloudflared (fetch-tools.js), and the transcript engine whisper.cpp + its English speech model (built here).
 name: Rolling Desk app
 on:
   push:
     branches: [main]
-    paths: ['desk/**', '.github/workflows/desk.yml']
+    paths: ['desk/**', '.github/workflows/desk.yml', 'server.js', 'log.js', 'proc.js', 'post.js', 'treat.js', 'transcribe.js', 'public/**']
   workflow_dispatch:
 permissions:
   contents: write
@@ -15,16 +18,31 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # each Mac version on its own kind of machine: if GitHub is short of one kind, the other still builds
-          - os: macos-15-intel   # Intel Macs (e.g. Mac Pro 2013)
+          # each Mac version on its own kind of machine: if GitHub is short of one kind, the others still build
+          - os: macos-15-intel   # Intel Macs (e.g. Mac Pro 2013). AVX only: the 2013 Mac Pro has no AVX2
+            platform: darwin
+            arch: x64
             target: --mac dmg zip --x64
+            whisper: -DGGML_METAL=OFF -DGGML_AVX=ON -DGGML_AVX2=OFF -DGGML_FMA=OFF -DGGML_F16C=ON -DCMAKE_OSX_DEPLOYMENT_TARGET=12.0
           - os: macos-latest     # Apple Silicon Macs
+            platform: darwin
+            arch: arm64
             target: --mac dmg zip --arm64
-          - os: ubuntu-24.04
+            whisper: -DGGML_METAL=ON -DGGML_METAL_EMBED_LIBRARY=ON -DCMAKE_OSX_DEPLOYMENT_TARGET=12.0
+          - os: windows-2022
+            platform: win32
+            arch: x64
+            target: --win nsis --x64
+            whisper: -DGGML_AVX=ON -DGGML_AVX2=ON -DGGML_FMA=ON -DGGML_F16C=ON -DGGML_OPENMP=OFF -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded
+          - os: ubuntu-22.04     # older Linux base, so the app runs on more distributions
+            platform: linux
+            arch: x64
             target: --linux AppImage deb --x64
+            whisper: -DGGML_AVX=ON -DGGML_AVX2=ON -DGGML_FMA=ON -DGGML_F16C=ON -DGGML_OPENMP=OFF "-DCMAKE_EXE_LINKER_FLAGS=-static-libgcc -static-libstdc++"
     runs-on: ${{ matrix.os }}
     defaults:
       run:
+        shell: bash
         working-directory: desk
     steps:
       - uses: actions/checkout@v4
@@ -32,22 +50,56 @@ jobs:
         with:
           node-version: 22
       - run: npm install --no-audit --no-fund
-      - run: node --check main.js && node --check mirror.js && node --check preload.js && node --check updater.js
+      - run: for f in main.js mirror.js preload.js connect-preload.js updater.js host.js scripts/*.js; do node --check "$f"; done
+      - name: The studio, for "Host it on this computer"
+        run: node scripts/prepare-studio.js
+      - name: ffmpeg, ffprobe and the guest-link program
+        run: node scripts/fetch-tools.js ${{ matrix.platform }} ${{ matrix.arch }}
+      - name: Transcript engine (whisper.cpp)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG=$(gh release view -R ggml-org/whisper.cpp --json tagName -q .tagName)
+          echo "whisper.cpp $TAG"
+          git clone -q --depth 1 --branch "$TAG" https://github.com/ggml-org/whisper.cpp "$RUNNER_TEMP/wcpp"
+          cmake -S "$RUNNER_TEMP/wcpp" -B "$RUNNER_TEMP/wcpp/build" -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF \
+            -DWHISPER_BUILD_TESTS=OFF -DWHISPER_BUILD_SERVER=OFF -DGGML_NATIVE=OFF ${{ matrix.whisper }}
+          cmake --build "$RUNNER_TEMP/wcpp/build" --config Release -j 4 --target whisper-cli
+          BIN=$(find "$RUNNER_TEMP/wcpp/build" -type f \( -name whisper-cli -o -name whisper-cli.exe \) | head -1)
+          test -n "$BIN" && cp "$BIN" vendor/tools/
+      - uses: actions/cache@v4
+        with:
+          path: desk/vendor/tools/models
+          key: whisper-model-ggml-base.en
+      - name: English speech model
+        run: |
+          mkdir -p vendor/tools/models
+          [ -s vendor/tools/models/ggml-base.en.bin ] || curl -fL --retry 3 -o vendor/tools/models/ggml-base.en.bin https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.en.bin
+      - name: Check the transcript engine works on this kind of computer
+        run: |
+          EXE=""; [ "${{ matrix.platform }}" = win32 ] && EXE=.exe
+          vendor/tools/ffmpeg$EXE -hide_banner -loglevel error -f lavfi -i "sine=frequency=440:duration=3" -ar 16000 -ac 1 -c:a pcm_s16le "$RUNNER_TEMP/t.wav"
+          vendor/tools/whisper-cli$EXE -m vendor/tools/models/ggml-base.en.bin -f "$RUNNER_TEMP/t.wav" -oj -of "$RUNNER_TEMP/t" -np
+          test -s "$RUNNER_TEMP/t.json"
+      - name: Sign the bundled programs (Mac needs every program signed, even ad-hoc)
+        if: matrix.platform == 'darwin'
+        run: for f in vendor/tools/ffmpeg vendor/tools/ffprobe vendor/tools/cloudflared vendor/tools/whisper-cli; do codesign --force -s - "$f"; done
       - run: npx electron-builder ${{ matrix.target }} --publish never
         env:
           CSC_IDENTITY_AUTO_DISCOVERY: 'false'
       - uses: actions/upload-artifact@v4
         with:
-          name: rolling-desk-${{ matrix.os }}
+          name: rolling-desk-${{ matrix.platform }}-${{ matrix.arch }}
           path: |
             desk/dist/*.dmg
             desk/dist/*.zip
+            desk/dist/*.exe
             desk/dist/*.AppImage
             desk/dist/*.deb
           if-no-files-found: error
   release:
     needs: build
-    if: ${{ !cancelled() }}   # publish whatever built, so one platform's problem never blocks the other
+    if: ${{ !cancelled() }}   # publish whatever built, so one platform's problem never blocks the others
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
@@ -67,8 +119,11 @@ jobs:
           name: Rolling Desk ${{ steps.v.outputs.version }}
           files: out/*
           body: |
-            The producer's desk for a Rolling studio. Download the file for your computer:
+            The producer's desk for a Rolling studio — connect to your studio server, or **host the whole studio on
+            your own computer** (no server needed). Download the file for your computer:
             - **Mac with Intel** (e.g. Mac Pro 2013, macOS 12 Monterey or newer): `…-mac-x64.dmg`
             - **Mac with Apple Silicon** (M1 and newer): `…-mac-arm64.dmg`
+            - **Windows 10/11**: `…-win-x64.exe` (installer)
             - **Linux**: `…-x86_64.AppImage` (double-click) or `…-amd64.deb`
-            The Mac app isn't signed by Apple: the first time, right-click it and choose **Open**.
+            Not signed by Apple or Microsoft: on a Mac, right-click the app the first time and choose **Open**; on
+            Windows, press **More info › Run anyway**. Mac and the AppImage update themselves after that.

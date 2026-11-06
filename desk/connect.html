@@ -16,12 +16,16 @@
   button.primary { background: var(--accent); color: #fff; width: 100%; margin-top: 26px; font-size: 17px; }
   button:disabled { opacity: .6; cursor: default; }
   .help { color: var(--muted); font-size: 13px; margin: 6px 0 0; }
+  .tabs { display: flex; gap: 6px; margin-bottom: 8px; } .tab { flex: 1; } .tab.on { background: var(--accent); color: #fff; }
+  ul.help { padding-left: 18px; } ul.help li { margin: 4px 0; }
   .err { color: #fff; background: var(--rec); border-radius: 10px; padding: 10px 12px; margin-top: 18px; display: none; }
 </style>
 </head>
 <body>
   <h1>🎛 Rolling Desk</h1>
-  <p class="sub">Your producer's desk. Mix the show, run it, and keep every recording on this computer too.</p>
+  <p class="sub">Your producer's desk. Mix the show, run it, and keep every recording.</p>
+  <div class="tabs"><button type="button" id="tConnect" class="tab">Connect to my studio server</button><button type="button" id="tHost" class="tab">Host it on this computer</button></div>
+
   <form id="f">
     <label for="link">Your studio's host link</label>
     <input id="link" placeholder="https://podcast.example.com/r/…?k=…" autocomplete="off" spellcheck="false" required>
@@ -32,16 +36,40 @@
     <div class="err" id="err"></div>
     <button class="primary" id="go">Connect</button>
   </form>
+
+  <form id="h" hidden>
+    <p class="help" style="font-size:14px;margin-top:0">No server needed: Rolling Desk runs the whole studio on this computer and makes a free internet link for your guests. Everything works as on a server — the Console, recordings, transcripts, all the files.</p>
+    <label for="sfolder">Keep the studio (shows and recordings) in</label>
+    <div class="row"><input id="sfolder" readonly><button type="button" id="spick">Change…</button></div>
+    <p class="help">About 4 GB per person per hour of recording. Use a drive with plenty of space.</p>
+    <ul class="help">
+      <li>This computer is the studio for the show: keep it on, awake and online until the files are ready (Rolling Desk stops it sleeping).</li>
+      <li>Everyone's full-quality recording comes to this computer: a home broadband connection is fine.</li>
+      <li>The guest link is new each time you start (it looks like <i>something.trycloudflare.com</i>) — send it out after you start.</li>
+      <li>If the internet drops, the call drops but no recording is lost: they upload when people come back.</li>
+    </ul>
+    <div class="err" id="herr"></div>
+    <button class="primary" id="hgo">Start my studio</button>
+  </form>
 <script>
   const q = new URLSearchParams(location.search), $ = id => document.getElementById(id);
-  $('link').value = q.get('link') || ''; $('folder').value = q.get('folder') || '';
-  const showErr = m => { $('err').textContent = m; $('err').style.display = m ? 'block' : 'none'; };
-  showErr(q.get('error') || '');
-  $('pick').onclick = async () => { const f = await window.desk.pickFolder(); if (f) $('folder').value = f; };
+  $('link').value = q.get('link') || ''; $('folder').value = q.get('folder') || ''; $('sfolder').value = q.get('studioFolder') || '';
+  const showErr = (id, m) => { $(id).textContent = m; $(id).style.display = m ? 'block' : 'none'; };
+  const mode = m => { $('f').hidden = m !== 'connect'; $('h').hidden = m !== 'host'; $('tConnect').classList.toggle('on', m === 'connect'); $('tHost').classList.toggle('on', m === 'host'); };
+  mode(q.get('mode') === 'host' ? 'host' : 'connect');
+  showErr(q.get('mode') === 'host' ? 'herr' : 'err', q.get('error') || '');
+  $('tConnect').onclick = () => mode('connect'); $('tHost').onclick = () => mode('host');
+  $('pick').onclick = async () => { const f = await window.desk.pickFolder('Where should Rolling Desk save recordings?'); if (f) $('folder').value = f; };
+  $('spick').onclick = async () => { const f = await window.desk.pickFolder('Where should your studio keep its shows and recordings?'); if (f) $('sfolder').value = f; };
   $('f').onsubmit = async e => {
-    e.preventDefault(); showErr(''); $('go').disabled = true; $('go').textContent = 'Connecting…';
+    e.preventDefault(); showErr('err', ''); $('go').disabled = true; $('go').textContent = 'Connecting…';
     const r = await window.desk.connect($('link').value, $('folder').value);
-    if (r && r.error) { showErr(r.error); $('go').disabled = false; $('go').textContent = 'Connect'; }
+    if (r && r.error) { showErr('err', r.error); $('go').disabled = false; $('go').textContent = 'Connect'; }
+  };
+  $('h').onsubmit = async e => {
+    e.preventDefault(); showErr('herr', ''); $('hgo').disabled = true; $('hgo').textContent = 'Starting…';
+    const r = await window.desk.host($('sfolder').value);
+    if (r && r.error) { showErr('herr', r.error); $('hgo').disabled = false; $('hgo').textContent = 'Start my studio'; }
   };
 </script>
 </body>

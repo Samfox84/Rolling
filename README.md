@@ -24,7 +24,7 @@ Version: see [CHANGELOG.md](CHANGELOG.md). Licence: [GNU AGPL-3.0](LICENSE) — 
 - **Chapters** from markers, **episode numbers and titles** in file names, progress bars for everything.
 - **Control room** — the host can run the show without being on camera.
 
-**🖥 Rolling Desk app (Mac + Linux)** — the producer's desktop app: your studio and Console in their own window, and every recording saved on your own computer too (live full-quality copy while recording, every finished file when ready). See [desk/README.md](desk/README.md).
+**🖥 Rolling Desk app (Mac, Windows, Linux)** — the producer's desktop app: your studio and Console in their own window, and every recording saved on your own computer too (live full-quality copy while recording, every finished file when ready). **No server? It can host the whole studio itself** and give guests a free internet link. See [desk/README.md](desk/README.md).
 
 **🎛 Console (control room)** — a full-screen audio mixing desk: per-person low cut, noise gate, 3-band EQ, compressor, pan, fader with peak-hold, mute/solo, talk and cue; live EBU loudness of your mix against −16/−23 LUFS with a limiter light; **Auto level**, **Auto mix** (gain sharing) and **scenes A/B/C**; a big **ON AIR** key; full keyboard control. Your moves and settings are baked into the stereo Producer mix and remembered per person.
 - **Soundboard (F1–F12):** jingles, stings, ads and music beds that everyone hears live; beds loop and dip under speech. Recorded as its own track and mixed into the Producer mix.

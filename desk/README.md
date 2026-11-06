@@ -25,9 +25,18 @@ The Mac app isn't signed by Apple (that costs £79 a year). The first time you o
 xattr -dr com.apple.quarantine "/Applications/Rolling Desk.app"
 ```
 
+## Host it on this computer (no server)
+Don't have a server? On the start screen choose **Host it on this computer** and press **Start my studio**. Rolling Desk runs the whole studio itself: the dashboard, the Console, recording, the finished files and transcripts — the same as on a server.
+- **The guest link** is a free Cloudflare address (like `something.trycloudflare.com`) made when you start. It's new each time, so send it out after you start. Your window's title shows it, and **File › Copy the guest link address** copies it. The dashboard and the studio's **Copy guest link** use it automatically.
+- **Everything is saved in your studio folder** (default `~/Rolling Studio`, change it on the start screen). About 4 GB per person per hour.
+- **Keep the computer on, awake and online** until the files are ready. Rolling Desk stops it sleeping while hosting, and asks before you close it if anyone's recording, in the studio, or the files aren't finished.
+- **If the internet drops,** the call drops but nothing is lost — everyone's recording is kept in their browser and uploads when they're back. If the guest link has to be remade, the app tells you the new one.
+- Included in the app: ffmpeg, the Cloudflare tunnel program (`cloudflared`), and the transcript engine (whisper.cpp) with its English speech model. Nothing else to install.
+- Quick links have no uptime promise from Cloudflare; for a regular show, a server (like Steve's) is still the steadiest setup.
+
 ## Updates
 The app **updates itself**. It checks GitHub for a new version when it starts and every 6 hours (or **Check for updates…** in the menu). It downloads the new version, checks its fingerprint against the Release's `SHA256SUMS.txt`, and asks you to restart — never while you're recording or still saving. If anything goes wrong while swapping, the old version is put back.
-- Works for the Mac app and the Linux AppImage. The `.deb` can't replace itself, so it tells you there's a new version and opens the download page.
+- Works for the Mac app and the Linux AppImage. Windows and the `.deb` can't replace themselves yet, so they tell you there's a new version and open the download page.
 - Needs the Rolling project on GitHub to be **public** (GitHub doesn't show releases of private projects without signing in).
 
 ## Use

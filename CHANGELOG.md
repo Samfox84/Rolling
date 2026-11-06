@@ -3,6 +3,18 @@
 Rolling is pre-release, so versions now start at 0.x. Each earlier version is shown with its old 1.x number
 (1.0.0 → 0.1.0 … 1.6.0 → 0.7.0). The desktop app, Rolling Desk, has its own numbers, starting at 0.1.0.
 
+## Rolling Desk 0.2.0 — host it on this computer (no server)
+- New choice on the start screen: **Host it on this computer.** The app runs the whole studio itself and makes a free
+  internet link for guests (a Cloudflare quick tunnel). Everything works as on a server — Console, recordings, files,
+  transcripts. ffmpeg, the tunnel and the transcript engine (with its English model) are included
+- **Windows version** (installer), alongside Mac (Intel and Apple Silicon) and Linux
+- Studio pages now show guest links with the studio's public address when it has one (the hosted app's tunnel)
+- The studio stops by itself if Rolling Desk closes, and the app asks before closing during a show
+
+## 0.8.1
+- Fix: someone knocking to join now shows on top of the Console (it was hidden behind it)
+- Guest links on every page use the studio's public address when it has one (needed for Rolling Desk hosting)
+
 ## 0.8.0 — a fuller producer desk
 Researched what other podcast studios offer (Riverside, SquadCast, StreamYard, Zencastr, Cleanfeed, RØDECaster)
 and added what the Console was missing:

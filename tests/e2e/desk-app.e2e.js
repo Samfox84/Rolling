@@ -6,7 +6,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('fs');
 const path = require('path');
-const { startServer, login, waitFor, tmpDir } = require('../helpers');
+const { startServer, login, waitFor, tmpDir, FAKE_WHISPER } = require('../helpers');
 
 let pw = null, electronBin = null;
 try { pw = require('playwright'); electronBin = require('../../desk/node_modules/electron'); } catch (e) { /* skipped below */ }
@@ -71,5 +71,91 @@ test('Rolling Desk app: connect, Console, record, everything saved on this compu
     if (guestBrowser) await guestBrowser.close().catch(() => {});
     if (app) await app.close().catch(() => {});
     await srv.stop();
+  }
+});
+
+test('Rolling Desk app: host the whole studio on this computer (no server) — guest link, recording, transcript, safe close', { skip, timeout: 600000 }, async () => {
+  const home = tmpDir('desk-host-home'), studioFolder = path.join(tmpDir('desk-host'), 'Rolling Studio');
+  // the bundled tools, stood in for: real ffmpeg, the test transcript engine, and a pretend Cloudflare tunnel
+  const tools = tmpDir('desk-tools'), tunnelLog = path.join(tools, 'tunnel.log'), which = n => require('child_process').execFileSync('which', [n]).toString().trim();
+  fs.symlinkSync(which('ffmpeg'), path.join(tools, 'ffmpeg')); fs.symlinkSync(which('ffprobe'), path.join(tools, 'ffprobe'));
+  const fakeTunnel = path.join(__dirname, '..', 'fixtures', 'fake-cloudflared.js'); fs.chmodSync(fakeTunnel, 0o755); fs.chmodSync(FAKE_WHISPER, 0o755);
+  fs.symlinkSync(fakeTunnel, path.join(tools, 'cloudflared')); fs.symlinkSync(FAKE_WHISPER, path.join(tools, 'whisper-cli'));
+  fs.mkdirSync(path.join(tools, 'models')); fs.writeFileSync(path.join(tools, 'models', 'ggml-base.en.bin'), 'test');
+  const GUEST_LINK = 'https://rolling-test.trycloudflare.com';
+  let app, guestBrowser;
+  try {
+    app = await pw._electron.launch({ executablePath: electronBin, args: ['--no-sandbox', path.join(__dirname, '../../desk')],
+      env: { ...process.env, ROLLING_DESK_HOME: home, ROLLING_DESK_TOOLS: tools, FAKE_TUNNEL_LOG: tunnelLog, NO_EXTERNAL_CALLS: '1', ROOM_TONE_SECONDS: '3', LATE_REBUILD_SECONDS: '2', LIVE_TX_SECONDS: '1' } });
+    const logs = []; app.process().stderr.on('data', d => logs.push(String(d))); app.process().stdout.on('data', d => logs.push(String(d)));
+    // ---- the start screen: "Host it on this computer" ----
+    const start = await app.firstWindow();
+    await start.waitForSelector('#tHost');
+    await start.click('#tHost');
+    await start.evaluate(f => { document.getElementById('sfolder').value = f; }, studioFolder);
+    const [desk] = await Promise.all([app.waitForEvent('window'), start.click('#hgo')]);
+    const errors = []; desk.on('pageerror', e => errors.push(e.message));
+    // ---- signed in to its own dashboard by itself, and the dashboard shows the guest link ----
+    await desk.waitForSelector('#dash:not(.hidden)', { timeout: 60000 });
+    const tunnel = JSON.parse(fs.readFileSync(tunnelLog, 'utf8').trim().split('\n')[0]);
+    const local = tunnel.args[tunnel.args.indexOf('--url') + 1];
+    assert.match(local, /^http:\/\/127\.0\.0\.1:\d+$/, 'the tunnel points at the studio on this computer');
+    await waitFor(async () => (await (await fetch(local + '/api/info')).json()).link === GUEST_LINK, 10000, 200); // the studio is told its guest link
+    assert.match(await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].getTitle()), /hosting on this computer · guests: https:\/\/rolling-test\.trycloudflare\.com/);
+    await desk.fill('#newName', 'AOL Underground'); await desk.press('#newName', 'Enter');
+    await waitFor(async () => (await desk.$$eval('.linkbox input', els => els.map(e => e.value))).some(v => v.startsWith(GUEST_LINK + '/r/')), 15000);
+    // "Open studio as host" goes to the guest-link address — the app opens it on this computer instead
+    await desk.click('text=Open studio as host');
+    await desk.waitForURL(u => u.href.startsWith(local + '/r/'), { timeout: 15000 });
+    await desk.waitForSelector('#nameInput');
+    await desk.fill('#nameInput', 'Sam'); await desk.click('#controlBtn');
+    await desk.waitForSelector('#console:not(.hidden)');
+    // the room's "copy guest link" gives the internet address, not this computer's
+    assert.equal(await desk.evaluate(() => Rolling.linkBase()), GUEST_LINK);
+
+    // ---- a guest joins (here straight to this computer, standing in for the tunnel) and we record ----
+    const roomId = new URL(desk.url()).pathname.split('/').pop();
+    guestBrowser = await pw.chromium.launch({ args: ['--use-fake-device-for-media-stream', '--use-fake-ui-for-media-stream'] });
+    const gp = await (await guestBrowser.newContext({ permissions: ['camera', 'microphone'] })).newPage();
+    await gp.goto(`${local}/r/${roomId}`); await gp.fill('#nameInput', 'Steve'); await gp.click('#enableBtn');
+    await gp.waitForSelector('#joinBtn:not([disabled])'); await gp.click('#joinBtn');
+    await desk.waitForSelector('.knock button.primary', { timeout: 20000 }).then(b => b.click());
+    await gp.waitForSelector('#studio:not(.hidden)');
+    await desk.waitForSelector('#conStrips .cstrip');
+    await desk.click('#conRec'); await desk.click('#modalAlt');
+    await desk.waitForSelector('#conRec.live');
+    await new Promise(r => setTimeout(r, 6000));
+    // closing now asks first, and says why — and "keep running" keeps it running
+    await app.evaluate(({ dialog }) => { global.__asked = []; dialog.showMessageBoxSync = (w, o) => { global.__asked.push((o || w).message); return 0; }; });
+    await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].close());
+    await waitFor(() => app.evaluate(() => global.__asked.length), 10000);
+    assert.match((await app.evaluate(() => global.__asked))[0], /recording in AOL Underground/);
+    assert.equal((await fetch(local + '/api/info')).ok, true, 'still running');
+    await desk.click('#conRec'); await desk.click('#modalYes');
+
+    // ---- the take is made on this computer: files and transcript in the studio folder ----
+    const roomDir = path.join(studioFolder, 'rooms', roomId);
+    const takeJson = await waitFor(() => {
+      const takes = path.join(roomDir, 'takes'); if (!fs.existsSync(takes)) return null;
+      const t = fs.readdirSync(takes)[0], f = t && path.join(takes, t, 'take.json');
+      const j = f && fs.existsSync(f) && JSON.parse(fs.readFileSync(f, 'utf8'));
+      return j && j.status === 'ready' && j;
+    }, 240000, 1000);
+    const out = path.join(roomDir, 'takes', takeJson.id, 'out');
+    const files = fs.readdirSync(out);
+    for (const want of [/Steve.*\.wav$/, /Producer mix/, /Transcript/]) assert.ok(files.some(f => want.test(f)), `${want} in ${files.join(', ')}`);
+
+    // ---- close for real: the studio and the tunnel both stop ----
+    await app.evaluate(({ dialog }) => { dialog.showMessageBoxSync = () => 1; });
+    const exited = new Promise(r => app.process().once('exit', r));
+    await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].close());
+    await exited; app = null;
+    await waitFor(async () => { try { await fetch(local + '/api/info', { signal: AbortSignal.timeout(1000) }); return false; } catch { return true; } }, 10000);
+    await waitFor(() => { try { process.kill(tunnel.pid, 0); return false; } catch { return true; } }, 10000);
+    assert.deepEqual(errors, [], 'no errors in the studio page');
+    assert.equal(logs.join('').match(/\[error\]/g), null, `app log: ${logs.join('')}`);
+  } finally {
+    if (guestBrowser) await guestBrowser.close().catch(() => {});
+    if (app) { await app.evaluate(({ dialog }) => { dialog.showMessageBoxSync = () => 1; }).catch(() => {}); await app.close().catch(() => {}); } // a failed test mustn't hang on "stop the studio?"
   }
 });

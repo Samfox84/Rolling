@@ -22,7 +22,7 @@ const createTranscriber = require('./transcribe');
 let nodemailer = null;
 try { nodemailer = require('nodemailer'); } catch { /* email optional */ }
 
-const VERSION = '0.8.0';
+const VERSION = '0.8.1';
 
 // ---------- settings (from .env next to this file) ----------
 (function loadEnv() {
@@ -103,6 +103,19 @@ const settings = (() => {
     sessionGen: s.sessionGen || 0,  // bumped on password change so old logins stop working
   };
 })();
+// Rolling Desk "host it on this computer": the app tells the studio its public internet address (a Cloudflare
+// tunnel) — it can change while running, so links on every page come from here, not from the address bar
+let linkBase = (process.env.ROLLING_PUBLIC_URL || '').replace(/\/+$/, '');
+const validLink = u => /^https:\/\/[a-z0-9.-]+(:\d+)?$/i.test(u);
+if (linkBase && !validLink(linkBase)) { log.warn('config', `ROLLING_PUBLIC_URL ${linkBase} isn't an https address — ignored`); linkBase = ''; }
+if (linkBase) settings.publicUrl = linkBase;
+if (process.send) process.on('disconnect', () => { log.warn('config', 'Rolling Desk closed — stopping the studio'); process.exit(0); }); // never left running on its own
+if (process.send) process.on('message', m => {
+  if (!m || typeof m.publicUrl !== 'string') return;
+  const u = m.publicUrl.replace(/\/+$/, '');
+  if (!validLink(u)) return log.warn('config', `ignored a public address that isn't https: ${u}`);
+  linkBase = u; settings.publicUrl = u; log.info('config', `guests reach this studio at ${u}`);
+});
 function saveSettings() { writeJSON(SETTINGS_FILE, settings); try { fs.chmodSync(SETTINGS_FILE, 0o600); } catch (e) { log.warn('settings', 'could not make settings.json private', e); } }
 
 const transcriber = createTranscriber({ settings, FFMPEG, workDir: path.join(DATA_DIR, '.work', 'transcribe'), takeDir: (r, t) => takeDir(r, t), saveTake: (t, now) => saveTake(t, now) });
@@ -884,7 +897,7 @@ const page = f => (req, res) => res.type('html').send(fs.readFileSync(path.join(
 app.get('/', page('index.html'));
 app.get('/r/:id', page('room.html'));
 app.get('/m/:id', page('manage.html'));
-app.get('/api/info', (req, res) => res.json({ name: STUDIO_NAME, admin: isAdmin(req), maxPeople: MAX_PEOPLE, version: VERSION }));
+app.get('/api/info', (req, res) => res.json({ name: STUDIO_NAME, admin: isAdmin(req), maxPeople: MAX_PEOPLE, version: VERSION, link: linkBase }));
 
 // connection test (used by the lobby)
 const SPEED_BUF = crypto.randomBytes(4 * 1024 * 1024);

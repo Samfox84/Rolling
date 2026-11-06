@@ -1,15 +1,18 @@
 {
   "name": "rolling-desk",
   "productName": "Rolling Desk",
-  "version": "0.1.0",
-  "description": "The producer's desk for a Rolling studio: the audio Console, show control, and every recording saved on this computer too.",
+  "version": "0.2.0",
+  "description": "The producer's desk for a Rolling studio: connect to your studio server, or host the whole studio on this computer. The audio Console, show control, and every recording saved on this computer.",
   "main": "main.js",
   "author": "Sam Fox (made with Claude, Anthropic)",
   "license": "AGPL-3.0",
   "homepage": "https://github.com/Samfox84/Rolling",
   "scripts": {
     "start": "electron .",
-    "dist:mac": "electron-builder --mac dmg zip --x64 --arm64 --publish never",
+    "prepare:studio": "node scripts/prepare-studio.js",
+    "tools": "node scripts/fetch-tools.js",
+    "dist:mac": "electron-builder --mac dmg zip --publish never",
+    "dist:win": "electron-builder --win nsis --x64 --publish never",
     "dist:linux": "electron-builder --linux AppImage deb --x64 --publish never"
   },
   "devDependencies": {
@@ -25,8 +28,9 @@
       "connect.html",
       "connect-preload.js",
       "mirror.js",
-      "icon.png",
-      "updater.js"
+      "updater.js",
+      "host.js",
+      "icon.png"
     ],
     "directories": {
       "output": "dist"
@@ -48,6 +52,27 @@
       "maintainer": "Sam Fox",
       "synopsis": "Producer's desk for a Rolling podcast studio"
     },
-    "publish": []
+    "publish": [],
+    "extraResources": [
+      {
+        "from": "build/studio",
+        "to": "studio"
+      },
+      {
+        "from": "vendor/tools",
+        "to": "tools"
+      }
+    ],
+    "win": {
+      "icon": "icon.png",
+      "target": [
+        "nsis"
+      ]
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "perMachine": false
+    }
   }
 }
