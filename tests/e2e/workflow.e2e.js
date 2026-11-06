@@ -314,7 +314,8 @@ test('advanced producer: rundown + clock, desk, dropout, server crash mid-show, 
 
   // segment 3, then "Next" at the end says so, then stop the clock
   await new Promise(r => setTimeout(r, 3000));
-  await prod.p.click('.drawer-tabs [data-tab="rundown"]'); await prod.p.click('#rdNext'); segTc.push(await tcAtAction(prod));
+  if (!(await prod.p.isVisible('#rdNext'))) await prod.p.click('.drawer-tabs [data-tab="rundown"]'); // (clicking the open tab would close it)
+  await prod.p.click('#rdNext'); segTc.push(await tcAtAction(prod));
   await waitFor(async () => (await tcText(steve, 'segname')) === 'WRAP UP', 5000);
   await prod.p.click('#rdNext');
   await waitFor(async () => /last segment/.test(await prod.p.textContent('body')), 3000);
