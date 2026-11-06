@@ -308,6 +308,18 @@ body.console-open .studio { visibility: hidden; }
 .pm-nums div { display: flex; justify-content: space-between; } .pm-nums b { font-family: ui-monospace, monospace; }
 .rec-text { color: var(--rec); }
 .con-side { border-left: 1px solid #fff1; padding: 10px; overflow-y: auto; }
+/* soundboard */
+.pads { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 6px; margin-top: 6px; }
+.pad { position: relative; min-height: 54px; padding: 6px 6px 8px; border-radius: 8px; background: color-mix(in srgb, var(--c, #3b82f6) 35%, #1a1d22); border: 1px solid #fff2; color: #fff; text-align: left; overflow: hidden; }
+.pad .pk { position: absolute; top: 3px; right: 5px; font: 700 9px ui-monospace, monospace; opacity: .7; }
+.pad .pn { display: block; font-weight: 800; font-size: 12px; line-height: 1.2; padding-right: 16px; overflow: hidden; text-overflow: ellipsis; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
+.pad .pm { font-size: 10px; opacity: .75; }
+.pad .pp { position: absolute; left: 0; bottom: 0; height: 4px; width: 0; background: #fff; }
+.pad.playing { background: var(--c, #3b82f6); box-shadow: 0 0 0 2px #fff; }
+.pad.loading { opacity: .6; }
+.padrow { display: grid; grid-template-columns: 18px minmax(0, 1fr) 82px 70px 26px; gap: 4px; align-items: center; margin-top: 4px; }
+.padrow input[type=color] { width: 18px; height: 18px; padding: 0; border: 0; background: none; }
+.padrow input, .padrow select { margin: 0; padding: 4px; font-size: 12px; }
 @media (max-width: 1100px) { .con-main { grid-template-columns: minmax(0, 1fr) 170px; } .con-side { grid-column: 1 / -1; border-left: 0; border-top: 1px solid #fff1; max-height: 40vh; } }
 
 /* Rolling Desk app: local saving status */

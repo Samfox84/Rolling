@@ -179,6 +179,35 @@ function parseRms(stderr) {
   const m = String(stderr).match(/Overall[\s\S]*?RMS level dB:\s*(-?[\d.]+|-inf)/);
   return m && m[1] !== '-inf' ? parseFloat(m[1]) : null;
 }
+/**
+ * ffmpeg arguments that build the Soundboard track: every pad played, at its time and volume, looped beds cut where
+ * they were stopped (with a short fade), and beds dipped under the voices (sidechain from the voice mix) — as heard live.
+ *   events: [{ from, to (ms), vol (dB), mode, dur (s), duck }], fileOf(event) → pad WAV, voices = the voice mix
+ */
+function boardArgs(events, fileOf, voices, takeSecs, out) {
+  const inputs = [], f = [], beds = [], rest = [];
+  events.forEach((e, i) => {
+    inputs.push('-i', fileOf(e));
+    const len = Math.max(0.05, (e.to - e.from) / 1000), loop = e.mode === 'bed';
+    const fade = Math.min(0.3, len / 2), delay = Math.round(e.from);
+    f.push(`[${i}:a]aformat=sample_rates=48000:channel_layouts=stereo${loop ? ',aloop=loop=-1:size=2147483647' : ''},atrim=duration=${len.toFixed(3)},` +
+      `afade=t=out:st=${(len - fade).toFixed(3)}:d=${fade.toFixed(3)},volume=${num(e.vol, -60, 12, 0)}dB,adelay=${delay}|${delay}[p${i}]`);
+    (loop && e.duck !== false ? beds : rest).push(`[p${i}]`);
+  });
+  const v = events.length;
+  inputs.push('-i', voices);
+  const mixOf = (list, name) => (list.length > 1 ? `${list.join('')}amix=inputs=${list.length}:normalize=0:duration=longest[${name}]` : `${list[0]}anull[${name}]`);
+  const outs = [];
+  if (beds.length) {
+    f.push(mixOf(beds, 'beds'), `[${v}:a]aformat=sample_rates=48000:channel_layouts=stereo[key]`,
+      '[beds][key]sidechaincompress=threshold=0.02:ratio=6:attack=20:release=400:makeup=1[ducked]');
+    outs.push('[ducked]');
+  }
+  if (rest.length) { f.push(mixOf(rest, 'rest')); outs.push('[rest]'); }
+  f.push(`${outs.join('')}${outs.length > 1 ? `amix=inputs=${outs.length}:normalize=0:duration=longest,` : ''}apad=whole_dur=${takeSecs.toFixed(3)},atrim=duration=${takeSecs.toFixed(3)}[board]`);
+  return [...inputs, '-filter_complex', f.join(';'), '-map', '[board]', '-ar', '48000', '-c:a', 'pcm_s24le', out];
+}
+
 /** read ffmpeg's silencedetect results (written by ametadata) → [{ at: seconds, dur: seconds }] */
 function parsePauses(text) {
   const out = []; let start = null;
@@ -191,4 +220,4 @@ function parsePauses(text) {
 }
 function pauseFilter(seconds, file) { return `silencedetect=n=-45dB:d=${seconds},ametadata=mode=print:file='${file.replace(/\\/g, '/').replace(/'/g, '')}'`; }
 
-module.exports = { cfg, cleanFilter, cleanChannel, channelFilter, envelope, mixWithEnvelopes, parseRms, parsePauses, pauseFilter };
+module.exports = { cfg, cleanFilter, cleanChannel, channelFilter, boardArgs, envelope, mixWithEnvelopes, parseRms, parsePauses, pauseFilter };

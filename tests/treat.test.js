@@ -111,3 +111,24 @@ test('Console pan is baked into the stereo Producer mix (and EQ/compressor becom
   assert.deepEqual(treat.cleanChannel({ db: 99, pan: -7, low: 50, mute: 1 }), { db: 10, mute: true, pan: -1, hpf: false, low: 12, pres: 0, high: 0, comp: false });
   ffmpeg('-i', a, '-af', treat.channelFilter({ hpf: true, low: -3, pres: 4, high: 2, comp: true }), '-f', 'null', '-'); // ffmpeg accepts the chain
 });
+
+test('Soundboard track: pads at the right time and volume, beds looped and cut where stopped, dipped under the voices', () => {
+  const dir = tmpDir('board');
+  const bed = path.join(dir, 'bed.wav'), sting = path.join(dir, 'sting.wav'), voices = path.join(dir, 'voices.wav'), out = path.join(dir, 'board.wav');
+  ffmpeg('-f', 'lavfi', '-i', 'sine=f=220:d=2,volume=2.4', '-ar', '48000', '-ac', '2', '-c:a', 'pcm_s24le', bed);       // a 2 s loop (sine starts at 1/8 level)
+  ffmpeg('-f', 'lavfi', '-i', 'sine=f=880:d=1,volume=2.4', '-ar', '48000', '-ac', '2', '-c:a', 'pcm_s24le', sting);     // a 1 s jingle
+  // voices: silent 0-6 s, talking 6-9 s, silent after
+  ffmpeg('-f', 'lavfi', '-i', 'anullsrc=r=48000:cl=mono:d=6', '-f', 'lavfi', '-i', 'sine=f=300:d=3,volume=4', '-f', 'lavfi', '-i', 'anullsrc=r=48000:cl=mono:d=3',
+    '-filter_complex', '[0][1][2]concat=n=3:v=0:a=1', '-c:a', 'pcm_f32le', voices);
+  const events = [{ sid: 'bed', mode: 'bed', from: 1000, to: 11000, vol: 0, dur: 2 }, { sid: 'sting', mode: 'jingle', from: 4000, to: 5000, vol: -6, dur: 1 }];
+  execFileSync('ffmpeg', ['-hide_banner', '-loglevel', 'error', '-nostdin', '-y', ...treat.boardArgs(events, e => (e.sid === 'bed' ? bed : sting), voices, 12, out)]);
+  const d = parseFloat(execFileSync('ffprobe', ['-v', 'error', '-show_entries', 'format=duration', '-of', 'csv=p=0', out]).toString());
+  assert.ok(Math.abs(d - 12) < 0.05, `as long as the take: ${d}`);
+  assert.ok(rms(out, 0.1, 0.8) < -80, 'silent before the first pad');
+  const bedAlone = rms(out, 2.2, 1.2), bedUnderVoice = rms(out, 6.8, 1.8), bedAfter = rms(out, 9.8, 0.8);
+  assert.ok(bedAlone > -20, `bed plays (looped past its 2 s): ${bedAlone}`);
+  assert.ok(bedUnderVoice < bedAlone - 6, `bed dips under the voices: ${bedAlone} → ${bedUnderVoice}`);
+  assert.ok(bedAfter > bedUnderVoice + 4, `and comes back up: ${bedAfter}`);
+  assert.ok(rms(out, 11.3, 0.6) < -80, 'stopped at 11 s');
+  assert.ok(rms(out, 4.2, 0.6) > bedAlone, 'the jingle plays on top at 4 s');
+});

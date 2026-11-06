@@ -73,10 +73,11 @@ function editItems(t, markers, people) {
     items.push({ at: c.from / 1000, dur: (c.to - c.from) / 1000, label: `${g} — ${people[id] || 'someone'}`, group: g });
   }
   for (const p of t.pauses || []) items.push({ at: p.at, dur: p.dur, label: `Pause ${p.dur.toFixed(1)} s`, group: 'Long pause' });
+  for (const e of t.board || []) if (e.to != null) items.push({ at: e.from / 1000, dur: (e.to - e.from) / 1000, label: `${e.mode === 'bed' ? 'Music bed' : e.mode === 'effect' ? 'Effect' : 'Jingle'}: ${e.name}`, group: 'Soundboard' });
   return items.sort((a, b) => a.at - b.at);
 }
 function editList(items, title) {
-  const groups = ['Cut this', 'Retake', 'Great bit', 'Ad break', 'Segment', 'Marker', 'Cough', 'Talkback', 'Long pause'];
+  const groups = ['Cut this', 'Retake', 'Great bit', 'Ad break', 'Segment', 'Marker', 'Soundboard', 'Cough', 'Talkback', 'Long pause'];
   const lines = [`${title} — edit list`, 'Times are from the start of the recordings (the untouched and cleaned files). Coughs and talkback are already muted in the Producer mix.', ''];
   for (const g of groups) {
     const list = items.filter(i => i.group === g); if (!list.length) continue;

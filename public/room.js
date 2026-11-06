@@ -35,6 +35,10 @@ let monVol = 0.5;
 let chanMemory = {};                // the Console settings saved for each person's name (from the server)
 let mixBus = null;                  // control room: { program, monitor, out, meter } Web Audio buses
 let progLoud = null, progPeak = 0;  // the master meter
+let sounds = [];                    // soundboard pads for this show (hosts)
+let board = null;                   // control room: { bus, beds, dest } — played to everyone + metered + heard
+const padBuffers = new Map();       // pad id → decoded audio
+const playingPads = new Map();      // instance → { inst, pad, src, gain, started, dur }
 let coughing = false;               // my cough button is held: my live sound is muted (recording untouched)
 let talking = null;                 // host: peer id I'm doing talkback to
 let talkMic = null;                 // host in the control room: a mic just for talkback
@@ -560,6 +564,7 @@ function onMsg(m) {
       if (screenStream) wsSend({ t: 'screen', on: true, streamId: screenStream.id });
       rundown = m.rundown || []; segment = m.segment || null; renderRundown(); if (m.fps) fps = m.fps;
       chanMemory = m.channels || {};
+      if (m.sounds) { sounds = m.sounds; renderPads(); }
       $('#consoleBtn').classList.toggle('hidden', !(isHost && controlMode));
       if (window.rollingDesk && isHost && controlMode && !openConsole.opened) { openConsole.opened = true; openConsole(); } // the desktop app goes straight to the Console
       for (const id of m.coughing || []) { const p = peers.get(id); if (p) { p.coughing = true; p.tile.classList.add('coughing'); } }
@@ -579,7 +584,7 @@ function onMsg(m) {
     case 'peer-state': { const p = peers.get(m.id); if (p) { const before = new Set((p.state && p.state.warnings) || []); p.state = m.state; renderStatus(p); if (isHost) for (const w of p.state.warnings || []) if (!before.has(w)) { toast(`⚠ ${p.name}: ${WARN_TEXT[w] ? WARN_TEXT[w][1] : w}`, 5000); } } break; }
     case 'screen': { const p = peers.get(m.id); if (p) { p.screenId = m.on ? m.streamId : null; if (!m.on) removeScreenTile(p.id); else attachScreenIfReady(p); } break; }
     case 'signal': onSignal(m.from, m.data); break;
-    case 'recording': recStartedAt = m.on ? m.started : null; updateRecUI(); if (m.on) { toast(`Recording started (take ${m.n})`); markers.length = 0; build = null; sendAllRides(); if (m.nextEpisode) nextEpisode = m.nextEpisode; if (!m.roomTone) countdown(); recNode.port.postMessage({ cmd: 'resetLoud' }); } else { toast('Recording stopped — finishing uploads…', 3500); uploadPeak = 0; } break;
+    case 'recording': recStartedAt = m.on ? m.started : null; updateRecUI(); if (m.on) { toast(`Recording started (take ${m.n})`); markers.length = 0; build = null; sendAllRides(); for (const x of playingPads.values()) if (x.pad.mode === 'bed') sendBoard('start', x); if (m.nextEpisode) nextEpisode = m.nextEpisode; if (!m.roomTone) countdown(); recNode.port.postMessage({ cmd: 'resetLoud' }); } else { toast('Recording stopped — finishing uploads…', 3500); uploadPeak = 0; } break;
     case 'record-start': startLocal(m); break;
     case 'record-stop': if (recording && recording.take === m.take) stopLocal(recording); stopToneOverlay(true); break;
     case 'roomtone': startToneOverlay(m); break;
@@ -593,9 +598,10 @@ function onMsg(m) {
     case 'tx': txLive = m; break;
     case 'cough': { const p = peers.get(m.id); if (p) { p.coughing = m.on; if (p.tile) p.tile.classList.toggle('coughing', m.on); } break; }
     case 'cue': showCue(m.text, m.from); break;
-    case 'talk': { const p = peers.get(m.from); $('#talkName').textContent = m.name || (p && p.name) || 'The host'; $('#talkIn').classList.toggle('hidden', !m.on); if (m.on && p && p.talkEl) p.talkEl.play().catch(quiet('play talkback')); break; }
+    case 'talk': { const p = peers.get(m.from); $('#talkName').textContent = m.name || (p && p.name) || 'The host'; $('#talkIn').classList.toggle('hidden', !m.on); if (m.on && p && p.extraAudio) for (const el of Object.values(p.extraAudio)) el.play().catch(quiet('play talkback')); break; }
     case 'segment': segment = m.segment; renderRundown(); break;
     case 'rundown': rundown = m.rundown || []; renderRundown(); break;
+    case 'sounds': sounds = m.sounds || []; renderPads(); break;
   }
 }
 
@@ -621,6 +627,7 @@ function addPeer(info, initiator) {
   for (const tr of stream.getTracks()) { const snd = pc.addTrack(tr, stream); if (tr.kind === 'audio') p.mainAudio = snd; }
   if (!stream.getAudioTracks().length) p.mainAudio = pc.addTransceiver('audio', { direction: 'recvonly' }).sender;
   if (isHost) p.talkTr = pc.addTransceiver('audio', { direction: 'sendonly', streams: [talkStream] }); // private talkback channel (silent until used)
+  if (isHost && controlMode && ensureBoard()) p.boardTr = pc.addTransceiver(board.dest.stream.getAudioTracks()[0], { direction: 'sendonly', streams: [board.dest.stream] }); // the soundboard, heard by everyone
   if (!stream.getVideoTracks().length) pc.addTransceiver('video', { direction: 'recvonly' });
   if (screenStream) p.screenSender = pc.addTrack(screenStream.getVideoTracks()[0], screenStream);
   pc.ontrack = e => {
@@ -628,9 +635,10 @@ function addPeer(info, initiator) {
     p.streams.set(st.id, st);
     const isScreen = (p.screenId && st.id === p.screenId) || (e.track.kind === 'video' && p.camId && st.id !== p.camId);
     if (isScreen) { if (!p.screenId) p.screenId = st.id; showScreenTile(p.id, st, `${p.name}'s screen`); return; }
-    if (e.track.kind === 'audio' && p.camId && st.id !== p.camId) { // the host's talkback channel — heard by me only, never recorded
-      if (!p.talkEl) { p.talkEl = new Audio(); p.talkEl.autoplay = true; }
-      p.talkEl.srcObject = st; p.talkEl.play().catch(quiet('talkback autoplay'));
+    if (e.track.kind === 'audio' && p.camId && st.id !== p.camId) { // a host's talkback channel or soundboard — heard, never recorded
+      p.extraAudio = p.extraAudio || {};
+      const el = p.extraAudio[st.id] || (p.extraAudio[st.id] = Object.assign(new Audio(), { autoplay: true }));
+      el.srcObject = st; el.play().catch(quiet('talkback / soundboard autoplay'));
       return;
     }
     const v = p.tile.querySelector('video');
@@ -1158,6 +1166,109 @@ function renderConsole(force) {
   selectStrip(selected);
   applyConsole();
 }
+// ---------- soundboard (control room): pads → board bus → everyone (call), your headphones, the master meter ----------
+const dbGain = db => 10 ** (db / 20);
+function ensureBoard() {
+  if (board || !ensureMixBus()) return board;
+  const bus = ctx.createGain(), beds = ctx.createGain(), dest = ctx.createMediaStreamDestination();
+  beds.connect(bus); bus.connect(dest); bus.connect(mixBus.program); bus.connect(mixBus.monitor);
+  bus.gain.value = dbGain(Number($('#boardVol').value));
+  board = { bus, beds, dest };
+  return board;
+}
+async function padBuffer(pad) {
+  const key = pad.id + '/' + pad.dur;
+  if (!padBuffers.has(key)) padBuffers.set(key, (async () => {
+    const r = await fetch(`/api/rooms/${roomId}/sounds/${pad.id}?k=${encodeURIComponent(hostKey)}`, { signal: AbortSignal.timeout(60000) });
+    if (!r.ok) throw new Error(`couldn't load "${pad.name}" (${r.status})`);
+    return ctx.decodeAudioData(await r.arrayBuffer());
+  })().catch(e => { padBuffers.delete(key); throw e; }));
+  return padBuffers.get(key);
+}
+function sendBoard(ev, x) { wsSend({ t: 'board', ev, inst: x.inst, sid: x.pad.id, vol: x.pad.vol + Number($('#boardVol').value), duck: $('#duckOn').checked, at: serverNow() }); }
+async function togglePad(pad, el) {
+  if (!ensureBoard()) return toast('The soundboard needs the Console\'s audio — open the Console first');
+  const cur = [...playingPads.values()].find(x => x.pad.id === pad.id);
+  if (cur && pad.mode !== 'effect') return stopPad(cur.inst);       // jingles and beds: press again to stop
+  if (el) el.classList.add('loading');
+  let buf;
+  try { buf = await padBuffer(pad); } catch (e) { quiet('load pad')(e); return toast('⚠ ' + e.message, 5000); } finally { if (el) el.classList.remove('loading'); }
+  if (ctx.state !== 'running') await ctx.resume().catch(quiet('resume audio for soundboard'));
+  const src = ctx.createBufferSource(), gain = ctx.createGain();
+  src.buffer = buf; src.loop = pad.mode === 'bed';
+  gain.gain.value = dbGain(pad.vol);
+  src.connect(gain).connect(pad.mode === 'bed' && $('#duckOn').checked ? board.beds : board.bus);
+  const x = { inst: Math.random().toString(36).slice(2, 10), pad, src, gain, started: ctx.currentTime, dur: buf.duration };
+  playingPads.set(x.inst, x);
+  src.onended = () => { if (playingPads.delete(x.inst)) { sendBoard('stop', x); renderPadState(); } };
+  src.start();
+  sendBoard('start', x);
+  renderPadState();
+}
+function stopPad(inst) {
+  const x = playingPads.get(inst); if (!x) return;
+  playingPads.delete(inst);
+  x.gain.gain.setTargetAtTime(0, ctx.currentTime, 0.08); // short fade, no click
+  try { x.src.stop(ctx.currentTime + 0.35); } catch (e) { quiet('stop pad')(e); }
+  sendBoard('stop', x);
+  renderPadState();
+}
+function renderPads() {
+  const box = $('#pads'); if (!box) return;
+  box.innerHTML = sounds.length ? '' : '<p class="small-text muted" style="grid-column:1/-1;margin:4px 0">No sounds yet — press ✎ Edit pads to add jingles, ads and music beds.</p>';
+  sounds.forEach((pad, i) => {
+    const b = document.createElement('button');
+    b.className = 'pad'; b.dataset.id = pad.id; b.style.setProperty('--c', pad.color);
+    b.innerHTML = `<span class="pk">${i < 12 ? 'F' + (i + 1) : ''}</span><span class="pn"></span><span class="pm">${pad.mode === 'bed' ? '🎵 bed' : pad.mode === 'effect' ? '💥 effect' : '🔔 jingle'} · ${mmss(pad.dur * 1000)}</span><span class="pp"></span>`;
+    b.querySelector('.pn').textContent = pad.name;
+    b.onclick = () => togglePad(pad, b);
+    box.appendChild(b);
+  });
+  renderPadEditor(); renderPadState();
+}
+function renderPadState() {
+  for (const b of document.querySelectorAll('#pads .pad')) b.classList.toggle('playing', [...playingPads.values()].some(x => x.pad.id === b.dataset.id));
+}
+function renderPadEditor() {
+  const box = $('#padRows'); if (!box || box.contains(document.activeElement)) return;
+  box.innerHTML = '';
+  for (const pad of sounds) {
+    const row = document.createElement('div'); row.className = 'padrow';
+    row.innerHTML = `<input type="color" title="Colour"><input type="text" maxlength="40" title="Name"><select title="How it plays"><option value="jingle">Jingle</option><option value="bed">Bed</option><option value="effect">Effect</option></select><input type="range" min="-30" max="6" step="0.5" title="Volume"><button class="small ghost" title="Delete">✕</button>`;
+    const [col, name, mode, vol, del] = row.children;
+    col.value = pad.color; name.value = pad.name; mode.value = pad.mode; vol.value = pad.vol; vol.title = `Volume ${pad.vol} dB`;
+    const save = async () => {
+      const r = await api(`/api/rooms/${roomId}/sounds/${pad.id}?k=${encodeURIComponent(hostKey)}`, { json: { name: name.value, mode: mode.value, vol: Number(vol.value), color: col.value } });
+      if (!r.ok) toast('Couldn\'t save: ' + r.error);
+    };
+    for (const el of [col, name, mode, vol]) el.onchange = save;
+    del.onclick = async () => { const r = await api(`/api/rooms/${roomId}/sounds/${pad.id}?k=${encodeURIComponent(hostKey)}`, { method: 'DELETE' }); if (!r.ok) toast('Couldn\'t delete: ' + r.error); };
+    box.appendChild(row);
+  }
+}
+$('#padEdit').onclick = () => { $('#padEditor').classList.toggle('hidden'); renderPadEditor(); };
+$('#padFiles').onchange = async e => {
+  for (const f of e.target.files) {
+    toast(`Adding "${f.name}"…`);
+    try {
+      const r = await fetch(`/api/rooms/${roomId}/sounds?k=${encodeURIComponent(hostKey)}`, { method: 'POST', body: f, headers: { 'X-Filename': encodeURIComponent(f.name) }, signal: AbortSignal.timeout(5 * 60000) });
+      const j = await r.json(); if (!r.ok) throw new Error(j.error || r.status);
+    } catch (er) { quiet('add pad')(er); toast(`⚠ Couldn't add "${f.name}": ${er.message}`, 6000); }
+  }
+  e.target.value = '';
+};
+$('#padStopAll').onclick = () => { for (const inst of [...playingPads.keys()]) stopPad(inst); };
+$('#boardVol').oninput = () => { $('#boardVolTxt').textContent = `${$('#boardVol').value} dB`; if (board) board.bus.gain.setTargetAtTime(dbGain(Number($('#boardVol').value)), ctx.currentTime, 0.02); };
+setInterval(() => { // progress bars + music beds dipping under the voices (the Soundboard track does the same afterwards)
+  if (!board) return;
+  for (const b of document.querySelectorAll('#pads .pad')) {
+    const x = [...playingPads.values()].find(y => y.pad.id === b.dataset.id);
+    b.querySelector('.pp').style.width = x ? `${x.pad.mode === 'bed' ? 100 : Math.min(100, ((ctx.currentTime - x.started) / x.dur) * 100)}%` : '0';
+  }
+  const talking = [...peers.values()].some(p => !p.control && (p.level || 0) > 0.04);
+  board.beds.gain.setTargetAtTime($('#duckOn').checked && talking ? 0.25 : 1, ctx.currentTime, talking ? 0.02 : 0.4);
+}, 50);
+
 // ---------- Console from the keyboard (no hardware needed) ----------
 // ← → pick a channel · ↑ ↓ fader 1 dB (Shift: 0.25 dB) · 0 = 0 dB · X mute · S solo · Q low cut · W compressor · T hold to talk
 let selected = null;
@@ -1176,9 +1287,12 @@ function nudge(id, step) {
   stripChanged(id, true);
 }
 addEventListener('keydown', e => {
-  if ($('#console').classList.contains('hidden') || typing(e) || !selected) return;
-  const ids = [...document.querySelectorAll('#conStrips .cstrip')].map(el => el.dataset.id), i = ids.indexOf(selected), d = deskOf(selected);
+  if ($('#console').classList.contains('hidden') || typing(e)) return;
   const k = e.key, handled = () => e.preventDefault();
+  const fk = /^F([1-9]|1[0-2])$/.exec(k);
+  if (fk && !e.repeat) { handled(); const pad = sounds[Number(fk[1]) - 1]; if (pad) togglePad(pad, document.querySelector(`#pads .pad[data-id="${pad.id}"]`)); return; }
+  if (!selected) return;
+  const ids = [...document.querySelectorAll('#conStrips .cstrip')].map(el => el.dataset.id), i = ids.indexOf(selected), d = deskOf(selected);
   if (k === 'ArrowRight' || k === 'ArrowLeft') { handled(); selectStrip(ids[(i + (k === 'ArrowRight' ? 1 : -1) + ids.length) % ids.length]); }
   else if (k === 'ArrowUp' || k === 'ArrowDown') { handled(); nudge(selected, (k === 'ArrowUp' ? 1 : -1) * (e.shiftKey ? 0.25 : 1)); }
   else if (k === '0') { handled(); d.db = 0; stripChanged(selected, true); }

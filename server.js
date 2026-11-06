@@ -258,6 +258,7 @@ function stopRecording(roomId, lr) {
   t.stopped = Date.now();
   // anyone still holding the cough button: close it at the end of the take
   for (const list of Object.values(t.coughs || {})) for (const c of list) if (c.to == null) c.to = t.stopped - t.started;
+  for (const ev of t.board || []) if (ev.to == null) ev.to = ev.mode === 'bed' ? t.stopped - t.started : Math.min(t.stopped - t.started, ev.from + ev.dur * 1000);
   t.status = 'waiting';
   saveTake(t, true);
   broadcast(lr, { t: 'record-stop', take: t.id });
@@ -659,8 +660,8 @@ async function roomToneLevel(file) {
 }
 async function treatTakeUntraced(t, segs, out, add, assets, errors, { begin, finish, report, takeSecs }) {
   const c = settings.clean;
-  for (const o of t.outputs.filter(o => ['cleaned', 'producermix', 'roughmix'].includes(o.kind))) await fsp.rm(path.join(out, o.file), { force: true }).catch(e => log.warn('treat', `could not remove old ${o.file}`, e));
-  t.outputs = t.outputs.filter(o => !['cleaned', 'producermix', 'roughmix'].includes(o.kind));
+  for (const o of t.outputs.filter(o => ['cleaned', 'producermix', 'roughmix', 'soundboard'].includes(o.kind))) await fsp.rm(path.join(out, o.file), { force: true }).catch(e => log.warn('treat', `could not remove old ${o.file}`, e));
+  t.outputs = t.outputs.filter(o => !['cleaned', 'producermix', 'roughmix', 'soundboard'].includes(o.kind));
   t.pauses = [];
   const voices = t.outputs.filter(o => o.kind === 'audio' && fs.existsSync(path.join(out, o.file)));
   const sources = [], temps = [];
@@ -709,11 +710,22 @@ async function treatTakeUntraced(t, segs, out, add, assets, errors, { begin, fin
       await ff(['-i', rawMix, '-af', treat.pauseFilter(c.pauses, pausesTxt), '-f', 'null', '-']);
       t.pauses = treat.parsePauses(await fsp.readFile(pausesTxt, 'utf8').catch(e => { if (e.code === 'ENOENT') return ''; throw e; }));
     }
-    const parts = [assets.intro && assets.intro.path, rawMix, assets.outro && assets.outro.path].filter(Boolean);
+    // the soundboard as its own track (exactly what was played, beds dipped under the voices), then into the mix
+    let show = rawMix;
+    const board = (t.board || []).filter(e => e.to != null && fs.existsSync(path.join(takeDir(t.room, t.id), 'board', e.sid + '.wav')));
+    if (board.length) {
+      const boardFile = 'Soundboard.wav';
+      await ff(treat.boardArgs(board, e => path.join(takeDir(t.room, t.id), 'board', e.sid + '.wav'), rawMix, takeSecs, path.join(out, boardFile)), null, takeSecs);
+      add(boardFile, 'soundboard', 'Soundboard');
+      show = path.join(out, '.show-with-board.wav');
+      await ff(['-i', rawMix, '-i', path.join(out, boardFile), '-filter_complex', '[0:a]aformat=channel_layouts=stereo[v];[v][1:a]amix=inputs=2:normalize=0:duration=first[m]', '-map', '[m]', '-c:a', 'pcm_f32le', show], null, takeSecs);
+    }
+    const parts = [assets.intro && assets.intro.path, show, assets.outro && assets.outro.path].filter(Boolean);
     const file = `Producer mix${assets.intro || assets.outro ? ' (intro + show + outro)' : ''} -16 LUFS.wav`;
     const fc = parts.map((_, i) => `[${i}:a]aformat=sample_rates=48000:channel_layouts=stereo[a${i}]`).join(';') + ';' +
       parts.map((_, i) => `[a${i}]`).join('') + `concat=n=${parts.length}:v=0:a=1,loudnorm=I=-16:TP=-1:LRA=11,aresample=48000[out]`;
     await ff([...parts.flatMap(p => ['-i', p]), '-filter_complex', fc, '-map', '[out]', '-ar', '48000', '-c:a', 'pcm_s24le', path.join(out, file)], f => report(0.5 + f * 0.5), takeSecs + (assets.intro ? assets.intro.dur : 0) + (assets.outro ? assets.outro.dur : 0));
+    if (show !== rawMix) await fsp.rm(show, { force: true }).catch(log.ignore('treat', 'remove temp show mix'));
     add(file, 'producermix', 'Everyone');
   } catch (e) { errors.push(`Producer mix: ${e.message.slice(0, 300)}`); }
   finally {
@@ -760,6 +772,8 @@ async function buildDocsUntraced(t, room, out, add, assets) {
   const tracks = [];
   if (assets.intro) tracks.push({ kind: 'audio', name: 'Intro', file: 'Intro.wav', start: 0, dur: assets.intro.dur, channels: 2 });
   tracks.push(...audio);
+  const sb = t.outputs.find(o => o.kind === 'soundboard');
+  if (sb) tracks.push({ kind: 'audio', name: 'Soundboard', file: sb.file, start: introLen, dur: await dur(sb.file), channels: 2 });
   if (assets.outro) tracks.push({ kind: 'audio', name: 'Outro', file: 'Outro.wav', start: introLen + show, dur: assets.outro.dur, channels: 2 });
   if (!audio.length) return;
   const sessMarkers = markers.map(m => ({ label: m.label, at: introLen + m.at / 1000 }));
@@ -965,7 +979,7 @@ function takeSummary(t) {
 function cleanRundown(list) { return list.slice(0, 40).map(x => ({ name: cleanText(x && x.name, 60) || 'Segment', mins: Math.max(0, Math.min(600, Math.round((Number(x && x.mins) || 0) * 10) / 10)) })); }
 function roomSummary(r) {
   const lr = live.get(r.id);
-  return { id: r.id, name: r.name, created: r.created, hostKey: r.hostKey, waitingRoom: r.waitingRoom !== false, notifyEmail: r.notifyEmail || '', assets: r.assets || {}, lastEpisode: r.lastEpisode || 0, rundown: r.rundown || [],
+  return { id: r.id, name: r.name, created: r.created, hostKey: r.hostKey, waitingRoom: r.waitingRoom !== false, notifyEmail: r.notifyEmail || '', assets: r.assets || {}, lastEpisode: r.lastEpisode || 0, rundown: r.rundown || [], sounds: r.sounds || [],
     online: lr ? [...lr.peers.values()].map(p => p.name) : [], recording: !!(lr && lr.take), takes: listTakes(r.id).map(takeSummary) };
 }
 
@@ -1049,6 +1063,60 @@ app.delete('/api/rooms/:id/asset/:kind', async (req, res) => {
   await fsp.rm(path.join(roomDir(r.id), 'assets', path.basename(req.params.kind) + '.wav'), { force: true });
   saveRoom(r); res.json(roomSummary(r));
 });
+// ---------- soundboard pads (per show): jingles, beds, effects — played live from the Console ----------
+const PAD_MODES = ['jingle', 'bed', 'effect'];
+const padFile = (roomId, sid) => path.join(roomDir(roomId), 'assets', 'sounds', path.basename(sid) + '.wav');
+function cleanPad(p, old = {}) {
+  const mode = PAD_MODES.includes(p.mode) ? p.mode : old.mode || 'jingle';
+  const vol = Number.isFinite(+p.vol) ? Math.max(-30, Math.min(6, Math.round(+p.vol * 2) / 2)) : old.vol || 0;
+  const color = /^#[0-9a-f]{6}$/i.test(p.color || '') ? p.color : old.color || '#3b82f6';
+  return { ...old, name: cleanText(p.name, 40) || old.name || 'Sound', mode, vol, color };
+}
+app.post('/api/rooms/:id/sounds', express.raw({ type: () => true, limit: '200mb' }), async (req, res) => {
+  const r = loadRoom(req.params.id);
+  if (!canManage(req, r)) return res.status(403).json({ error: 'Not allowed' });
+  if (!Buffer.isBuffer(req.body) || !req.body.length) return res.status(400).json({ error: 'No file' });
+  r.sounds = r.sounds || [];
+  if (r.sounds.length >= 24) return res.status(400).json({ error: 'The soundboard is full (24 pads) — delete one first' });
+  const sid = rid(8), dest = padFile(r.id, sid), tmp = dest + '.upload';
+  await fsp.mkdir(path.dirname(dest), { recursive: true });
+  try {
+    await fsp.writeFile(tmp, req.body);
+    await ff(['-i', tmp, '-vn', '-ar', '48000', '-ac', '2', '-c:a', 'pcm_s24le', dest]);
+    const dur = parseFloat(await probe(dest, 'format=duration')) || 0;
+    if (!dur) throw new Error('empty');
+    const name = cleanText(decodeURIComponent(req.headers['x-filename'] || 'Sound'), 80).replace(/\.[a-z0-9]{2,4}$/i, '');
+    const pad = { id: sid, dur: +dur.toFixed(2), ...cleanPad({ name, mode: dur > 45 ? 'bed' : 'jingle' }) };
+    r.sounds.push(pad); saveRoom(r);
+    const lr = live.get(r.id); if (lr) toHosts(lr, { t: 'sounds', sounds: r.sounds });
+    res.json(pad);
+  } catch (e) { await fsp.rm(dest, { force: true }); res.status(400).json({ error: 'That file could not be read as audio.' }); }
+  finally { fsp.rm(tmp, { force: true }).catch(log.ignore('sounds', 'remove upload temp file')); }
+});
+app.post('/api/rooms/:id/sounds/:sid', express.json(), (req, res) => {
+  const r = loadRoom(req.params.id);
+  if (!canManage(req, r)) return res.status(403).json({ error: 'Not allowed' });
+  const i = (r.sounds || []).findIndex(p => p.id === req.params.sid);
+  if (i < 0) return res.status(404).json({ error: 'Not found' });
+  r.sounds[i] = cleanPad(req.body || {}, r.sounds[i]); saveRoom(r);
+  const lr = live.get(r.id); if (lr) toHosts(lr, { t: 'sounds', sounds: r.sounds });
+  res.json(r.sounds[i]);
+});
+app.delete('/api/rooms/:id/sounds/:sid', async (req, res) => {
+  const r = loadRoom(req.params.id);
+  if (!canManage(req, r)) return res.status(403).json({ error: 'Not allowed' });
+  r.sounds = (r.sounds || []).filter(p => p.id !== req.params.sid); saveRoom(r);
+  await fsp.rm(padFile(r.id, req.params.sid), { force: true });
+  const lr = live.get(r.id); if (lr) toHosts(lr, { t: 'sounds', sounds: r.sounds });
+  res.json({ ok: true });
+});
+app.get('/api/rooms/:id/sounds/:sid', (req, res) => {
+  const r = loadRoom(req.params.id);
+  if (!canManage(req, r)) return res.status(403).json({ error: 'Not allowed' });
+  if (!(r.sounds || []).some(p => p.id === req.params.sid)) return res.status(404).json({ error: 'Not found' });
+  res.sendFile(padFile(r.id, req.params.sid));
+});
+
 // rename / delete markers, then rebuild only the documents (fast)
 app.post('/api/rooms/:id/takes/:take/markers', express.json(), (req, res) => {
   const r = loadRoom(req.params.id);
@@ -1256,7 +1324,7 @@ wss.on('connection', ws => {
       peers: [...lr.peers.values()].filter(p => p !== peer).map(peerInfo),
       recording: t ? { take: t.id, started: t.started, n: t.n, markers: (t.markers || []).length } : null, nextEpisode: (room.lastEpisode || 0) + 1,
       roomToneSeconds: ROOM_TONE_SECONDS, roomTone: lr.roomTone && lr.roomTone.end > Date.now() ? lr.roomTone : null,
-      rundown: room.rundown || [], segment: lr.segment || null, fps: settings.fps, channels: peer.isHost ? room.channels || {} : undefined, coughing: [...lr.peers.values()].filter(p => p.coughing).map(p => p.id),
+      rundown: room.rundown || [], segment: lr.segment || null, fps: settings.fps, channels: peer.isHost ? room.channels || {} : undefined, sounds: peer.isHost ? room.sounds || [] : undefined, coughing: [...lr.peers.values()].filter(p => p.coughing).map(p => p.id),
       chat: lr.chat.slice(-100), waiting: peer.isHost ? [...lr.waiting.values()].map(w => ({ id: w.id, name: w.name })) : [],
       disk: peer.isHost ? await diskInfo() : null, gbPerPersonHour: GB_PER_PERSON_HOUR, minFreeGB: MIN_FREE_GB });
     if (t && !peer.control) {
@@ -1341,6 +1409,23 @@ wss.on('connection', ws => {
         if (room) { room.channels = room.channels || {}; room.channels[target.name] = st; saveRoom(room); }
         const t = lr.take && loadTake(roomId, lr.take);
         if (t) { t.channels = t.channels || {}; t.channels[target.clientId] = st; saveTake(t); }
+        return;
+      }
+      case 'board': { // the producer played / stopped a soundboard pad — recorded so the Soundboard track matches what was heard
+        const t = lr.take && loadTake(roomId, lr.take); if (!t) return;
+        const room = loadRoom(roomId);
+        t.board = t.board || [];
+        const at = Math.max(0, pressedAt(m.at) - t.started), inst = String(m.inst || '').slice(0, 20);
+        if (m.ev === 'start') {
+          const pad = (room.sounds || []).find(p => p.id === m.sid); if (!pad || !inst) return;
+          // keep a copy with the take, so editing or deleting the pad later never changes this recording
+          const copy = path.join(takeDir(roomId, t.id), 'board', pad.id + '.wav');
+          if (!fs.existsSync(copy)) { fs.mkdirSync(path.dirname(copy), { recursive: true }); fs.copyFileSync(padFile(roomId, pad.id), copy); }
+          t.board.push({ inst, sid: pad.id, name: pad.name, mode: pad.mode, vol: Number.isFinite(+m.vol) ? Math.max(-60, Math.min(12, +m.vol)) : pad.vol, from: at, to: null, dur: pad.dur, duck: m.duck !== false });
+        } else if (m.ev === 'stop') {
+          const ev = t.board.find(e => e.inst === inst && e.to == null); if (ev) ev.to = Math.max(ev.from + 50, at);
+        } else return;
+        saveTake(t);
         return;
       }
       case 'ride': { // the host moved a fader on the producer desk — baked into the Producer mix
