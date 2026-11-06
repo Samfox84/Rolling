@@ -4,3 +4,4 @@ recordings/
 .env.*
 *.tar.gz
 package-lock.json
+desk/dist/

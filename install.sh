@@ -55,7 +55,7 @@ echo "Using port $PORT"
 # ---------- 4. copy the app ----------
 say "Copying app to $APP_DIR"
 mkdir -p "$APP_DIR"
-rsync -a --delete --exclude node_modules --exclude recordings --exclude '.env*' --exclude '*.tar.gz' --exclude tests --exclude docs --exclude .git "$SRC/" "$APP_DIR/"
+rsync -a --delete --exclude node_modules --exclude recordings --exclude '.env*' --exclude '*.tar.gz' --exclude tests --exclude docs --exclude .git --exclude .github --exclude desk "$SRC/" "$APP_DIR/"
 
 # ---------- 5. settings (.env) — created once, then kept ----------
 if [ ! -f "$APP_DIR/.env" ]; then

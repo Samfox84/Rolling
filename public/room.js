@@ -561,6 +561,7 @@ function onMsg(m) {
       rundown = m.rundown || []; segment = m.segment || null; renderRundown(); if (m.fps) fps = m.fps;
       chanMemory = m.channels || {};
       $('#consoleBtn').classList.toggle('hidden', !(isHost && controlMode));
+      if (window.rollingDesk && isHost && controlMode && !openConsole.opened) { openConsole.opened = true; openConsole(); } // the desktop app goes straight to the Console
       for (const id of m.coughing || []) { const p = peers.get(id); if (p) { p.coughing = true; p.tile.classList.add('coughing'); } }
       renderDesk();
       updateRecUI(); sendState(true); layout();
@@ -1213,6 +1214,20 @@ setInterval(() => {
   $('#pmTP').classList.toggle('rec-text', Number.isFinite(L.TPmax) && L.TPmax > -1);
 }, 50);
 
+// ---------- Rolling Desk (the desktop app): recordings saved on this computer too ----------
+if (window.rollingDesk) {
+  $('#controlBtn').classList.add('primary'); // producers usually run the show from the control room
+  const icon = s => (s.lowDisk ? '⚠' : s.error ? '⚠' : s.busy ? '💾' : '✅');
+  window.rollingDesk.onStatus(s => {
+    for (const b of document.querySelectorAll('.deskSave')) {
+      b.classList.remove('hidden');
+      b.textContent = `${icon(s)} ${s.lowDisk ? 'Disk nearly full! ' : ''}${s.error ? 'Saving problem — ' + s.error : s.detail}`;
+      b.classList.toggle('warnc', !!(s.lowDisk || s.error));
+    }
+  });
+  document.addEventListener('click', e => { if (e.target.closest('.deskSave')) window.rollingDesk.openFolder(); });
+}
+
 // ---------- rundown + show clock ----------
 const mmss = ms => { const s = Math.round(Math.abs(ms) / 1000); return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`; };
 function renderRundown() {
@@ -1253,7 +1268,7 @@ function clockMarkup() {
     <div class="tcblock" data-tc="segblock"><div class="tclabel" data-tc="segname">SEGMENT</div><div class="tc" data-tc="seg">--:--:--:--</div><div class="tcleft" data-tc="left"></div></div>
     <div class="tcblock tod"><div class="tclabel">TIME OF DAY</div><div class="tc" data-tc="tod">--:--:--:--</div></div>`;
 }
-$('#tcBar').innerHTML = clockMarkup() + '<div class="tcbtns"><button class="small ghost" id="clockFull" title="Full-screen clock">⛶ Clock</button><button class="small ghost" id="clockPop" title="Open the clock in its own window — drag it to a second screen">↗ Pop out</button></div>';
+$('#tcBar').innerHTML = clockMarkup() + '<div class="tcbtns"><button class="small ghost deskSave hidden" title="Rolling Desk: recordings saved on this computer — click to open the folder"></button><button class="small ghost" id="clockFull" title="Full-screen clock">⛶ Clock</button><button class="small ghost" id="clockPop" title="Open the clock in its own window — drag it to a second screen">↗ Pop out</button></div>';
 $('#bigClock').innerHTML = clockMarkup();
 let pop = null;
 function renderClock(root) {

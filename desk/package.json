@@ -1,0 +1,52 @@
+{
+  "name": "rolling-desk",
+  "productName": "Rolling Desk",
+  "version": "1.0.0",
+  "description": "The producer's desk for a Rolling studio: the audio Console, show control, and every recording saved on this computer too.",
+  "main": "main.js",
+  "author": "Sam Fox (made with Claude, Anthropic)",
+  "license": "AGPL-3.0",
+  "homepage": "https://github.com/Samfox84/Rolling",
+  "scripts": {
+    "start": "electron .",
+    "dist:mac": "electron-builder --mac dmg zip --x64 --arm64 --publish never",
+    "dist:linux": "electron-builder --linux AppImage deb --x64 --publish never"
+  },
+  "devDependencies": {
+    "electron": "43.8.7",
+    "electron-builder": "26.18.0"
+  },
+  "build": {
+    "appId": "uk.co.simonmarriott.rolling-desk",
+    "productName": "Rolling Desk",
+    "files": [
+      "main.js",
+      "preload.js",
+      "connect.html",
+      "connect-preload.js",
+      "mirror.js",
+      "icon.png"
+    ],
+    "directories": {
+      "output": "dist"
+    },
+    "artifactName": "Rolling-Desk-${version}-${os}-${arch}.${ext}",
+    "mac": {
+      "category": "public.app-category.music",
+      "icon": "icon.png",
+      "minimumSystemVersion": "12.0",
+      "identity": "-",
+      "extendInfo": {
+        "NSMicrophoneUsageDescription": "Rolling Desk uses your microphone only when you hold Talkback to speak to someone on the show.",
+        "NSCameraUsageDescription": "Rolling Desk doesn't record you; the camera is only used if you join the show on camera."
+      }
+    },
+    "linux": {
+      "icon": "icon.png",
+      "category": "AudioVideo",
+      "maintainer": "Sam Fox",
+      "synopsis": "Producer's desk for a Rolling podcast studio"
+    },
+    "publish": []
+  }
+}

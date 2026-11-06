@@ -309,3 +309,7 @@ body.console-open .studio { visibility: hidden; }
 .rec-text { color: var(--rec); }
 .con-side { border-left: 1px solid #fff1; padding: 10px; overflow-y: auto; }
 @media (max-width: 1100px) { .con-main { grid-template-columns: minmax(0, 1fr) 170px; } .con-side { grid-column: 1 / -1; border-left: 0; border-top: 1px solid #fff1; max-height: 40vh; } }
+
+/* Rolling Desk app: local saving status */
+.deskSave { max-width: 360px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.deskSave.warnc { background: var(--warn); color: #000; }

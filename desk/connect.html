@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'unsafe-inline'; script-src 'unsafe-inline'">
+<title>Rolling Desk</title>
+<style>
+  :root { --bg: #0d0f12; --panel: #1a1d22; --text: #eee; --muted: #999; --accent: #3b82f6; --rec: #ef4444; --ok: #22c55e; }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text); font: 15px/1.5 system-ui, -apple-system, Segoe UI, sans-serif; padding: 32px; }
+  h1 { margin: 0 0 4px; font-size: 26px; } .sub { color: var(--muted); margin: 0 0 24px; }
+  label { display: block; font-weight: 700; margin: 18px 0 6px; }
+  input { width: 100%; padding: 12px; border-radius: 10px; border: 1px solid #fff2; background: var(--panel); color: var(--text); font: inherit; }
+  .row { display: flex; gap: 8px; align-items: center; } .row input { flex: 1; }
+  button { padding: 12px 18px; border-radius: 10px; border: 0; font: inherit; font-weight: 700; cursor: pointer; background: #fff1; color: var(--text); }
+  button.primary { background: var(--accent); color: #fff; width: 100%; margin-top: 26px; font-size: 17px; }
+  button:disabled { opacity: .6; cursor: default; }
+  .help { color: var(--muted); font-size: 13px; margin: 6px 0 0; }
+  .err { color: #fff; background: var(--rec); border-radius: 10px; padding: 10px 12px; margin-top: 18px; display: none; }
+</style>
+</head>
+<body>
+  <h1>🎛 Rolling Desk</h1>
+  <p class="sub">Your producer's desk. Mix the show, run it, and keep every recording on this computer too.</p>
+  <form id="f">
+    <label for="link">Your studio's host link</label>
+    <input id="link" placeholder="https://podcast.example.com/r/…?k=…" autocomplete="off" spellcheck="false" required>
+    <p class="help">On your Rolling dashboard, copy the link under <b>Open studio as host</b> for your show.</p>
+    <label for="folder">Save recordings on this computer in</label>
+    <div class="row"><input id="folder" readonly><button type="button" id="pick">Change…</button></div>
+    <p class="help">A live full-quality copy is saved while you record, then every finished file when the take is ready. About 4 GB per person per hour while recording.</p>
+    <div class="err" id="err"></div>
+    <button class="primary" id="go">Connect</button>
+  </form>
+<script>
+  const q = new URLSearchParams(location.search), $ = id => document.getElementById(id);
+  $('link').value = q.get('link') || ''; $('folder').value = q.get('folder') || '';
+  const showErr = m => { $('err').textContent = m; $('err').style.display = m ? 'block' : 'none'; };
+  showErr(q.get('error') || '');
+  $('pick').onclick = async () => { const f = await window.desk.pickFolder(); if (f) $('folder').value = f; };
+  $('f').onsubmit = async e => {
+    e.preventDefault(); showErr(''); $('go').disabled = true; $('go').textContent = 'Connecting…';
+    const r = await window.desk.connect($('link').value, $('folder').value);
+    if (r && r.error) { showErr(r.error); $('go').disabled = false; $('go').textContent = 'Connect'; }
+  };
+</script>
+</body>
+</html>

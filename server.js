@@ -22,7 +22,7 @@ const createTranscriber = require('./transcribe');
 let nodemailer = null;
 try { nodemailer = require('nodemailer'); } catch { /* email optional */ }
 
-const VERSION = '1.5.0';
+const VERSION = '1.6.0';
 
 // ---------- settings (from .env next to this file) ----------
 (function loadEnv() {
@@ -1143,11 +1143,65 @@ app.post('/up/:room/:take/:seg/audio', raw, async (req, res) => {
     if (!a.first || s0 < a.first.s) a.first = { s: s0, t: tt };
     if (!a.last || s0 > a.last.s) a.last = { s: s0, t: tt };
     a.end = Math.max(a.end, s0 + body.length / 3);
+    a.got = addRange(a.got || [], s0, s0 + body.length / 3); // which stretches have arrived, so "complete so far" is known
     saveTake(x.t);
     lateUpload(req.params.room, x.t);
     res.json({ ok: true });
   } catch (e) { log.error('upload', 'could not save an uploaded piece', e); res.status(500).json({ error: 'write failed' }); }
 });
+// ---------- live copy for the desktop app (read-only, host key): audio that's complete with no gaps, video pieces in order ----------
+// merge [s, e) into a sorted list of non-overlapping stretches
+function addRange(list, s, e) {
+  const out = []; let placed = false;
+  for (const [a, b] of list) {
+    if (b < s) out.push([a, b]);
+    else if (a > e) { if (!placed) { out.push([s, e]); placed = true; } out.push([a, b]); }
+    else { s = Math.min(s, a); e = Math.max(e, b); }
+  }
+  if (!placed) out.push([s, e]);
+  return out.slice(0, 2000);
+}
+const solidSamples = a => (a && a.got && a.got.length && a.got[0][0] === 0 ? a.got[0][1] : 0); // audio complete from the start
+const videoInOrder = new Map(); // take/seg → how many video pieces in a row are on disk (remembered, so each check is quick)
+function videoReady(t, s) {
+  const key = t.id + '/' + s.id, dir = path.join(takeDir(t.room, t.id), 'segs', s.id, 'video');
+  let n = videoInOrder.get(key) || 0;
+  while (n < ((s.video && s.video.chunks) || 0) && fs.existsSync(path.join(dir, String(n).padStart(6, '0') + '.part'))) n++;
+  videoInOrder.set(key, n);
+  return n;
+}
+function liveTake(req, res) {
+  const r = loadRoom(req.params.id);
+  if (!canManage(req, r)) { res.status(403).json({ error: 'Not allowed' }); return null; }
+  const t = loadTake(r.id, req.params.take);
+  if (!t) { res.status(404).json({ error: 'Not found' }); return null; }
+  return { r, t };
+}
+app.get('/api/rooms/:id/takes/:take/live', (req, res) => {
+  const x = liveTake(req, res); if (!x) return;
+  const { t } = x, parts = {};
+  const segs = Object.values(t.segs).sort((a, b) => a.created - b.created).map(s => {
+    parts[s.clientId] = (parts[s.clientId] || 0) + 1;
+    return {
+      id: s.id, person: s.name + (parts[s.clientId] > 1 ? ` (part ${parts[s.clientId]})` : ''), done: !!s.done,
+      audio: s.audio ? { rate: s.audio.rate, solid: solidSamples(s.audio), end: s.audio.end } : null,
+      video: s.video ? { mime: s.video.mime, ready: videoReady(t, s) } : null,
+    };
+  });
+  res.json({ status: t.status, started: t.started, segs, raw: !t.compacted });
+});
+app.get('/api/rooms/:id/takes/:take/live/:seg/audio', (req, res) => { // supports Range, so the app fetches only what's new
+  const x = liveTake(req, res); if (!x) return;
+  if (!x.t.segs[req.params.seg]) return res.status(404).json({ error: 'Not found' });
+  res.sendFile(path.join(takeDir(x.r.id, x.t.id), 'segs', req.params.seg, 'audio.pcm'), { headers: { 'Content-Type': 'application/octet-stream' } }, e => { if (e && !res.headersSent) res.status(404).json({ error: 'Not there (yet)' }); });
+});
+app.get('/api/rooms/:id/takes/:take/live/:seg/video/:i', (req, res) => {
+  const x = liveTake(req, res); if (!x) return;
+  const i = Number(req.params.i);
+  if (!x.t.segs[req.params.seg] || !Number.isInteger(i) || i < 0 || i > 999999) return res.status(404).json({ error: 'Not found' });
+  res.sendFile(path.join(takeDir(x.r.id, x.t.id), 'segs', req.params.seg, 'video', String(i).padStart(6, '0') + '.part'), e => { if (e && !res.headersSent) res.status(404).json({ error: 'Not there (yet)' }); });
+});
+
 app.post('/up/:room/:take/:seg/video', raw, async (req, res) => {
   const x = segFromReq(req, res); if (!x) return;
   const i = Number(req.query.i), r = Number(req.query.r || 0), screen = req.query.src === 'screen';

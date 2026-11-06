@@ -1,5 +1,19 @@
 # Changelog
 
+## 1.6.0 — Rolling Desk, the producer's desktop app (Mac + Linux)
+- **New `desk/` app** (Electron 43, the newest that runs on macOS 12 Monterey, so it works on a Mac Pro 2013):
+  paste your show's host link once, and the studio opens in its own window; join the control room and the
+  **audio Console opens by itself**
+- **Everything saved on this computer as well as the server:** a live full-quality copy while recording
+  (24-bit WAV of exactly what each browser recorded, plus camera; only audio that's arrived complete with no gaps),
+  then every finished file downloaded and size-checked when the take is ready; changed files re-fetched after
+  Clean again / marker edits; live copy removed once the finished files are safe
+- **Never closes too early:** warns while saving, keeps the computer awake while recording or saving, shows
+  "✅ safe to close"; disk-space warning below 2 GB
+- **Builds on GitHub:** push a tag `desk-vX.Y.Z` → Mac (Intel + Apple Silicon) .dmg and Linux AppImage + .deb on a Release
+- **Server:** new read-only live-copy endpoints for the app (host key): which audio is complete with no gaps, video
+  pieces in order. Nothing else changes; the app isn't installed on servers
+
 ## 1.5.0 — the audio Console (stage 1 of Rolling Desk)
 For the producer in the control room: **🎛 Console**, a full-screen audio mixing desk. Everyone is heard through it.
 - **Channel strip per person:** low cut (80 Hz), 3-band EQ (low 120 Hz · presence 2.5 kHz · high 8 kHz, ±12 dB),

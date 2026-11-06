@@ -24,6 +24,8 @@ Version: see [CHANGELOG.md](CHANGELOG.md). Licence: [GNU AGPL-3.0](LICENSE) — 
 - **Chapters** from markers, **episode numbers and titles** in file names, progress bars for everything.
 - **Control room** — the host can run the show without being on camera.
 
+**🖥 Rolling Desk app (Mac + Linux)** — the producer's desktop app: your studio and Console in their own window, and every recording saved on your own computer too (live full-quality copy while recording, every finished file when ready). See [desk/README.md](desk/README.md).
+
 **🎛 Console (control room)** — a full-screen audio mixing desk: per-person low cut, 3-band EQ, compressor, pan, fader, mute/solo, talk and cue; live EBU loudness of your mix against −16/−23 LUFS; full keyboard control. Your moves and settings are baked into the stereo Producer mix and remembered per person.
 
 **Producer desk (live)**
@@ -113,7 +115,7 @@ Each install gets its own random password, shown at the end of the install. Chan
 
 ## Tests
 ```bash
-npm test            # 57 tests: loudness meter accuracy, transcripts, documents, a full recording through the real server
+npm test            # 60 tests: loudness meter accuracy, transcripts, documents, a full recording through the real server
 npm run test:e2e    # real browsers: studio features + two whole-workflow runs (basic user, advanced producer with a
                     # dropout and a server crash) that download and open every file (needs: npm i -g playwright && npx playwright install chromium)
 ```

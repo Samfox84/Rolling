@@ -1,0 +1,62 @@
+# Builds the Rolling Desk desktop app for Mac (Intel + Apple Silicon) and Linux (AppImage + .deb).
+# Runs when you push a tag like desk-v1.0.0 (and makes a GitHub Release with the downloads),
+# or by hand: Actions › "Rolling Desk app" › Run workflow (downloads appear under the run's Artifacts).
+name: Rolling Desk app
+on:
+  push:
+    tags: ['desk-v*']
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-14
+            target: --mac dmg zip --x64 --arm64
+          - os: ubuntu-24.04
+            target: --linux AppImage deb --x64
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        working-directory: desk
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm install --no-audit --no-fund
+      - run: node --check main.js && node --check mirror.js && node --check preload.js
+      - run: npx electron-builder ${{ matrix.target }} --publish never
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rolling-desk-${{ matrix.os }}
+          path: |
+            desk/dist/*.dmg
+            desk/dist/*.zip
+            desk/dist/*.AppImage
+            desk/dist/*.deb
+          if-no-files-found: error
+  release:
+    if: startsWith(github.ref, 'refs/tags/desk-v')
+    needs: build
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: out
+          merge-multiple: true
+      - uses: softprops/action-gh-release@v2
+        with:
+          name: Rolling Desk ${{ github.ref_name }}
+          files: out/*
+          body: |
+            The producer's desk for a Rolling studio. Download the file for your computer:
+            - **Mac with Intel** (e.g. Mac Pro 2013, macOS 12 Monterey or newer): `…-mac-x64.dmg`
+            - **Mac with Apple Silicon** (M1 and newer): `…-mac-arm64.dmg`
+            - **Linux**: `…-x86_64.AppImage` (double-click) or `…-amd64.deb`
+            The Mac app isn't signed by Apple: the first time, right-click it and choose **Open**.
