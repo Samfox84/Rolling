@@ -15,7 +15,7 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: macos-14
+          - os: macos-latest   # GitHub's current Mac (Apple Silicon); also builds the Intel version
             target: --mac dmg zip --x64 --arm64
           - os: ubuntu-24.04
             target: --linux AppImage deb --x64
@@ -44,6 +44,7 @@ jobs:
           if-no-files-found: error
   release:
     needs: build
+    if: ${{ !cancelled() }}   # publish whatever built, so one platform's problem never blocks the other
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
@@ -53,6 +54,7 @@ jobs:
         with:
           path: out
           merge-multiple: true
+      - run: ls -la out && test -n "$(ls out)"
       - uses: softprops/action-gh-release@v2
         with:
           tag_name: desk-v${{ steps.v.outputs.version }}
