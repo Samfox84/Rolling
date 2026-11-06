@@ -10,7 +10,7 @@
   Clean again / marker edits; live copy removed once the finished files are safe
 - **Never closes too early:** warns while saving, keeps the computer awake while recording or saving, shows
   "✅ safe to close"; disk-space warning below 2 GB
-- **Builds on GitHub:** push a tag `desk-vX.Y.Z` → Mac (Intel + Apple Silicon) .dmg and Linux AppImage + .deb on a Release
+- **Builds on GitHub:** whenever the app changes on main → Mac (Intel + Apple Silicon) .dmg and Linux AppImage + .deb on a Release
 - **Server:** new read-only live-copy endpoints for the app (host key): which audio is complete with no gaps, video
   pieces in order. Nothing else changes; the app isn't installed on servers
 

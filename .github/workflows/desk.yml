@@ -1,10 +1,11 @@
-# Builds the Rolling Desk desktop app for Mac (Intel + Apple Silicon) and Linux (AppImage + .deb).
-# Runs when you push a tag like desk-v1.0.0 (and makes a GitHub Release with the downloads),
-# or by hand: Actions › "Rolling Desk app" › Run workflow (downloads appear under the run's Artifacts).
+# Builds the Rolling Desk desktop app for Mac (Intel + Apple Silicon) and Linux (AppImage + .deb) and puts the
+# downloads on a GitHub Release named after the app's version (desk/package.json). Runs by itself whenever the app
+# changes on main, or by hand: Actions › "Rolling Desk app" › Run workflow.
 name: Rolling Desk app
 on:
   push:
-    tags: ['desk-v*']
+    branches: [main]
+    paths: ['desk/**', '.github/workflows/desk.yml']
   workflow_dispatch:
 permissions:
   contents: write
@@ -42,17 +43,21 @@ jobs:
             desk/dist/*.deb
           if-no-files-found: error
   release:
-    if: startsWith(github.ref, 'refs/tags/desk-v')
     needs: build
     runs-on: ubuntu-24.04
     steps:
+      - uses: actions/checkout@v4
+      - id: v
+        run: echo "version=$(node -p "require('./desk/package.json').version")" >> "$GITHUB_OUTPUT"
       - uses: actions/download-artifact@v4
         with:
           path: out
           merge-multiple: true
       - uses: softprops/action-gh-release@v2
         with:
-          name: Rolling Desk ${{ github.ref_name }}
+          tag_name: desk-v${{ steps.v.outputs.version }}
+          target_commitish: ${{ github.sha }}
+          name: Rolling Desk ${{ steps.v.outputs.version }}
           files: out/*
           body: |
             The producer's desk for a Rolling studio. Download the file for your computer:

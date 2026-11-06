@@ -40,6 +40,6 @@ npm start               # run it
 npm run dist:mac        # on a Mac: Intel + Apple Silicon .dmg
 npm run dist:linux      # AppImage + .deb
 ```
-Pushing a tag like `desk-v1.0.0` makes GitHub build every version and attach them to a Release.
+Whenever the app changes on `main`, GitHub builds every version and puts them on a Release named after the version in `desk/package.json` (or run it by hand: Actions › Rolling Desk app › Run workflow).
 
 It uses Electron 43, the newest version that still runs on macOS 12 Monterey, so it works on a Mac Pro 2013.
