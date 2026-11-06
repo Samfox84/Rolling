@@ -565,6 +565,8 @@ function onMsg(m) {
       rundown = m.rundown || []; segment = m.segment || null; renderRundown(); if (m.fps) fps = m.fps;
       chanMemory = m.channels || {};
       if (m.sounds) { sounds = m.sounds; renderPads(); }
+      $('#greenIn').classList.toggle('hidden', !m.green);
+      if (!isHost && !controlMode) sendDevices();
       $('#consoleBtn').classList.toggle('hidden', !(isHost && controlMode));
       if (window.rollingDesk && isHost && controlMode && !openConsole.opened) { openConsole.opened = true; openConsole(); } // the desktop app goes straight to the Console
       for (const id of m.coughing || []) { const p = peers.get(id); if (p) { p.coughing = true; p.tile.classList.add('coughing'); } }
@@ -602,6 +604,16 @@ function onMsg(m) {
     case 'segment': segment = m.segment; renderRundown(); break;
     case 'rundown': rundown = m.rundown || []; renderRundown(); break;
     case 'sounds': sounds = m.sounds || []; renderPads(); break;
+    case 'onair': {
+      if (m.peers) { // me: out of the green room — meet everyone (I'm the newcomer, so I call them)
+        $('#greenIn').classList.add('hidden'); toast('🎙 You\'re on air!');
+        for (const info of m.peers) if (!peers.has(info.id)) addPeer(info, true);
+        layout();
+      } else { const p = peers.get(m.id); if (p) { p.green = false; renderGreen(p); renderConsole(true); } }
+      break;
+    }
+    case 'devices': { const p = peers.get(m.id); if (p) { p.devices = m.devices; renderConsole(); } break; }
+    case 'control': onControl(m); break;
   }
 }
 
@@ -626,6 +638,7 @@ function addPeer(info, initiator) {
   renderStatus(p);
   for (const tr of stream.getTracks()) { const snd = pc.addTrack(tr, stream); if (tr.kind === 'audio') p.mainAudio = snd; }
   if (!stream.getAudioTracks().length) p.mainAudio = pc.addTransceiver('audio', { direction: 'recvonly' }).sender;
+  p.green = !!info.green; p.devices = info.devices || null; renderGreen(p);
   if (isHost) p.talkTr = pc.addTransceiver('audio', { direction: 'sendonly', streams: [talkStream] }); // private talkback channel (silent until used)
   if (isHost && controlMode && ensureBoard()) p.boardTr = pc.addTransceiver(board.dest.stream.getAudioTracks()[0], { direction: 'sendonly', streams: [board.dest.stream] }); // the soundboard, heard by everyone
   if (!stream.getVideoTracks().length) pc.addTransceiver('video', { direction: 'recvonly' });
@@ -1115,12 +1128,12 @@ function renderConsole(force) {
   if (!controlMode || !isHost) return;
   const people = [...peers.values()].filter(p => !p.control);
   const box = $('#conStrips');
-  if (!force && [...box.children].map(c => c.dataset.id).join(',') === people.map(p => p.id).join(',')) return applyConsole();
+  if (!force && [...box.children].map(c => c.dataset.id + c.dataset.green).join(',') === people.map(p => p.id + !!p.green).join(',')) return applyConsole();
   box.innerHTML = ''; $('#conThumbs').innerHTML = '';
   if (!people.length) box.innerHTML = '<p class="muted" style="padding:20px">Nobody here yet — their channel appears as soon as they join.</p>';
   for (const p of people) {
     const d = deskOf(p.id), el = document.createElement('div');
-    el.className = 'cstrip'; el.dataset.id = p.id;
+    el.className = 'cstrip'; el.dataset.id = p.id; el.dataset.green = String(!!p.green);
     el.innerHTML = `<div class="cs-name"><span></span><span class="cs-cough hidden" title="Holding their cough button">🤧</span></div>
       <div class="cs-loud" title="Their short-term loudness (LUFS)">–</div>
       <button class="small cs-hpf" title="Low cut: removes rumble below 80 Hz">LOW CUT</button>
@@ -1130,7 +1143,9 @@ function renderConsole(force) {
       <div class="cs-faderwrap"><div class="cs-meter" title="Their live level (peak)"><span></span></div><input type="range" class="cs-fader" min="${FADER_MIN}" max="10" step="0.5" title="Double-click for 0 dB"></div>
       <div class="cs-db"></div>
       <div class="cs-btns"><button class="small cs-mute" title="Take them out of the mix (baked into the Producer mix)">MUTE</button><button class="small cs-solo" title="Hear only them — your headphones only">SOLO</button></div>
-      <div class="cs-btns"><button class="small ghost cs-talk" title="Hold to talk to them privately">TALK</button><button class="small ghost cs-cue" title="Send them a cue card">CUE</button></div>`;
+      <div class="cs-btns"><button class="small ghost cs-talk" title="Hold to talk to them privately">TALK</button><button class="small ghost cs-cue" title="Send them a cue card">CUE</button></div>
+      <div class="cs-help"><button class="small ghost cs-helpbtn" style="width:100%" title="Switch their microphone, headphones mode, mute">⚙ HELP</button></div>
+      ${p.green ? '<div class="cs-green">🟢 GREEN ROOM<button class="small primary cs-onair">Bring on air</button></div>' : ''}`;
     el.querySelector('.cs-name span').textContent = p.name;
     const q = c => el.querySelector(c);
     const show = () => {
@@ -1151,6 +1166,8 @@ function renderConsole(force) {
     q('.cs-mute').onclick = () => { d.cut = !d.cut; changed(true); };
     q('.cs-solo').onclick = () => { d.solo = !d.solo; show(); applyConsole(); };
     hold(q('.cs-talk'), () => { $('#talkTo').value = p.id; startTalk(); }, stopTalk);
+    q('.cs-helpbtn').onclick = () => helpBox(p, q('.cs-help'));
+    if (q('.cs-onair')) q('.cs-onair').onclick = () => wsSend({ t: 'onair', id: p.id });
     q('.cs-cue').onclick = () => { $('#cueTo').value = p.id; $('#cueText').focus(); toast(`Cue card for ${p.name}: tap one on the right, or type your own`); };
     el.addEventListener('pointerdown', () => selectStrip(p.id));
     q('.cs-fader').addEventListener('wheel', e => { e.preventDefault(); nudge(p.id, e.deltaY < 0 ? 0.5 : -0.5); }, { passive: false });
@@ -1473,13 +1490,72 @@ function addChat(m, quiet) {
 }
 $('#chatForm').onsubmit = e => { e.preventDefault(); const t = $('#chatInput').value.trim(); if (!t) return; wsSend({ t: 'chat', text: t }); $('#chatInput').value = ''; };
 
+// ---------- green room (hosts see who's waiting there, and bring them on air) ----------
+function renderGreen(p) {
+  if (!p.tile) return;
+  p.tile.classList.toggle('green', !!p.green);
+  let tag = p.tile.querySelector('.greentag');
+  if (p.green && isHost && !tag) {
+    tag = document.createElement('div'); tag.className = 'greentag';
+    tag.innerHTML = '🟢 Green room <button class="primary">Bring on air</button>';
+    tag.querySelector('button').onclick = () => wsSend({ t: 'onair', id: p.id });
+    p.tile.appendChild(tag);
+  }
+  if (!p.green && tag) tag.remove();
+}
+
+// ---------- remote help (producer → guest): switch their mic, headphones mode, mute ----------
+async function sendDevices() {
+  if (!stream || !joined || isHost) return;
+  try {
+    const devs = await navigator.mediaDevices.enumerateDevices(), at = stream.getAudioTracks()[0];
+    wsSend({ t: 'devices', mics: devs.filter(d => d.kind === 'audioinput').map((d, i) => ({ id: d.deviceId, label: d.label || `Microphone ${i + 1}` })),
+      mic: at ? at.getSettings().deviceId : '', headphones: $('#headphones').checked, micOn });
+  } catch (e) { quiet('list devices for the producer')(e); }
+}
+async function switchMic(deviceId) { // swap the microphone without leaving the call (the recording carries on)
+  if (deviceId) { if (![...$('#micSelect').options].some(o => o.value === deviceId)) await fillDevices(); $('#micSelect').value = deviceId; }
+  const s = await navigator.mediaDevices.getUserMedia({ audio: audioConstraints(true) });
+  const nt = s.getAudioTracks()[0];
+  for (const old of stream.getAudioTracks()) { old.onended = null; stream.removeTrack(old); old.stop(); }
+  nt.enabled = micOn; stream.addTrack(nt);
+  connectMic(); updateAudioSenders(); sendDevices();
+}
+async function onControl(m) {
+  try {
+    if (m.action === 'mic') { await switchMic(m.value); toast(`🎙 ${m.from} switched your microphone to ${$('#micSelect').selectedOptions[0] ? $('#micSelect').selectedOptions[0].textContent : 'another one'}`, 6000); }
+    else if (m.action === 'headphones') { $('#headphones').checked = !!m.value; LS.set('ps_headphones', m.value ? '1' : '0'); await switchMic(null); toast(m.value ? `🎧 ${m.from} set you to headphones mode (echo cancelling off — please wear headphones)` : `🔈 ${m.from} turned echo cancelling back on`, 7000); }
+    else if (m.action === 'mute') { if (micOn) toggleMic(); toast(`🔇 ${m.from} muted your microphone — press the mic button to unmute`, 6000); }
+    else if (m.action === 'unmute') toast(`🎙 ${m.from} asks you to unmute — press the mic button when you're ready`, 8000); // only you can turn your mic on
+    sendDevices();
+  } catch (e) { quiet('producer control')(e); toast(`⚠ Couldn't do that: ${e.message}`, 6000); }
+}
+function helpBox(p, anchor) { // the producer's little panel for one guest
+  document.querySelectorAll('.helpbox').forEach(b => b.remove());
+  const d = p.devices || {}, box = document.createElement('div'); box.className = 'helpbox';
+  box.innerHTML = `<b>Help ${esc(p.name)}</b><div class="small-text muted" style="margin-top:6px">Microphone</div><select></select>
+    <label class="check small-text"><input type="checkbox"> <span>Headphones mode (echo cancelling off)</span></label>
+    <div class="row" style="margin-top:8px"><button class="small ghost">🔇 Mute them</button><button class="small ghost">Ask to unmute</button><button class="small ghost">✕</button></div>`;
+  const sel = box.querySelector('select'), hp = box.querySelector('input'), [mute, unmute, close] = box.querySelectorAll('button');
+  for (const m of d.mics || []) sel.add(new Option(m.label, m.id, false, m.id === d.mic));
+  if (!(d.mics || []).length) sel.add(new Option('(their browser hasn\'t shared its list yet)', ''));
+  hp.checked = !!d.headphones;
+  sel.onchange = () => { if (sel.value) { wsSend({ t: 'control', to: p.id, action: 'mic', value: sel.value }); toast(`Switching ${p.name}'s microphone…`); } };
+  hp.onchange = () => wsSend({ t: 'control', to: p.id, action: 'headphones', value: hp.checked });
+  mute.onclick = () => wsSend({ t: 'control', to: p.id, action: 'mute' });
+  unmute.onclick = () => wsSend({ t: 'control', to: p.id, action: 'unmute' });
+  close.onclick = () => box.remove();
+  anchor.appendChild(box);
+}
+
 // waiting room knocks (host)
 function showKnock(k) {
   if (document.getElementById('knock-' + k.id)) return;
   const el = document.createElement('div'); el.className = 'knock card'; el.id = 'knock-' + k.id;
-  el.innerHTML = `<div><b>${esc(k.name)}</b> wants to join</div><div class="row" style="margin-top:8px"><button class="primary small">Let in</button><button class="ghost small">Deny</button></div>`;
-  const [yes, no] = el.querySelectorAll('button');
+  el.innerHTML = `<div><b>${esc(k.name)}</b> wants to join</div><div class="row" style="margin-top:8px"><button class="primary small">Let in</button><button class="small green-btn" title="Talk to them first, privately: only hosts see and hear them, and they aren't recorded">🟢 Green room</button><button class="ghost small">Deny</button></div>`;
+  const [yes, green, no] = el.querySelectorAll('button');
   yes.onclick = () => { wsSend({ t: 'admit', id: k.id, allow: true }); el.remove(); };
+  green.onclick = () => { wsSend({ t: 'admit', id: k.id, allow: true, green: true }); el.remove(); };
   no.onclick = () => { wsSend({ t: 'admit', id: k.id, allow: false }); el.remove(); };
   $('#knocks').appendChild(el);
 }

@@ -197,7 +197,7 @@ function liveRoom(id) {
   if (!live.has(id)) {
     const saved = readJSON(path.join(roomDir(id), 'admitted.json'), {}) || {};
     const admitted = new Set(Object.keys(saved).filter(c => Date.now() - saved[c] < 12 * 3600e3));
-    live.set(id, { id, peers: new Map(), waiting: new Map(), admitted, take: null, roomTone: null, chat: [] });
+    live.set(id, { id, green: new Set(), peers: new Map(), waiting: new Map(), admitted, take: null, roomTone: null, chat: [] });
   }
   return live.get(id);
 }
@@ -210,7 +210,9 @@ function admit(roomId, lr, clientId) {
 function send(ws, msg) { if (ws && ws.readyState === 1) ws.send(JSON.stringify(msg)); }
 function broadcast(lr, msg, exceptId) { for (const p of lr.peers.values()) if (p.id !== exceptId) send(p.ws, msg); }
 function toHosts(lr, msg) { for (const p of lr.peers.values()) if (p.isHost) send(p.ws, msg); }
-const peerInfo = p => ({ id: p.id, name: p.name, isHost: p.isHost, control: !!p.control, state: p.state || {}, camId: p.camId, screenId: p.screenId || null });
+const peerInfo = p => ({ id: p.id, name: p.name, isHost: p.isHost, control: !!p.control, state: p.state || {}, camId: p.camId, screenId: p.screenId || null, green: !!p.green, devices: p.devices || null });
+// green room: a guest there only sees and hears the hosts (and the hosts them) — nobody else, and they aren't recorded
+const canSee = (a, b) => a === b || a.isHost || b.isHost || (!a.green && !b.green);
 
 function newSeg(t, peer) {
   const segId = rid(10);
@@ -234,7 +236,7 @@ function startRecording(roomId, lr, roomTone, episode) {
   fs.mkdirSync(path.join(takeDir(roomId, t.id), 'segs'), { recursive: true });
   saveTake(t, true);
   lr.take = t.id;
-  for (const p of lr.peers.values()) { if (p.control) continue; const seg = newSeg(t, p); p.seg = seg; send(p.ws, startMsg(t, seg)); }
+  for (const p of lr.peers.values()) { if (p.control || p.green) continue; const seg = newSeg(t, p); p.seg = seg; send(p.ws, startMsg(t, seg)); } // the green room isn't recorded
   broadcast(lr, { t: 'recording', on: true, take: t.id, started: t.started, n, roomTone: !!roomTone, nextEpisode: ((room && room.lastEpisode) || 0) + 1 });
   if (roomTone) beginRoomTone(t, lr, 1500);
   log.info('rec', `${room && room.name} take ${n} started`);
@@ -1313,21 +1315,22 @@ wss.on('connection', ws => {
     // same browser reconnecting: drop its old connection
     for (const p of lr.peers.values()) if (p.clientId === info.clientId) { lr.peers.delete(p.id); broadcast(lr, { t: 'peer-left', id: p.id }); try { p.ws.close(); } catch (e) { log.ignore('ws', 'close old connection')(e); } }
     if (!info.control && [...lr.peers.values()].filter(p => !p.control).length >= MAX_PEOPLE) { send(ws, { t: 'error', code: 'full', msg: `This studio is full (max ${MAX_PEOPLE} people).` }); return; }
-    peer = { id: rid(8), ws, ...info, state: {}, screenId: null };
+    peer = { id: rid(8), ws, ...info, state: {}, screenId: null, green: !info.isHost && (!!info.green || lr.green.has(info.clientId)) };
+    if (peer.green) lr.green.add(info.clientId);
     lr.peers.set(peer.id, peer);
     admit(roomId, lr, info.clientId);
-    broadcast(lr, { t: 'peer-joined', peer: peerInfo(peer) }, peer.id);
+    for (const p of lr.peers.values()) if (p !== peer && canSee(p, peer)) send(p.ws, { t: 'peer-joined', peer: peerInfo(peer) });
     const ice = await iceServers();
     if (ws.readyState !== 1) return;
     const t = lr.take ? loadTake(roomId, lr.take) : null;
     send(ws, { t: 'welcome', id: peer.id, isHost: peer.isHost, roomName: room.name, studio: STUDIO_NAME, ice, maxPeople: MAX_PEOPLE, version: VERSION,
-      peers: [...lr.peers.values()].filter(p => p !== peer).map(peerInfo),
+      peers: [...lr.peers.values()].filter(p => p !== peer && canSee(peer, p)).map(peerInfo), green: peer.green,
       recording: t ? { take: t.id, started: t.started, n: t.n, markers: (t.markers || []).length } : null, nextEpisode: (room.lastEpisode || 0) + 1,
       roomToneSeconds: ROOM_TONE_SECONDS, roomTone: lr.roomTone && lr.roomTone.end > Date.now() ? lr.roomTone : null,
       rundown: room.rundown || [], segment: lr.segment || null, fps: settings.fps, channels: peer.isHost ? room.channels || {} : undefined, sounds: peer.isHost ? room.sounds || [] : undefined, coughing: [...lr.peers.values()].filter(p => p.coughing).map(p => p.id),
       chat: lr.chat.slice(-100), waiting: peer.isHost ? [...lr.waiting.values()].map(w => ({ id: w.id, name: w.name })) : [],
       disk: peer.isHost ? await diskInfo() : null, gbPerPersonHour: GB_PER_PERSON_HOUR, minFreeGB: MIN_FREE_GB });
-    if (t && !peer.control) {
+    if (t && !peer.control && !peer.green) {
       const existing = info.recSeg && t.segs[info.recSeg] && t.segs[info.recSeg].clientId === info.clientId ? info.recSeg : null;
       // a fresh page for the same person: their earlier part can't send any more, so stop waiting on it
       if (!existing) for (const sg of Object.values(t.segs)) if (sg.clientId === info.clientId && !sg.done) sg.done = true;
@@ -1351,7 +1354,7 @@ wss.on('connection', ws => {
       const curTake = lr.take && loadTake(roomId, lr.take);
       if (curTake && Object.values(curTake.segs).some(sg => sg.clientId === info.clientId)) admit(roomId, lr, info.clientId);
       if (!info.isHost && room.waitingRoom !== false && !lr.admitted.has(info.clientId)) {
-        waiting = { id: rid(8), ws, name: info.name, go: () => { waiting = null; doJoin(room, info); } };
+        waiting = { id: rid(8), ws, name: info.name, go: green => { waiting = null; doJoin(room, { ...info, green: !!green }); } };
         lr.waiting.set(waiting.id, waiting);
         send(ws, { t: 'waiting', hostHere: [...lr.peers.values()].some(p => p.isHost) });
         toHosts(lr, { t: 'knock', id: waiting.id, name: waiting.name });
@@ -1361,7 +1364,13 @@ wss.on('connection', ws => {
     }
     if (!peer) return;
     switch (m.t) {
-      case 'signal': { const to = lr.peers.get(m.to); if (to) send(to.ws, { t: 'signal', from: peer.id, data: m.data }); return; }
+      case 'signal': { const to = lr.peers.get(m.to); if (to && canSee(peer, to)) send(to.ws, { t: 'signal', from: peer.id, data: m.data }); return; }
+      case 'devices': { // a guest's microphones/cameras, so the producer can help from the desk
+        const list = a => (Array.isArray(a) ? a.slice(0, 12).map(d => ({ id: String(d.id || '').slice(0, 200), label: cleanText(d.label, 80) || 'Device' })) : []);
+        peer.devices = { mics: list(m.mics), mic: String(m.mic || '').slice(0, 200), headphones: !!m.headphones, micOn: m.micOn !== false };
+        toHosts(lr, { t: 'devices', id: peer.id, devices: peer.devices });
+        return;
+      }
       case 'state': peer.state = m.state || {}; broadcast(lr, { t: 'peer-state', id: peer.id, state: peer.state }, peer.id); return;
       case 'screen': peer.screenId = m.on ? validStreamId(m.streamId) : null; broadcast(lr, { t: 'screen', id: peer.id, on: !!m.on, streamId: peer.screenId }, peer.id); return;
       case 'meter': if (m.m && typeof m.m === 'object') toHosts(lr, { t: 'meter', id: peer.id, m: m.m }); return;
@@ -1469,8 +1478,25 @@ wss.on('connection', ws => {
         const w = lr.waiting.get(m.id); if (!w) return;
         lr.waiting.delete(m.id);
         toHosts(lr, { t: 'knock-gone', id: m.id });
-        if (m.allow) w.go();
+        if (m.allow) w.go(m.green);
         else { send(w.ws, { t: 'error', code: 'denied', msg: 'The host didn\'t let you in this time.' }); try { w.ws.close(); } catch (e) { log.ignore('ws', 'close denied guest')(e); } }
+        return;
+      }
+      case 'onair': { // bring a guest out of the green room: they meet everyone, and join the recording if it's running
+        const g = lr.peers.get(m.id); if (!g || !g.green) return;
+        g.green = false; lr.green.delete(g.clientId);
+        const others = [...lr.peers.values()].filter(p => p !== g && !p.isHost && !p.green);
+        send(g.ws, { t: 'onair', peers: others.map(peerInfo) });
+        for (const p of others) send(p.ws, { t: 'peer-joined', peer: peerInfo(g) });
+        toHosts(lr, { t: 'onair', id: g.id });
+        const t = lr.take && loadTake(roomId, lr.take);
+        if (t && !g.control) { g.seg = newSeg(t, g); send(g.ws, startMsg(t, g.seg)); }
+        return;
+      }
+      case 'control': { // the producer helps a guest from the desk: switch their mic, headphones mode, mute
+        const to = lr.peers.get(m.to); if (!to || to.isHost) return;
+        if (!['mic', 'headphones', 'mute', 'unmute'].includes(m.action)) return;
+        send(to.ws, { t: 'control', action: m.action, value: typeof m.value === 'string' ? m.value.slice(0, 200) : !!m.value, from: peer.name });
         return;
       }
       case 'kick': { const p = lr.peers.get(m.id); if (p && p !== peer) { lr.admitted.delete(p.clientId); try { const f = path.join(roomDir(roomId), 'admitted.json'); const sv = readJSON(f, {}) || {}; delete sv[p.clientId]; writeJSON(f, sv); } catch (e) { log.warn('rooms', 'could not forget a removed guest', e); } send(p.ws, { t: 'error', code: 'kicked', msg: 'The host removed you from the studio.' }); p.ws.close(); } return; }

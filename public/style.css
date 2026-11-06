@@ -215,6 +215,16 @@ kbd { font: 11px/1 ui-monospace, monospace; background: #fff2; border-radius: 4p
 #cueMsg { font-size: clamp(32px, 6vw, 64px); font-weight: 900; line-height: 1.1; }
 .cuebox .muted { color: #0009; margin-top: 8px; }
 @keyframes cuepop { from { transform: scale(.85); opacity: 0; } to { transform: scale(1); opacity: 1; } }
+.greenin { position: fixed; top: 64px; left: 50%; transform: translateX(-50%); background: #14532d; border: 1px solid var(--ok); color: #fff; padding: 10px 18px; border-radius: 12px; z-index: 54; max-width: min(92vw, 640px); text-align: center; box-shadow: 0 6px 24px #0008; }
+.tile.green { outline: 3px dashed var(--ok); outline-offset: -3px; }
+.tile .greentag { position: absolute; top: 8px; left: 8px; background: #14532d; border: 1px solid var(--ok); color: #fff; font: 800 11px system-ui; padding: 4px 8px; border-radius: 6px; z-index: 3; display: flex; gap: 6px; align-items: center; }
+.tile .greentag button { padding: 3px 8px; font-size: 11px; }
+.cs-green { background: #14532d; border: 1px solid var(--ok); border-radius: 6px; padding: 4px; text-align: center; font: 800 10px system-ui; }
+.cs-green button { width: 100%; margin-top: 3px; }
+.cs-help { position: relative; }
+.helpbox { position: absolute; z-index: 60; left: 0; bottom: 100%; width: 240px; background: #1a1d22; border: 1px solid #fff3; border-radius: 10px; padding: 10px; box-shadow: 0 8px 30px #000a; text-align: left; font-size: 12px; }
+.helpbox select { width: 100%; margin: 4px 0 8px; font-size: 12px; }
+.helpbox .row { gap: 6px; }
 .talkin { position: fixed; top: 64px; left: 50%; transform: translateX(-50%); background: var(--rec); color: #fff; padding: 10px 18px; border-radius: 12px; z-index: 55; font-weight: 700; box-shadow: 0 6px 24px #0008; }
 /* show clock */
 .rdrow { display: grid; grid-template-columns: 28px minmax(0, 1fr) 64px 28px; gap: 6px; align-items: center; margin-bottom: 6px; }
