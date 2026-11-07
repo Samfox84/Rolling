@@ -60,7 +60,10 @@
   showErr(q.get('mode') === 'host' ? 'herr' : 'err', q.get('error') || '');
   $('tConnect').onclick = () => mode('connect'); $('tHost').onclick = () => mode('host');
   $('pick').onclick = async () => { const f = await window.desk.pickFolder('Where should Rolling Desk save recordings?'); if (f) $('folder').value = f; };
-  $('spick').onclick = async () => { const f = await window.desk.pickFolder('Where should your studio keep its shows and recordings?'); if (f) $('sfolder').value = f; };
+  $('spick').onclick = async () => { // a "Rolling Studio" folder is made inside the one you pick
+    const f = await window.desk.pickFolder('Where should your studio keep its shows and recordings?');
+    if (f) $('sfolder').value = /Rolling Studio[\\/]?$/.test(f) ? f : f.replace(/[\\/]+$/, '') + (f.includes('\\') ? '\\' : '/') + 'Rolling Studio';
+  };
   $('f').onsubmit = async e => {
     e.preventDefault(); showErr('err', ''); $('go').disabled = true; $('go').textContent = 'Connecting…';
     const r = await window.desk.connect($('link').value, $('folder').value);

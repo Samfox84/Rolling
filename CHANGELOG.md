@@ -3,6 +3,13 @@
 Rolling is pre-release, so versions now start at 0.x. Each earlier version is shown with its old 1.x number
 (1.0.0 → 0.1.0 … 1.6.0 → 0.7.0). The desktop app, Rolling Desk, has its own numbers, starting at 0.1.0.
 
+## Rolling Desk 0.2.2
+- Fix: **Host it on this computer** failed to start ("The studio couldn't start") because the studio's packages were
+  left out of the app. Every build now starts the studio from inside the finished app before it's published
+- Fix: switching from the File menu ("Connect to a different studio, or host it myself…") could crash the app on macOS
+- If the studio can't start, the message now says why (and the full log is kept in `studio.log` in Rolling Desk's settings folder)
+- The studio always gets its own **Rolling Studio** folder inside whichever folder you pick
+
 ## Rolling Desk 0.2.1
 - The app's internal ID no longer contains a personal web address (now `io.github.samfox84.rolling-desk`). The app
   never had any studio address built in — it always starts blank and you enter your own

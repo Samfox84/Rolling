@@ -145,13 +145,20 @@ test('Rolling Desk app: host the whole studio on this computer (no server) — g
     const files = fs.readdirSync(out);
     for (const want of [/Steve.*\.wav$/, /Producer mix/, /Transcript/]) assert.ok(files.some(f => want.test(f)), `${want} in ${files.join(', ')}`);
 
-    // ---- close for real: the studio and the tunnel both stop ----
-    await app.evaluate(({ dialog }) => { dialog.showMessageBoxSync = () => 1; });
+    // ---- File › "Stop hosting / connect to a studio instead…": asks, stops the studio and the tunnel, shows the start screen ----
+    await app.evaluate(({ dialog }) => { dialog.showMessageBox = async () => ({ response: 1 }); });
+    const [startAgain] = await Promise.all([app.waitForEvent('window'), app.evaluate(({ Menu }) => {
+      const item = Menu.getApplicationMenu().items.find(i => i.label === 'File').submenu.items.find(i => /Stop hosting/.test(i.label));
+      item.click();
+    })]);
+    await startAgain.waitForSelector('#tHost');
+    await waitFor(async () => { try { await fetch(local + '/api/info', { signal: AbortSignal.timeout(1000) }); return false; } catch { return true; } }, 10000);
+    await waitFor(() => { try { process.kill(tunnel.pid, 0); return false; } catch { return true; } }, 10000);
+    await waitFor(() => app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows().length === 1), 5000); // the old window is gone, the app is still open
+    // …and then close the app
     const exited = new Promise(r => app.process().once('exit', r));
     await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].close());
     await exited; app = null;
-    await waitFor(async () => { try { await fetch(local + '/api/info', { signal: AbortSignal.timeout(1000) }); return false; } catch { return true; } }, 10000);
-    await waitFor(() => { try { process.kill(tunnel.pid, 0); return false; } catch { return true; } }, 10000);
     assert.deepEqual(errors, [], 'no errors in the studio page');
     assert.equal(logs.join('').match(/\[error\]/g), null, `app log: ${logs.join('')}`);
   } finally {

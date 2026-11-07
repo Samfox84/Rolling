@@ -6,4 +6,5 @@ recordings/
 package-lock.json
 desk/dist/
 desk/build/
+desk/studio/
 desk/vendor/

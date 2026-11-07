@@ -79,7 +79,12 @@ class LocalStudio extends EventEmitter {
       WHISPER_BIN: tools.whisper, WHISPER_MODELS: tools.models,
     };
     this.server = spawn(this.nodePath, [path.join(this.studioDir, 'server.js')], { cwd: this.studioDir, env, stdio: ['ignore', 'pipe', 'pipe', 'ipc'], windowsHide: true });
-    const out = d => String(d).split(/\r?\n/).filter(Boolean).forEach(l => this.log('info', '[studio] ' + l));
+    // the studio's own messages: into the app's log, a log file you can find, and kept briefly to explain a failure
+    this.recent = [];
+    const logFile = fs.createWriteStream(path.join(path.dirname(this.secretsFile), 'studio.log'), { flags: 'a' });
+    logFile.on('error', e => this.log('warn', 'studio log file', e));
+    logFile.write(`\n--- ${new Date().toISOString()} starting the studio\n`);
+    const out = d => String(d).split(/\r?\n/).filter(Boolean).forEach(l => { this.log('info', '[studio] ' + l); logFile.write(l + '\n'); this.recent = [...this.recent.slice(-7), l]; });
     this.server.stdout.on('data', out); this.server.stderr.on('data', out);
     this.server.on('exit', (code, sig) => { this.server = null; if (!this.stopping) { this.log('error', `the studio stopped unexpectedly (${code ?? sig})`); this.emit('crashed', code ?? sig); } });
     await this.waitUntilUp(30000);
@@ -90,7 +95,7 @@ class LocalStudio extends EventEmitter {
   async waitUntilUp(ms) {
     const until = Date.now() + ms;
     for (;;) {
-      if (!this.server) throw new Error('The studio couldn\'t start — see the log (View › Toggle Developer Tools)');
+      if (!this.server) throw new Error(`The studio couldn't start: ${this.recent.filter(l => /error|cannot|EACCES|ENOSPC|EADDR/i.test(l)).slice(-2).join(' · ') || this.recent.slice(-2).join(' · ') || 'no reason given'} (full log: studio.log in Rolling Desk's settings folder)`);
       try { const r = await fetch(this.localUrl + '/api/info', { signal: AbortSignal.timeout(2000) }); if (r.ok) return; }
       catch (e) { if (Date.now() > until) throw new Error(`The studio didn't start within ${ms / 1000} s (${e.message})`); }
       await new Promise(r => setTimeout(r, 250));

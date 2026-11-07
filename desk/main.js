@@ -32,7 +32,7 @@ const hosting = () => config.mode === 'host' && !!studio;
 const savedFolder = () => (config.mode === 'host' ? config.studioFolder : config.folder);
 
 // where the bundled studio and its tools are: inside the installed app, or (while developing) the project itself
-const studioDir = () => (app.isPackaged ? path.join(process.resourcesPath, 'studio') : path.join(__dirname, '..'));
+const studioDir = () => (app.isPackaged ? path.join(__dirname, 'studio') : path.join(__dirname, '..'));
 const toolsDir = () => process.env.ROLLING_DESK_TOOLS || (app.isPackaged ? path.join(process.resourcesPath, 'tools') : path.join(__dirname, 'vendor', 'tools'));
 
 // keep the computer awake while recording/saving — or for as long as it's hosting the studio
@@ -101,7 +101,14 @@ async function offerRestart() {
 }
 
 // ---------- windows ----------
-function closeWindow() { if (win) { win.removeAllListeners('close'); win.close(); win = null; } }
+// swap windows safely: the old one is hidden now and destroyed a moment later, after the new one exists (closing a
+// window from inside its own menu click crashes Electron on macOS, and closing the last window would quit the app)
+function closeWindow() {
+  const old = win; win = null;
+  if (!old || old.isDestroyed()) return;
+  old.removeAllListeners('close'); old.hide();
+  setTimeout(() => { if (!old.isDestroyed()) old.destroy(); }, 250);
+}
 function openConnect(error = '') {
   closeWindow();
   win = new BrowserWindow({ width: 680, height: 720, title: 'Rolling Desk', backgroundColor: '#0d0f12',
@@ -220,6 +227,8 @@ ipcMain.handle('desk:connect', async (e, { link, folder }) => {
   return { ok: true };
 });
 ipcMain.handle('desk:host', async (e, { folder }) => {
+  // the studio gets a folder of its own, even if you pick e.g. your home folder
+  if (path.basename(folder) !== 'Rolling Studio') folder = path.join(folder, 'Rolling Studio');
   const bad = writable(folder); if (bad) return { error: bad };
   Object.assign(config, { mode: 'host', studioFolder: folder }); saveConfig();
   openHost().catch(er => { log('error', 'hosting', er); openConnect(er.message); });
@@ -242,7 +251,7 @@ function buildMenu() {
     { label: 'File', submenu: [
       { label: config.mode === 'host' ? 'Open studio folder (recordings)' : 'Open recordings folder', accelerator: 'CmdOrCtrl+Shift+O', click: () => shell.openPath(savedFolder()) },
       ...(hosting() ? [{ label: 'Copy the guest link address', click: () => guestLink && clipboard.writeText(guestLink) }] : []),
-      { label: hosting() ? 'Stop hosting / connect to a studio instead…' : 'Connect to a different studio, or host it myself…', click: () => back().catch(er => log('warn', 'switch', er)) },
+      { label: hosting() ? 'Stop hosting / connect to a studio instead…' : 'Connect to a different studio, or host it myself…', click: () => setTimeout(() => back().catch(er => log('warn', 'switch', er)), 0) }, // after the menu has closed
       { label: 'Check for updates…', click: () => checkForUpdates(true) },
       { type: 'separator' },
       ...(config.mode === 'connect' ? [{ label: 'Remove live copies once the finished files are saved', type: 'checkbox', checked: config.removeLive,
