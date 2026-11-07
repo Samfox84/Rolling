@@ -67,7 +67,7 @@ jobs:
           cmake --build "$RUNNER_TEMP/wcpp/build" --config Release -j 4 --target whisper-cli
           BIN=$(find "$RUNNER_TEMP/wcpp/build" -type f \( -name whisper-cli -o -name whisper-cli.exe \) | head -1)
           test -n "$BIN" && cp "$BIN" vendor/tools/
-      - uses: actions/cache@v4
+      - uses: actions/cache@v6
         with:
           path: desk/vendor/tools/models
           key: whisper-model-ggml-base.en
