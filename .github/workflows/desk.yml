@@ -89,7 +89,7 @@ jobs:
           CSC_IDENTITY_AUTO_DISCOVERY: 'false'
       - name: Check the studio starts from inside the finished app
         run: node scripts/check-packaged.js
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: rolling-desk-${{ matrix.platform }}-${{ matrix.arch }}
           path: |
