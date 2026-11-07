@@ -1,6 +1,6 @@
 # 🎛 Rolling Desk
 
-The producer's desktop app for a Rolling studio, for Mac and Linux.
+The producer's desktop app for a Rolling studio, for Mac, Windows and Linux. It connects to your studio server — or runs the whole studio on this computer, no server needed.
 
 - **Your studio in its own window.** Join as the control room and the **audio Console** opens by itself. It has faders, EQ, a gate, a compressor, pan, mute and solo, auto level and auto mix, scenes, the soundboard, the green room, the live loudness of your mix, talkback, cue cards, quick tags, producer notes, the script/teleprompter and the rundown clock, all usable from the keyboard.
 - **Every recording is saved on this computer as well as on the server:**
@@ -10,6 +10,8 @@ The producer's desktop app for a Rolling studio, for Mac and Linux.
 - **It never loses a recording by closing too early.** It warns you if it's still saving, and keeps the computer awake while recording or saving. The status shows **✅ safe to close** when everything is saved.
 
 The app doesn't change the studio. It uses the same server and the same host link as a browser. Anyone can still run the show from a normal browser.
+
+**Step-by-step guide (install, connect, host on your computer, troubleshooting): [docs/setup-desk.md](../docs/setup-desk.md)** · What's new: [CHANGELOG.md](CHANGELOG.md)
 
 ## Install
 Download from the repo's **Releases** page (or the latest **Actions › Rolling Desk app** run):

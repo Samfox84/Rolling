@@ -4,7 +4,17 @@
 
 > **Made by a human and an AI, together.** Rolling was designed and directed by **Sam Fox** and written with **Claude**, Anthropic's AI assistant (model: Claude Opus 5.5, `claude-opus-5-5`), in conversation. Sam set the goals, tested it and made the decisions; Claude wrote the code and tests. Every change is in the commit history, and AI-written commits are marked *Co-Authored-By: Claude*.
 
-Version: see [CHANGELOG.md](CHANGELOG.md). Licence: [GNU AGPL-3.0](LICENSE) — free to use, study, change and share; any changed version that is shared, or run as a service for others, must stay free and open too.
+## Get started — pick one
+
+| | |
+|---|---|
+| 🖥 **On your own server** — always on, your own web address, best for a regular show | **[Set up Rolling on a server →](docs/setup-server.md)** |
+| 💻 **On your own computer, no server** — install the Rolling Desk app and press Start | **[Host a studio from your computer →](docs/setup-desk.md#host-a-studio-on-your-computer-no-server)** |
+| 🎛 **Producer's desk app** for a studio you already have | **[Rolling Desk →](docs/setup-desk.md)** |
+
+Guests never install anything: they click a link in Chrome, Edge or Safari.
+
+What's new: [studio changelog](CHANGELOG.md) · [Rolling Desk app changelog](desk/CHANGELOG.md). Licence: [GNU AGPL-3.0](LICENSE) — free to use, study, change and share; any changed version that is shared, or run as a service for others, must stay free and open too.
 
 **Recording**
 - **Video call** for up to 5 people in the browser — guests just click a link, nothing to install.
@@ -58,13 +68,14 @@ Version: see [CHANGELOG.md](CHANGELOG.md). Licence: [GNU AGPL-3.0](LICENSE) — 
 
 ## Install (Ubuntu / Debian, incl. Raspberry Pi OS)
 
+Step-by-step guide, including the free Cloudflare Tunnel: **[docs/setup-server.md](docs/setup-server.md)**. In short:
+
 ```bash
-tar xzf podcast-studio-*.tar.gz
-cd podcast-studio
+git clone https://github.com/Samfox84/Rolling.git && cd Rolling
 sudo DOMAIN=podcast.yourdomain.com bash install.sh
 ```
 
-The installer adds ffmpeg and Node.js if needed, sets up a service that starts on boot, and prints your **admin password** at the end.
+The installer adds ffmpeg and Node.js if needed, sets up a service that starts on boot, and prints your **admin password** at the end. To update later: `cd ~/Rolling && git pull && sudo bash install.sh` (keeps your settings and recordings).
 
 ### What it needs
 | Thing | Why |
