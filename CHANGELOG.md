@@ -3,6 +3,10 @@
 Rolling is pre-release, so versions now start at 0.x. Each earlier version is shown with its old 1.x number
 (1.0.0 → 0.1.0 … 1.6.0 → 0.7.0). The desktop app, Rolling Desk, has its own numbers, starting at 0.1.0.
 
+## Rolling Desk 0.2.1
+- The app's internal ID no longer contains a personal web address (now `io.github.samfox84.rolling-desk`). The app
+  never had any studio address built in — it always starts blank and you enter your own
+
 ## Rolling Desk 0.2.0 — host it on this computer (no server)
 - New choice on the start screen: **Host it on this computer.** The app runs the whole studio itself and makes a free
   internet link for guests (a Cloudflare quick tunnel). Everything works as on a server — Console, recordings, files,

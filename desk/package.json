@@ -1,7 +1,7 @@
 {
   "name": "rolling-desk",
   "productName": "Rolling Desk",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "The producer's desk for a Rolling studio: connect to your studio server, or host the whole studio on this computer. The audio Console, show control, and every recording saved on this computer.",
   "main": "main.js",
   "author": "Sam Fox (made with Claude, Anthropic)",
@@ -20,7 +20,7 @@
     "electron-builder": "26.18.0"
   },
   "build": {
-    "appId": "uk.co.simonmarriott.rolling-desk",
+    "appId": "io.github.samfox84.rolling-desk",
     "productName": "Rolling Desk",
     "files": [
       "main.js",
