@@ -22,11 +22,11 @@ test.before(async () => {
 const browsers = []; // closed at the end even if a test fails, so a failure never hangs the run
 test.after(async () => { for (const b of browsers) await b.close().catch(() => {}); if (srv) await srv.stop(); });
 
-async function person(name, host, { control = false } = {}) {
+async function person(name, host, { control = false, phone = false } = {}) {
   const args = ['--use-fake-device-for-media-stream', '--use-fake-ui-for-media-stream', ...(SPEECH ? [`--use-file-for-fake-audio-capture=${SPEECH}`] : [])];
   const b = await chromium.launch({ args });
   browsers.push(b);
-  const ctx = await b.newContext({ viewport: { width: 1280, height: 760 }, permissions: control ? [] : ['camera', 'microphone'] });
+  const ctx = await b.newContext({ ...(phone ? require('playwright').devices['iPhone 13'] : { viewport: { width: 1280, height: 760 } }), permissions: control ? [] : ['camera', 'microphone'] });
   const p = await ctx.newPage();
   const errors = [];
   p.on('pageerror', e => errors.push(e.message));
@@ -162,6 +162,30 @@ test('producer desk: faders, listening mute, cue card, talkback, cough button, q
   assert.ok(take.outputs.some(o => o.kind === 'producermix'));
   assert.deepEqual([...host.errors, ...guest.errors], []);
   await host.b.close(); await guest.b.close();
+});
+
+test('a guest on a phone: nothing overlaps or runs off the screen, phone tips show, the screen is kept on', { skip, timeout: 120000 }, async () => {
+  const host = await person('Producer', true);
+  await host.p.waitForSelector('#studio:not(.hidden)');
+  const phone = await person('Leo', false, { phone: true });
+  await host.p.waitForSelector('.knock button.primary').then(x => x.click()).catch(() => {}); // the waiting room, if it's on
+  await phone.p.waitForSelector('#studio:not(.hidden)');
+  await new Promise(r => setTimeout(r, 1500));
+  const p = phone.p;
+  assert.equal(await p.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true, 'no sideways scrolling');
+  // the timecode blocks sit side by side or wrap — they never draw on top of each other
+  const boxes = await p.$$eval('#tcBar > *', els => els.filter(e => e.offsetParent).map(e => { const r = e.getBoundingClientRect(); return [r.left, r.top, r.right, r.bottom]; }));
+  for (let i = 0; i < boxes.length; i++) for (let j = i + 1; j < boxes.length; j++) {
+    const [a, b] = [boxes[i], boxes[j]], overlap = Math.min(a[2], b[2]) - Math.max(a[0], b[0]) > 2 && Math.min(a[3], b[3]) - Math.max(a[1], b[1]) > 2;
+    assert.equal(overlap, false, `timecode parts ${i} and ${j} overlap`);
+  }
+  // …and each one's numbers fit inside it (not spilling over the next one)
+  const spill = await p.$$eval('#tcBar .tcblock', els => els.filter(e => e.offsetParent && e.scrollWidth > e.clientWidth + 2).length);
+  assert.equal(spill, 0, 'timecode numbers spill out of their box');
+  assert.equal(await p.evaluate(() => document.body.classList.contains('phone')), true);
+  assert.ok(await p.evaluate(() => getComputedStyle(document.querySelector('.phoneonly')).display !== 'none'), 'phone tips shown');
+  assert.deepEqual([...host.errors, ...phone.errors], []);
+  await host.b.close(); await phone.b.close();
 });
 
 test('Console extras: green room, soundboard, gate, auto mix, auto level, scenes, ON AIR, notes, live script', { skip, timeout: 180000 }, async () => {

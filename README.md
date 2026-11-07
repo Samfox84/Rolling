@@ -39,6 +39,8 @@ What's new: [studio changelog](CHANGELOG.md) · [Rolling Desk app changelog](des
 **🎛 Console (control room)** — a full-screen audio mixing desk: per-person low cut, noise gate, 3-band EQ, compressor, pan, fader with peak-hold, mute/solo, talk and cue; live EBU loudness of your mix against −16/−23 LUFS with a limiter light; **Auto level**, **Auto mix** (gain sharing) and **scenes A/B/C**; a big **ON AIR** key; full keyboard control. Your moves and settings are baked into the stereo Producer mix and remembered per person.
 - **Soundboard (F1–F12):** jingles, stings, ads and music beds that everyone hears live; beds loop and dip under speech. Recorded as its own track and mixed into the Producer mix.
 - **Green room:** talk to a guest privately first (not recorded), then **Bring on air**. **⚙ Help** a guest from the desk: switch their mic, headphones mode, mute.
+- **✉️ Guest invites** — email guests their link with a 5-minute setup checklist and a calendar entry (or copy it to send yourself). Guests can join from a **phone** too.
+- **☁️ Cloud backup** to Google Drive, Dropbox, OneDrive and more ([guide](docs/cloud-backup.md)), as well as a backup drive.
 - **Producer notes** (timed, in the edit list), **script & teleprompter** (for hosts or everyone), **live transcript** with "um/uh" highlighted — and every filler word listed in the edit list.
 
 **Producer desk (live)**

@@ -85,7 +85,9 @@ Open `https://podcast.yourname.com` — you should see the Rolling login page.
    (🎛 Console).
 5. Guests click their link, check their mic, and knock. You press **Let in** (or **🟢 Green room** to chat first).
 6. Press **Start recording**, choose whether to record room tone, and talk. Press **Stop** when you're done.
-7. A few minutes later, open **Recordings** to download everything: each person's untouched track, cleaned copies,
+7. Want to send guests their link with a setup checklist and a calendar entry? On the show's **Recordings** page,
+   open **✉️ Invite a guest**.
+8. A few minutes later, open **Recordings** to download everything: each person's untouched track, cleaned copies,
    the Producer mix, video, transcripts, chapters, and session files for Audition, Premiere or Resolve.
 
 **Tips for everyone:** Chrome or Edge on a laptop, wired headphones, a quiet room.
@@ -107,6 +109,7 @@ The installer keeps your settings, password and recordings. Don't update in the 
 - **Disk space:** the dashboard's **🩺 Health** panel shows how many hours of recording are left. Delete old takes from
   the Recordings page once you've downloaded them.
 - **Backups:** set a backup folder (e.g. a USB drive) in **Studio settings** — every finished take is copied there.
+  For **Google Drive, Dropbox or OneDrive**, see [Cloud backup](cloud-backup.md).
 - **Email when ready:** add your email server in **Studio settings** to get an email when a take's files are ready.
 - **Something wrong?** `sudo journalctl -u podcast-studio -n 100` shows the studio's recent log.
 - **Restart it:** `sudo systemctl restart podcast-studio`

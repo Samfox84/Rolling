@@ -3,15 +3,18 @@
  * "Host it on this computer": runs a whole Rolling studio inside Rolling Desk — no server needed.
  *
  *   the studio      the same server.js as on a server, started with Electron's own Node (ELECTRON_RUN_AS_NODE),
- *                   listening on this computer only (127.0.0.1, a free port)
- *   the guest link  a Cloudflare quick tunnel (cloudflared, bundled): a free https://…trycloudflare.com address
- *                   that reaches this computer. It's new each time, and the studio is told it over IPC, so
- *                   every page shows the right guest link even if the tunnel has to restart
+ *                   listening on this computer only (127.0.0.1)
+ *   the guest link  bundled cloudflared, one of:
+ *                     quick — a free https://…trycloudflare.com address, no account, new each time
+ *                     own   — your own address (e.g. https://podcast.example.com) through a tunnel in your free
+ *                             Cloudflare account; the same every time. Needs the tunnel's token, and the studio on a
+ *                             fixed port (the tunnel's "Public hostname" points at http://localhost:<port>)
+ *                   The studio is told its address over IPC, so every page shows the right guest link.
  *   the tools       ffmpeg, ffprobe, whisper (transcripts) and its speech model are bundled with the app
  *
  * Recordings, rooms and settings live in the folder the person picks (default ~/Rolling Studio).
  */
-const { spawn } = require('child_process');
+const { spawn, execFileSync } = require('child_process');
 const crypto = require('crypto');
 const EventEmitter = require('events');
 const fs = require('fs');
@@ -20,6 +23,8 @@ const path = require('path');
 
 const EXE = process.platform === 'win32' ? '.exe' : '';
 const TUNNEL_URL = /https:\/\/[a-z0-9-]+\.trycloudflare\.com/;
+const GB = 1024 ** 3, GB_PER_PERSON_HOUR = 4;
+const DEFAULT_PORT = 8790;
 
 function freePort() {
   return new Promise((resolve, reject) => {
@@ -28,11 +33,43 @@ function freePort() {
     s.listen(0, '127.0.0.1', () => { const { port } = s.address(); s.close(() => resolve(port)); });
   });
 }
+function portFree(port) {
+  return new Promise(resolve => {
+    const s = net.createServer();
+    s.once('error', () => resolve(false));
+    s.listen(port, '127.0.0.1', () => s.close(() => resolve(true)));
+  });
+}
 
 // what's bundled with this copy of the app (each one optional: the studio says what's missing)
 function toolPaths(dir) {
   const p = n => path.join(dir, n + EXE);
   return { ffmpeg: p('ffmpeg'), ffprobe: p('ffprobe'), cloudflared: p('cloudflared'), whisper: p('whisper-cli'), models: path.join(dir, 'models') };
+}
+
+/** Free space where recordings would go (the folder, or the nearest part of it that exists yet). */
+function space(dir) {
+  let d = path.resolve(dir);
+  while (!fs.existsSync(d) && path.dirname(d) !== d) d = path.dirname(d);
+  const s = fs.statfsSync(d), free = s.bavail * s.bsize;
+  return { free, freeGB: free / GB, personHours: free / GB / GB_PER_PERSON_HOUR };
+}
+
+/** An address of your own: https://name.example.com (nothing after it). */
+function cleanAddress(a) {
+  let u;
+  try { u = new URL(String(a || '').trim().replace(/^(?!https?:\/\/)/i, 'https://')); } catch { return null; }
+  if (u.protocol !== 'https:' || !/^[a-z0-9-]+(\.[a-z0-9-]+)+$/i.test(u.hostname) || /trycloudflare\.com$/i.test(u.hostname)) return null;
+  return `https://${u.hostname.toLowerCase()}`;
+}
+
+// is this process id a cloudflared (left behind if Rolling Desk crashed)? Never kills anything else.
+function isCloudflared(pid) {
+  try {
+    if (process.platform === 'win32') return /cloudflared/i.test(execFileSync('tasklist', ['/FI', `PID eq ${pid}`, '/FO', 'CSV', '/NH'], { timeout: 5000, windowsHide: true }).toString());
+    if (process.platform === 'linux') return /cloudflared/.test(fs.readFileSync(`/proc/${pid}/cmdline`, 'utf8'));
+    return /cloudflared/.test(execFileSync('ps', ['-p', String(pid), '-o', 'command='], { timeout: 5000 }).toString());
+  } catch { return false; } // gone already (or can't tell — then leave it alone)
 }
 
 class LocalStudio extends EventEmitter {
@@ -43,12 +80,14 @@ class LocalStudio extends EventEmitter {
    * @param {string} o.dataDir     where recordings and rooms are saved
    * @param {string} o.secretsFile where this studio's admin password and secret are kept (in the app's own settings)
    * @param {string} o.nodePath    the program that runs server.js (Electron itself)
+   * @param {object} [o.link]      { mode: 'quick' } or { mode: 'own', address, token, port }
    * @param {function} o.log       (level, message, error?)
    */
   constructor(o) {
     super();
-    Object.assign(this, o);
+    Object.assign(this, { link: { mode: 'quick' } }, o);
     this.server = null; this.tunnel = null; this.port = 0; this.publicUrl = ''; this.stopping = false; this.tunnelTries = 0;
+    this.pidFile = path.join(path.dirname(this.secretsFile), 'tunnel.pid');
   }
 
   secrets() {
@@ -65,18 +104,23 @@ class LocalStudio extends EventEmitter {
 
   get localUrl() { return `http://127.0.0.1:${this.port}`; }
 
-  /** Starts the studio, then the tunnel. Resolves once the studio answers on this computer. */
+  /** Starts the studio, then the guest link. Resolves once the studio answers on this computer. */
   async start() {
     fs.mkdirSync(this.dataDir, { recursive: true });
     fs.accessSync(this.dataDir, fs.constants.W_OK);
+    this.tidyUp();
     const { password, secret } = this.secrets(), tools = toolPaths(this.toolsDir);
     this.password = password;
-    this.port = await freePort();
+    if (this.link.mode === 'own') {
+      this.port = Number(this.link.port) || DEFAULT_PORT;
+      if (!(await portFree(this.port))) throw new Error(`Port ${this.port} on this computer is already in use (is another studio running?). Your Cloudflare tunnel points at this port, so close whatever is using it, or change the port here and in Cloudflare.`);
+    } else this.port = await freePort();
     const env = {
       ...process.env, ELECTRON_RUN_AS_NODE: '1',
       PORT: String(this.port), BIND: '127.0.0.1', DATA_DIR: this.dataDir, STUDIO_NAME: 'Rolling', ADMIN_PASSWORD: password, SECRET: secret,
       FFMPEG: fs.existsSync(tools.ffmpeg) ? tools.ffmpeg : 'ffmpeg', FFPROBE: fs.existsSync(tools.ffprobe) ? tools.ffprobe : 'ffprobe',
       WHISPER_BIN: tools.whisper, WHISPER_MODELS: tools.models,
+      ...(this.link.mode === 'own' ? { ROLLING_PUBLIC_URL: this.link.address } : {}),
     };
     this.server = spawn(this.nodePath, [path.join(this.studioDir, 'server.js')], { cwd: this.studioDir, env, stdio: ['ignore', 'pipe', 'pipe', 'ipc'], windowsHide: true });
     // the studio's own messages: into the app's log, a log file you can find, and kept briefly to explain a failure
@@ -102,30 +146,50 @@ class LocalStudio extends EventEmitter {
     }
   }
 
+  // a guest-link program left running by a crash last time is stopped (only if it really is cloudflared)
+  tidyUp() {
+    let pid;
+    try { pid = Number(fs.readFileSync(this.pidFile, 'utf8')); } catch (e) { if (e.code !== 'ENOENT') this.log('warn', 'tunnel pid file', e); return; }
+    if (pid > 0 && isCloudflared(pid)) {
+      try { process.kill(pid); this.log('warn', `stopped a guest-link program left running from last time (pid ${pid})`); }
+      catch (e) { this.log('warn', `couldn't stop the old guest-link program (pid ${pid})`, e); }
+    }
+    fs.rmSync(this.pidFile, { force: true });
+  }
+
   // ---------- the guest link ----------
   startTunnel() {
-    const bin = toolPaths(this.toolsDir).cloudflared;
+    const bin = toolPaths(this.toolsDir).cloudflared, own = this.link.mode === 'own';
     if (!fs.existsSync(bin)) { this.emit('tunnel', { error: 'This copy of Rolling Desk has no tunnel program (cloudflared), so guests can\'t reach you' }); return; }
     // an empty config, so a cloudflared set up for something else on this computer can't get in the way
     const cfg = path.join(path.dirname(this.secretsFile), 'cloudflared-empty.yml');
-    fs.writeFileSync(cfg, '# Rolling Desk quick tunnel — deliberately empty\n{}\n');
-    const t = spawn(bin, ['tunnel', '--no-autoupdate', '--config', cfg, '--url', this.localUrl], { stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
+    fs.writeFileSync(cfg, '# Rolling Desk tunnel — deliberately empty\n{}\n');
+    const args = own ? ['tunnel', '--no-autoupdate', '--config', cfg, 'run'] : ['tunnel', '--no-autoupdate', '--config', cfg, '--url', this.localUrl];
+    // your tunnel's token goes in its environment, not on the command line (where other programs could see it)
+    const t = spawn(bin, args, { stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true, env: own ? { ...process.env, TUNNEL_TOKEN: this.link.token } : process.env });
     this.tunnel = t;
+    if (t.pid) fs.writeFile(this.pidFile, String(t.pid), e => { if (e) this.log('warn', 'tunnel pid file', e); });
     let found = false;
     const scan = d => {
-      const text = String(d), m = !found && text.match(TUNNEL_URL);
+      const text = String(d);
+      if (!found && own && /Registered tunnel connection/i.test(text)) { found = true; this.tunnelTries = 0; this.setPublicUrl(this.link.address); }
+      const m = !found && !own && text.match(TUNNEL_URL);
       if (m) { found = true; this.tunnelTries = 0; this.setPublicUrl(m[0]); }
-      if (/ERR|error/i.test(text)) text.split(/\r?\n/).filter(l => /ERR|error/i.test(l)).forEach(l => this.log('warn', '[tunnel] ' + l));
+      if (own && /Unauthorized|invalid token|token is not valid|failed to unmarshal|provided Tunnel token is not valid/i.test(text)) {
+        this.emit('tunnel', { error: 'Cloudflare didn\'t accept your tunnel token — copy it again from your Cloudflare tunnel (Install and run a connector)', fatal: true });
+      }
+      if (/ERR|error/i.test(text)) text.split(/\r?\n/).filter(l => /ERR|error/i.test(l)).forEach(l => this.log('warn', '[tunnel] ' + l.replace(this.link.token || '\0', '<token>')));
     };
     t.stdout.on('data', scan); t.stderr.on('data', scan);
     t.on('error', e => this.log('error', 'tunnel program failed to start', e));
     t.on('exit', code => {
       if (this.tunnel === t) this.tunnel = null;
+      fs.rm(this.pidFile, { force: true }, e => { if (e) this.log('warn', 'tunnel pid file', e); });
       if (this.stopping) return;
-      // try again (a new address), slowing down if it keeps failing
+      // try again, slowing down if it keeps failing (a quick link gets a new address; your own address stays)
       const wait = Math.min(60, 2 ** this.tunnelTries++) * 1000;
       this.log('warn', `the guest link (tunnel) stopped (${code}) — trying again in ${wait / 1000} s`);
-      this.emit('tunnel', { error: 'The guest link dropped — getting a new one…' });
+      this.emit('tunnel', { error: own ? 'The guest link dropped — reconnecting…' : 'The guest link dropped — getting a new one…' });
       setTimeout(() => { if (!this.stopping && this.server) this.startTunnel(); }, wait);
     });
   }
@@ -138,7 +202,7 @@ class LocalStudio extends EventEmitter {
     this.reachable(url).then(ok => this.emit('tunnel', { url, ready: ok, changed: false })).catch(e => this.log('warn', 'tunnel check', e));
   }
 
-  // a new quick-tunnel address takes a few seconds to work everywhere
+  // a new address takes a few seconds to work everywhere
   async reachable(url, ms = 60000) {
     const until = Date.now() + ms;
     let why = '';
@@ -147,7 +211,7 @@ class LocalStudio extends EventEmitter {
       catch (e) { why = e.message; }
       await new Promise(r => setTimeout(r, 2000));
     }
-    if (this.publicUrl === url) this.log('warn', `the guest link ${url} isn't reachable from here yet (${why}) — it usually starts working within a minute`);
+    if (this.publicUrl === url) this.log('warn', `the guest link ${url} isn't reachable from here yet (${why}) — ${this.link.mode === 'own' ? `check your tunnel's Public hostname points at http://localhost:${this.port}` : 'it usually starts working within a minute'}`);
     return false;
   }
 
@@ -172,7 +236,8 @@ class LocalStudio extends EventEmitter {
     this.stopping = true;
     for (const p of [this.tunnel, this.server]) if (p) try { p.kill(); } catch (e) { this.log('warn', 'stopping', e); }
     this.tunnel = null; this.server = null;
+    fs.rmSync(this.pidFile, { force: true });
   }
 }
 
-module.exports = { LocalStudio, toolPaths, TUNNEL_URL };
+module.exports = { LocalStudio, toolPaths, space, cleanAddress, TUNNEL_URL, DEFAULT_PORT, GB_PER_PERSON_HOUR };

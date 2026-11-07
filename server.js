@@ -15,14 +15,14 @@ const log = require('./log');
 const { run } = require('./proc');
 const express = require('express');
 const { WebSocketServer } = require('ws');
-const archiver = require('archiver');
+const { ZipArchive } = require('archiver');
 const post = require('./post');
 const treat = require('./treat');
 const createTranscriber = require('./transcribe');
 let nodemailer = null;
 try { nodemailer = require('nodemailer'); } catch { /* email optional */ }
 
-const VERSION = '0.8.1';
+const VERSION = '0.9.0';
 
 // ---------- settings (from .env next to this file) ----------
 (function loadEnv() {
@@ -94,6 +94,7 @@ const settings = (() => {
     smtp: Object.assign({ host: '', port: 587, user: '', pass: '', from: '' }, s.smtp),
     turn: Object.assign({ keyId: process.env.CF_TURN_KEY_ID || '', token: process.env.CF_TURN_API_TOKEN || '' }, s.turn),
     backupDir: s.backupDir !== undefined ? s.backupDir : (process.env.BACKUP_DIR || ''),
+    cloud: Object.assign({ remote: '' }, s.cloud), // rclone remote + folder, e.g. "gdrive:Rolling" (see docs/cloud-backup.md)
     publicUrl: s.publicUrl || process.env.PUBLIC_URL || '',
     transcribe: Object.assign({ enabled: true, model: process.env.WHISPER_MODEL || 'base.en', language: 'auto' }, s.transcribe),
     autoCompact: !!s.autoCompact,
@@ -663,6 +664,7 @@ async function processTakeUntraced(roomId, takeId, opts = {}) {
     if (!docsOnly && settings.autoCompact && t.backup && t.backup.ok) await compactTake(roomId, t, 'rebuild-data').catch(e => log.warn('tidy', 'automatic tidy-up failed', e));
     t.progress = ''; saveTake(t, true); announce(roomId, t);
     if (!docsOnly) await notifyReady(room, t).catch(e => log.warn('mail', 'could not send the ready email', e));
+    queueCloud(roomId, t.id); // in the background — a big upload never holds up the next take
   }
 }
 
@@ -793,7 +795,9 @@ async function buildDocsUntraced(t, room, out, add, assets) {
   if (sb) tracks.push({ kind: 'audio', name: 'Soundboard', file: sb.file, start: introLen, dur: await dur(sb.file), channels: 2 });
   if (assets.outro) tracks.push({ kind: 'audio', name: 'Outro', file: 'Outro.wav', start: introLen + show, dur: assets.outro.dur, channels: 2 });
   if (!audio.length) return;
-  const sessMarkers = markers.map(m => ({ label: m.label, at: introLen + m.at / 1000 }));
+  // every edit point goes in the session: markers, plus coughs, filler words, pauses and soundboard as ranges — each
+  // named with its kind first ("Filler words: um — Steve: …"), so any editor can sort them without guessing
+  const sessMarkers = edits.map(i => ({ label: post.markerName(i), at: introLen + i.at, dur: i.dur || 0, group: i.group }));
   await write(`${title} (Audition).sesx`, post.sesx(title, tracks, sessMarkers), 'session');
   const videos = [];
   for (const o of t.outputs.filter(o => o.kind === 'video' || (o.kind === 'screen' && o.file.endsWith('.mp4')))) {
@@ -823,6 +827,43 @@ async function compactTakeUntraced(roomId, t, what) {
   saveTake(t, true);
   return freed;
 }
+
+// ---------- cloud backup (rclone: Google Drive, Dropbox, OneDrive, S3… set up once with `rclone config`) ----------
+const RCLONE = process.env.RCLONE || 'rclone';
+const validRemote = r => /^[A-Za-z0-9_. -]{1,60}:[^\0\r\n"'`$\\]{0,200}$/.test(r) && !/(^|\/)\.\.(\/|$)/.test(r);
+const cloudQueue = []; let cloudBusy = false;
+function queueCloud(roomId, takeId, retry = 0) {
+  if (!settings.cloud.remote) return;
+  cloudQueue.push({ roomId, takeId, retry });
+  if (!cloudBusy) cloudNext().catch(e => log.warn('cloud', 'cloud backup queue', e));
+}
+async function cloudNext() {
+  cloudBusy = true;
+  try {
+    while (cloudQueue.length) {
+      const job = cloudQueue.shift(), room = loadRoom(job.roomId), t = room && loadTake(job.roomId, job.takeId);
+      if (!t || t.status !== 'ready' || !settings.cloud.remote) continue;
+      await cloudBackup(room, t);
+      // one automatic retry 10 minutes later (a wobbly connection); after that, "Upload again" on the Recordings page
+      if (t.cloud && !t.cloud.ok && job.retry < 1) setTimeout(() => queueCloud(job.roomId, job.takeId, job.retry + 1), process.env.CLOUD_RETRY_MS ? +process.env.CLOUD_RETRY_MS : 600000).unref();
+    }
+  } finally { cloudBusy = false; }
+}
+async function cloudBackupUntraced(room, t) {
+  const remote = settings.cloud.remote, stamp = new Date(t.started).toISOString().slice(0, 16).replace('T', ' ').replace(':', '-');
+  const dest = `${remote.replace(/\/+$/, '')}${remote.endsWith(':') ? '' : '/'}${fileSafe(room.name)}/Take ${t.n} - ${stamp}`;
+  t.cloud = { ok: false, busy: true, at: Date.now(), dest }; saveTake(t, true); announce(room.id, t);
+  try {
+    await run(RCLONE, ['copy', path.join(takeDir(room.id, t.id), 'out'), dest, '--exclude', '.*', '--transfers', '2', '--retries', '5', '--low-level-retries', '10', '--stats', '0'], { timeoutMs: 12 * 3600 * 1000 });
+    t.cloud = { ok: true, at: Date.now(), dest };
+    log.info('cloud', `take ${t.n} of ${room.name} copied to ${dest}`);
+  } catch (e) {
+    t.cloud = { ok: false, at: Date.now(), dest, error: /ENOENT|could not (start|run)/.test(e.message) ? 'rclone isn\'t installed — re-run the installer' : e.message.slice(0, 300) };
+    log.warn('cloud', `take ${t.n} of ${room.name}: ${t.cloud.error}`);
+  }
+  saveTake(t, true); announce(room.id, t);
+}
+const cloudBackup = log.trace('cloud', cloudBackupUntraced);
 
 // copy finished files to a second disk (e.g. a USB drive) — refuses to "back up" onto the same disk
 async function backupTakeUntraced(room, t, out) {
@@ -912,8 +953,22 @@ function setAdminCookie(req, res) {
   const secure = req.secure || req.headers['x-forwarded-proto'] === 'https';
   res.setHeader('Set-Cookie', `ps_admin=${encodeURIComponent(adminCookie())}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${30 * 86400}${secure ? '; Secure' : ''}`);
 }
+// wrong admin passwords: each one is slowed down, and whoever keeps guessing is paused for 15 minutes
+const LOGIN_WINDOW = 15 * 60 * 1000, LOGIN_TRIES = 8, loginFails = new Map();
+function whoIsAsking(req) { // behind the tunnel / web server on this machine, the real address is in its header
+  const local = /^(127\.|::1$|::ffff:127\.)/.test(req.socket.remoteAddress || '');
+  return (local && (req.get('cf-connecting-ip') || String(req.get('x-forwarded-for') || '').split(',')[0].trim())) || req.socket.remoteAddress || 'unknown';
+}
 app.post('/api/login', express.json(), (req, res) => {
-  if (!checkPassword((req.body || {}).password)) return setTimeout(() => res.status(401).json({ error: 'Wrong password' }), 800);
+  const who = whoIsAsking(req), now = Date.now();
+  for (const [k, v] of loginFails) { const keep = v.filter(x => now - x < LOGIN_WINDOW); if (keep.length) loginFails.set(k, keep); else loginFails.delete(k); }
+  if ((loginFails.get(who) || []).length >= LOGIN_TRIES) return res.status(429).json({ error: 'Too many wrong passwords — try again in 15 minutes' });
+  if (!checkPassword((req.body || {}).password)) {
+    loginFails.set(who, [...(loginFails.get(who) || []), now]);
+    if (loginFails.get(who).length === LOGIN_TRIES) log.warn('login', `${LOGIN_TRIES} wrong admin passwords in a row from ${who} — paused for 15 minutes`);
+    return setTimeout(() => res.status(401).json({ error: 'Wrong password' }), 800);
+  }
+  loginFails.delete(who);
   setAdminCookie(req, res);
   res.json({ ok: true });
 });
@@ -941,7 +996,7 @@ app.post('/api/settings/password', needAdmin, express.json(), (req, res) => {
 });
 app.get('/api/settings', needAdmin, async (req, res) => {
   res.json({ smtp: { ...settings.smtp, pass: settings.smtp.pass ? MASK : '' }, turn: { keyId: settings.turn.keyId, token: settings.turn.token ? MASK : '' },
-    backupDir: settings.backupDir, publicUrl: settings.publicUrl, backup: await backupStatus(), emailAvailable: !!nodemailer, turnError: cfIce.error, passwordChanged: !!settings.adminHash,
+    backupDir: settings.backupDir, cloud: settings.cloud, publicUrl: settings.publicUrl, backup: await backupStatus(), emailAvailable: !!nodemailer, turnError: cfIce.error, passwordChanged: !!settings.adminHash,
     transcribe: { ...settings.transcribe, installed: transcriber.available(), models: transcriber.installedModels() }, autoCompact: settings.autoCompact, clean: settings.clean, fps: settings.fps });
 });
 app.post('/api/settings', needAdmin, express.json(), async (req, res) => {
@@ -949,6 +1004,11 @@ app.post('/api/settings', needAdmin, express.json(), async (req, res) => {
   if (b.smtp) for (const k of ['host', 'port', 'user', 'pass', 'from']) if (k in b.smtp && !(k === 'pass' && b.smtp.pass === MASK)) settings.smtp[k] = k === 'port' ? (parseInt(b.smtp.port, 10) || 587) : cleanText(b.smtp[k], 200);
   if (b.turn) { if ('keyId' in b.turn) settings.turn.keyId = cleanText(b.turn.keyId, 200); if ('token' in b.turn && b.turn.token !== MASK) settings.turn.token = cleanText(b.turn.token, 400); cfIce = { at: 0, list: null, error: '' }; }
   if ('backupDir' in b) settings.backupDir = cleanText(b.backupDir, 300);
+  if (b.cloud && 'remote' in b.cloud) {
+    const rem = cleanText(b.cloud.remote, 260);
+    if (rem && !validRemote(rem)) return res.status(400).json({ error: 'Cloud backup: type the rclone remote and folder, like gdrive:Rolling' });
+    settings.cloud.remote = rem;
+  }
   if ('publicUrl' in b) settings.publicUrl = cleanText(b.publicUrl, 200).replace(/\/+$/, '');
   if (b.transcribe) { settings.transcribe.enabled = !!b.transcribe.enabled; if (/^[a-z0-9.-]{2,40}$/.test(b.transcribe.model || '')) settings.transcribe.model = b.transcribe.model; if (/^[a-z]{2}$|^auto$/.test(b.transcribe.language || '')) settings.transcribe.language = b.transcribe.language; }
   if ('autoCompact' in b) settings.autoCompact = !!b.autoCompact;
@@ -988,7 +1048,7 @@ function transcriptStatus(t) {
 }
 function takeSummary(t) {
   return { id: t.id, n: t.n, started: t.started, stopped: t.stopped, status: t.status, progress: t.progress, error: t.error,
-    people: [...new Set(Object.values(t.segs).map(s => s.name))], outputs: t.serving || t.outputs || [], markers: t.markers || [], backup: t.backup || null,
+    people: [...new Set(Object.values(t.segs).map(s => s.name))], outputs: t.serving || t.outputs || [], markers: t.markers || [], backup: t.backup || null, cloud: t.cloud || null,
     pct: t.pct || 0, levels: t.levels || {}, episode: t.episode || null, compacted: !!t.compacted,
     transcript: transcriptStatus(t),
     totalSize: (t.serving || t.outputs || []).reduce((a, o) => a + o.size, 0) };
@@ -1036,6 +1096,31 @@ app.post('/api/rooms/:id/settings', express.json(), (req, res) => {
   const lr = live.get(r.id);
   if (lr && Array.isArray(b.rundown)) broadcast(lr, { t: 'rundown', rundown: r.rundown || [] });
   res.json(roomSummary(r));
+});
+// invite a guest: an email with their link, a short setup checklist and a calendar entry — or the same text to copy
+const inviteCount = new Map(); // room → recent sends (a host link can't be used to spam)
+app.post('/api/rooms/:id/invite', express.json(), async (req, res) => {
+  const r = loadRoom(req.params.id);
+  if (!canManage(req, r)) return res.status(403).json({ error: 'Not allowed' });
+  const b = req.body || {}, email = cleanText(b.email, 200);
+  const when = b.when ? new Date(String(b.when)) : null;
+  if (when && Number.isNaN(+when)) return res.status(400).json({ error: 'That date and time isn\'t valid' });
+  const base = linkBase || settings.publicUrl || `${req.protocol}://${req.get('host')}`;
+  const inv = post.guestInvite({ studio: STUDIO_NAME, show: r.name, guest: cleanText(b.name, 80), host: cleanText(b.host, 80), link: `${base}/r/${r.id}`,
+    when, minutes: Math.max(10, Math.min(600, parseInt(b.minutes, 10) || 60)), tz: cleanText(b.tz, 60), note: cleanText(b.note, 1000) });
+  if (!b.send) return res.json({ subject: inv.subject, text: inv.text });
+  if (!/^[^@\s,;]+@[^@\s,;]+\.[^@\s,;]+$/.test(email)) return res.status(400).json({ error: 'Type one email address' });
+  const tr = mailer();
+  if (!tr) return res.status(400).json({ error: 'Email isn\'t set up on this studio — use "Copy invite" instead, or set up email in Studio settings' });
+  const now = Date.now(), recent = (inviteCount.get(r.id) || []).filter(x => now - x < 3600e3);
+  if (recent.length >= 20) return res.status(429).json({ error: 'That\'s a lot of invites — try again in an hour' });
+  inviteCount.set(r.id, [...recent, now]);
+  try {
+    await tr.sendMail({ from: settings.smtp.from || settings.smtp.user, to: email, subject: inv.subject, text: inv.text,
+      ...(inv.ics ? { icalEvent: { method: 'PUBLISH', filename: 'invite.ics', content: inv.ics } } : {}) });
+    log.info('invite', `invited ${email} to ${r.name}`);
+    res.json({ ok: true, subject: inv.subject, text: inv.text });
+  } catch (e) { log.warn('invite', `couldn't send to ${email}: ${e.message}`); res.status(502).json({ error: `The email couldn't be sent: ${e.message}` }); }
 });
 app.post('/api/rooms/:id/takes/:take/rebuild', (req, res) => {
   const r = loadRoom(req.params.id);
@@ -1158,6 +1243,28 @@ app.post('/api/rooms/:id/takes/:take/transcribe', (req, res) => {
   queueProcess(r.id, t.id, { docsOnly: true, transcribe: true });
   res.json({ ok: true });
 });
+app.post('/api/rooms/:id/takes/:take/cloud', (req, res) => { // "Upload again"
+  const r = loadRoom(req.params.id);
+  if (!canManage(req, r)) return res.status(403).json({ error: 'Not allowed' });
+  const t = loadTake(r.id, req.params.take);
+  if (!t) return res.status(404).json({ error: 'Not found' });
+  if (!settings.cloud.remote) return res.status(400).json({ error: 'Cloud backup isn\'t set up — Studio settings on the main page' });
+  if (t.status !== 'ready') return res.status(409).json({ error: 'Busy — try again when the take is ready' });
+  queueCloud(r.id, t.id); // gets its one automatic retry too
+  res.json({ ok: true });
+});
+// check the cloud backup works: lists your remotes, then looks inside the one you typed
+app.post('/api/settings/cloud-test', needAdmin, express.json(), async (req, res) => {
+  const remote = cleanText((req.body || {}).remote, 260) || settings.cloud.remote;
+  if (!validRemote(remote)) return res.status(400).json({ error: 'Type the rclone remote and folder, like gdrive:Rolling' });
+  let remotes;
+  try { remotes = (await run(RCLONE, ['listremotes'], { timeoutMs: 15000 })).stdout.split(/\r?\n/).filter(Boolean); }
+  catch (e) { return res.status(400).json({ error: /could not (start|run)/.test(e.message) ? 'rclone isn\'t installed on this server — re-run the installer' : e.message.slice(0, 300) }); }
+  const name = remote.slice(0, remote.indexOf(':') + 1);
+  if (!remotes.includes(name)) return res.status(400).json({ error: remotes.length ? `There's no rclone remote called "${name}" — you have: ${remotes.join(', ')}` : 'No cloud accounts are set up in rclone yet — see the guide (rclone config)' });
+  try { await run(RCLONE, ['mkdir', remote], { timeoutMs: 30000 }); await run(RCLONE, ['lsf', '--max-depth', '1', remote], { timeoutMs: 30000 }); res.json({ ok: true, remotes }); }
+  catch (e) { res.status(400).json({ error: `Couldn't reach ${remote}: ${e.message.slice(0, 300)}` }); }
+});
 app.post('/api/rooms/:id/takes/:take/clean', (req, res) => {
   const r = loadRoom(req.params.id);
   if (!canManage(req, r)) return res.status(403).json({ error: 'Not allowed' });
@@ -1194,7 +1301,7 @@ app.get('/zip/:room/:take', (req, res) => {
   if (!t || !t.outputs.length) return res.status(404).send('Nothing to download yet');
   const base = takeLabel(r, t);
   res.attachment(base + '.zip');
-  const z = archiver('zip', { store: true });
+  const z = new ZipArchive({ store: true });
   z.on('error', e => { log.error('zip', 'zip download failed', e); res.destroy(); });
   z.pipe(res);
   for (const o of t.serving || t.outputs) z.file(path.join(takeDir(r.id, t.id), 'out', o.file), { name: `${base}/${o.file}` });
@@ -1594,6 +1701,9 @@ for (const id of fs.readdirSync(ROOMS_DIR)) {
       if (!lr.take) { lr.take = t.id; lr.segment = t.segment || null; log.info('rec', `resuming take ${t.n} in "${id}" after restart`); scheduleEmptyStop(id, lr, 10); }
       else { t.status = 'waiting'; t.stopped = t.stopped || Date.now(); saveTake(t, true); queueProcess(id, t.id); }
     } else if (['waiting', 'queued', 'processing'].includes(t.status)) queueProcess(id, t.id);
+    else if (t.status === 'ready' && t.cloud && t.cloud.busy) { // a cloud upload cut off by the restart: start it again
+      t.cloud = { ...t.cloud, busy: false, error: 'interrupted by a restart — uploading again' }; saveTake(t, true); queueCloud(id, t.id);
+    }
   }
 }
 

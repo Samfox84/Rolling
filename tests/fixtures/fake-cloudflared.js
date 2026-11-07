@@ -5,7 +5,13 @@
 const fs = require('fs');
 const args = process.argv.slice(2);
 if (args[0] === '--version') { console.log('cloudflared version 0000.0.0 (fake for tests)'); process.exit(0); }
-if (process.env.FAKE_TUNNEL_LOG) fs.appendFileSync(process.env.FAKE_TUNNEL_LOG, JSON.stringify({ pid: process.pid, args }) + '\n');
+if (process.env.FAKE_TUNNEL_LOG) fs.appendFileSync(process.env.FAKE_TUNNEL_LOG, JSON.stringify({ pid: process.pid, args, token: process.env.TUNNEL_TOKEN || null }) + '\n');
+// a named tunnel (`tunnel run`, token in TUNNEL_TOKEN): connects, and says so like the real one
+if (args.includes('run')) {
+  setTimeout(() => process.stderr.write(`2026-11-07T20:00:01Z INF Registered tunnel connection connIndex=0 connection=abc event=0 ip=198.41.200.13 location=lhr01 protocol=quic\n`), 300);
+  setInterval(() => {}, 1 << 30);
+  return;
+}
 process.stderr.write('2026-11-06T20:00:00Z INF Requesting new quick Tunnel on trycloudflare.com...\n');
 setTimeout(() => {
   process.stderr.write('2026-11-06T20:00:01Z INF +--------------------------------------------------------------------------------------------+\n');

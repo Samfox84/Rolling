@@ -6,6 +6,8 @@
  *    and swaps it in when you choose "Restart". Because the app downloads it (not a browser), macOS doesn't
  *    quarantine it, so this works without paying Apple for signing.
  *  • Linux AppImage: the same, replacing the AppImage file.
+ *  • Windows: downloads and checks the new installer, then runs it silently once the app has quit, and it opens the
+ *    new version (the installer keeps your settings and installs to the same place).
  *  • Anything else (the .deb, or an app it can't write over): tells you a new version is out and opens the page.
  * Never restarts on its own: main.js only offers it when nothing is recording or saving.
  */
@@ -26,13 +28,14 @@ class Updater extends EventEmitter {
     Object.assign(this, { current, workDir, platform, arch, execPath, appImage, api, repo, log });
     this.ready = null; // { version, path, page } once downloaded and checked
   }
-  /** 'mac' | 'appimage' | 'manual' */
+  /** 'mac' | 'appimage' | 'windows' | 'manual' */
   kind() {
     if (this.platform === 'darwin' && /\.app\/Contents\/MacOS\//.test(this.execPath)) return 'mac';
     if (this.platform === 'linux' && this.appImage) return 'appimage';
+    if (this.platform === 'win32' && /\.exe$/i.test(this.execPath) && !/electron\.exe$/i.test(this.execPath)) return 'windows';
     return 'manual';
   }
-  target() { return this.kind() === 'mac' ? this.execPath.replace(/(\.app)\/Contents\/MacOS\/.*$/, '$1') : this.appImage; }
+  target() { return this.kind() === 'mac' ? this.execPath.replace(/(\.app)\/Contents\/MacOS\/.*$/, '$1') : this.kind() === 'windows' ? this.execPath : this.appImage; }
   canReplace() { try { fs.accessSync(path.dirname(this.target()), fs.constants.W_OK); return true; } catch { return false; } }
 
   /** newest desk release, or null if this is the newest */
@@ -45,7 +48,7 @@ class Updater extends EventEmitter {
     if (!/^desk-v\d+\.\d+\.\d+$/.test(r.tag_name || '')) return null;
     r.version = r.tag_name.slice(6);
     if (r.version === this.current) return null;
-    const want = this.kind() === 'mac' ? new RegExp(`-mac-${this.arch}\\.zip$`) : this.kind() === 'appimage' ? /\.AppImage$/ : null;
+    const want = { mac: new RegExp(`-mac-${this.arch}\\.zip$`), appimage: /\.AppImage$/, windows: new RegExp(`-win-${this.arch}\\.exe$`) }[this.kind()] || null;
     return { version: r.version, page: r.html_url, notes: r.body || '', asset: want && r.assets.find(a => want.test(a.name)), sums: r.assets.find(a => a.name === 'SHA256SUMS.txt') };
   }
 
@@ -72,7 +75,7 @@ class Updater extends EventEmitter {
       const app = (await fsp.readdir(path.join(dir, 'app'))).find(f => f.endsWith('.app'));
       if (!app) throw new Error('The downloaded update had no app inside');
       ready = path.join(dir, 'app', app);
-    } else await fsp.chmod(file, 0o755);
+    } else if (this.kind() !== 'windows') await fsp.chmod(file, 0o755);
     this.ready = { version: info.version, path: ready, page: info.page };
     this.emit('ready', this.ready);
     return this.ready;
@@ -89,9 +92,25 @@ class Updater extends EventEmitter {
       ...(this.kind() === 'mac' ? [`xattr -dr com.apple.quarantine ${q(oldP)} 2>/dev/null`, `open ${q(oldP)}`] : [`chmod 755 ${q(oldP)}`, `nohup ${q(oldP)} >/dev/null 2>&1 &`]),
       ''].join('\n');
   }
+  /** Windows: wait for the app to quit, run the new installer silently, and open the new version (--force-run) */
+  windowsScript(pid = process.pid) {
+    const exe = this.ready.path;
+    if (/["%^&|<>]/.test(exe)) throw new Error(`Can't run the installer from ${exe}`);
+    return ['@echo off',
+      ':wait',
+      `tasklist /FI "PID eq ${Number(pid)}" /NH | find "${Number(pid)}" >nul && (timeout /t 1 /nobreak >nul & goto wait)`,
+      `"${exe}" /S --force-run`,
+      ''].join('\r\n');
+  }
   /** start the swap; the caller then quits the app */
   apply(pid = process.pid) {
     if (!this.ready) throw new Error('No update downloaded');
+    if (this.kind() === 'windows') {
+      const w = path.join(this.workDir, 'apply-update.cmd');
+      fs.writeFileSync(w, this.windowsScript(pid));
+      spawn('cmd.exe', ['/d', '/c', w], { detached: true, stdio: 'ignore', windowsHide: true }).unref();
+      return;
+    }
     const s = path.join(this.workDir, 'apply-update.sh');
     fs.writeFileSync(s, this.script(pid), { mode: 0o755 });
     spawn('/bin/sh', [s], { detached: true, stdio: 'ignore' }).unref();

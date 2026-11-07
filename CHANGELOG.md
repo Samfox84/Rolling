@@ -4,6 +4,21 @@ What changed in each version of the studio — the part that runs on your server
 Newest first. The desktop app has its own list: [desk/CHANGELOG.md](desk/CHANGELOG.md).
 Rolling is still pre-release, so versions are 0.x.
 
+## 0.9.0 — guests, backups and safety
+- **✉️ Invite a guest** (Recordings page): emails them their link, a 5-minute setup checklist and a calendar entry
+  with a reminder — or copy the invite to send yourself on WhatsApp, Messages or email
+- **☁️ Cloud backup** to Google Drive, Dropbox, OneDrive and 70 more (through rclone): every finished take uploads in
+  the background, tries again by itself if the connection drops, and carries on after a restart. Status and
+  **Upload again** on the Recordings page; **Test cloud backup** in Studio settings. Guide: docs/cloud-backup.md
+- **Phones:** guests can join from a phone — the timecode bar no longer overlaps on small screens, the screen is
+  kept on while in the studio, phone tips in the lobby, and a reminder if they switched apps mid-recording
+- **Session files:** every edit point is in the Audition session — markers and producer notes, plus coughs, filler
+  words, long pauses and soundboard as **ranges** with their length, each named with its kind
+- **Safety:** anyone who keeps guessing the admin password is paused for 15 minutes (by their real address, even
+  behind the tunnel); email and zip building blocks updated (a known email problem fixed); GitHub now checks the
+  building blocks every week and runs the tests on every change; SECURITY.md says how to report a problem privately
+- Tested with a long show: 5 people × 30 minutes uploaded and made into files, memory steady, every file the right length
+
 ## 0.8.1
 - Fix: someone knocking to join now shows on top of the Console (it was hidden behind it)
 - Guest links on every page use the studio's public address when it has one (needed for Rolling Desk hosting)

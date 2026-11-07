@@ -7,6 +7,7 @@ const { spawn, spawnSync } = require('child_process');
 
 const ROOT = path.join(__dirname, '..');
 const FAKE_WHISPER = path.join(__dirname, 'fixtures', 'fake-whisper.js');
+const FAKE_RCLONE = path.join(__dirname, 'fixtures', 'fake-rclone.js');
 
 function tmpDir(name) { return fs.mkdtempSync(path.join(os.tmpdir(), `rolling-${name}-`)); }
 
@@ -54,10 +55,11 @@ function xmlWellFormed(xml) {
 async function startServer(extraEnv = {}) {
   const dataDir = extraEnv.DATA_DIR || tmpDir('data');
   fs.chmodSync(FAKE_WHISPER, 0o755);
+  fs.chmodSync(FAKE_RCLONE, 0o755);
   const models = tmpDir('models'); fs.writeFileSync(path.join(models, 'ggml-base.en.bin'), 'test');
   const port = Number(extraEnv.PORT) || 20000 + Math.floor(Math.random() * 20000);
   const env = { ...process.env, PORT: String(port), BIND: '127.0.0.1', DATA_DIR: dataDir, ADMIN_PASSWORD: 'testpass', SECRET: 'testsecret',
-    ROOM_TONE_SECONDS: '3', LATE_REBUILD_SECONDS: '2', LIVE_TX_SECONDS: '1', FAKE_WHISPER_FAIL_FLAG: path.join(dataDir, 'whisper-fail'), NO_EXTERNAL_CALLS: '1', WHISPER_BIN: FAKE_WHISPER, WHISPER_MODELS: models, LOG_LEVEL: 'warn', ...extraEnv };
+    ROOM_TONE_SECONDS: '3', LATE_REBUILD_SECONDS: '2', LIVE_TX_SECONDS: '1', FAKE_WHISPER_FAIL_FLAG: path.join(dataDir, 'whisper-fail'), NO_EXTERNAL_CALLS: '1', WHISPER_BIN: FAKE_WHISPER, WHISPER_MODELS: models, RCLONE: FAKE_RCLONE, FAKE_RCLONE_ROOT: path.join(dataDir, 'pretend-cloud'), CLOUD_RETRY_MS: '1500', LOG_LEVEL: 'warn', ...extraEnv };
   const proc = spawn(process.execPath, [path.join(ROOT, 'server.js')], { env, stdio: ['ignore', 'pipe', 'pipe'], cwd: os.tmpdir() });
   let logs = '';
   proc.stdout.on('data', d => { logs += d; });

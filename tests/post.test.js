@@ -75,6 +75,19 @@ test('Audition .sesx is well-formed, places clips in samples, maps mono to both 
   assert.match(x, /relativePath="Steve.wav"/);
   assert.match(x, /Ep 1 &lt;test&gt; &amp; &quot;quotes&quot;/);
 });
+test('session markers: points and ranges, each named with its kind', () => {
+  const x = post.sesx('Show', [{ name: 'Steve', file: 'Steve.wav', start: 0, dur: 60, channels: 1 }],
+    [{ label: 'Great bit 1', at: 10 }, { label: 'Filler words: um — Steve: “Um, so”', at: 20, dur: 2.5 }]);
+  assert.ok(xmlWellFormed(x));
+  assert.match(x, /<marker duration="0" id="0" name="Great bit 1" startPoint="480000" type="cue"\/>/);
+  assert.match(x, /<marker duration="120000" id="1" name="Filler words: um — Steve: “Um, so”" startPoint="960000" type="cue"\/>/);
+  assert.equal(post.markerName({ group: 'Great bit', label: 'Great bit 1' }), 'Great bit 1');
+  assert.equal(post.markerName({ group: 'Cough', label: 'Cough — Guest' }), 'Cough — Guest');
+  assert.equal(post.markerName({ group: 'Filler words', label: 'um — Steve' }), 'Filler words: um — Steve');
+  assert.equal(post.markerName({ group: 'Segment', label: 'Interview' }), 'Segment: Interview');
+  assert.equal(post.markerName({ group: 'Marker', label: 'Marker 3' }), 'Marker 3');
+  assert.equal(post.markerName({ group: 'Long pause', label: 'Pause 3.2 s' }), 'Long pause: Pause 3.2 s');
+});
 test('FCP XML is well-formed and offsets clips by their start', () => {
   const x = post.fcpXml('Show', [{ kind: 'video', file: 'a.mp4', start: 3, dur: 10, w: 1280, h: 720 }, { kind: 'audio', file: 'A b.wav', start: 3, dur: 10, channels: 1 }], [{ label: 'M', at: 5 }], 30);
   assert.match(x, /<timebase>30<\/timebase>/);
@@ -113,4 +126,14 @@ test('chapters skip edit notes (cut / retake / great bit) but keep segments, ad 
   const ch = post.chapters({ markers: [{ at: 5000, label: 'Interview', tag: 'segment' }, { at: 9000, label: 'Cut this 1', tag: 'cut' }, { at: 12000, label: 'Ad break 1', tag: 'ad' }, { at: 15000, label: 'Great bit 1', tag: 'great' }] }, 0);
   const titles = JSON.parse(ch.json).chapters.map(c => c.title);
   assert.deepEqual(titles, ['Start', 'Interview', 'Ad break 1']);
+});
+
+test('guest invite: link, checklist, time in the host\'s time zone, and a calendar entry', () => {
+  const inv = post.guestInvite({ show: 'AOL Underground', guest: 'Leo', host: 'Sam', link: 'https://studio.example.com/r/abc', when: new Date('2026-07-01T18:30:00Z'), minutes: 90, tz: 'Europe/London', note: 'Bring a story; or two, please' });
+  assert.match(inv.subject, /AOL Underground — Wednesday 1 July at 19:30 BST/);
+  assert.match(inv.text, /Hi Leo,/); assert.match(inv.text, /https:\/\/studio\.example\.com\/r\/abc/); assert.match(inv.text, /headphones/); assert.match(inv.text, /Saved ✓/);
+  assert.match(inv.ics, /DTSTART:20260701T183000Z\r\nDTEND:20260701T200000Z/);
+  assert.match(inv.ics, /SUMMARY:Recording: AOL Underground/);
+  assert.equal(post.guestInvite({ show: 'S', link: 'x', when: null }).ics, null, 'no time, no calendar entry');
+  assert.match(post.guestInvite({ show: 'S', link: 'x', when: new Date('2026-07-01T18:30:00Z'), tz: 'Not/AZone' }).subject, /18:30 UTC/, 'an unknown time zone shows UTC');
 });

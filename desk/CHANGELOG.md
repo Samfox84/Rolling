@@ -4,6 +4,19 @@ What changed in each version of the app. Newest first. Downloads are on the
 [Releases page](https://github.com/Samfox84/Rolling/releases). The studio itself has its own list:
 [../CHANGELOG.md](../CHANGELOG.md).
 
+## 0.3.0
+- **Your own guest-link address** when hosting (e.g. podcast.yourname.com, the same every time) with a free
+  Cloudflare account — step-by-step with sign-up links on the start screen. Your tunnel token is kept only on this
+  computer, encrypted
+- **Free space** for your studio folder on the start screen (and roughly how many hours of recording), in the window
+  title while hosting, and a warning if it's nearly full
+- **Windows updates itself** now too (downloads the new installer, checks its fingerprint, installs after you restart)
+- **Problem reports:** the app keeps a diary of what it did and any errors (activity.log, and a crash file whenever
+  something goes wrong). **Help › Save a problem report…** puts one file on your Desktop to send on Discord or by
+  email — keys, tokens, passwords, emails and your user name are removed first. **Help › Open the log folder**
+- If the app ever crashes while hosting, the guest-link program it left running is stopped next time it opens
+- Small fixes: a failed page shows a clear message; the start screen is taller to fit everything
+
 ## 0.2.2
 - Fix: **Host it on this computer** failed to start ("The studio couldn't start") because the studio's packages were
   left out of the app. Every build now starts the studio from inside the finished app before it's published

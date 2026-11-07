@@ -82,6 +82,11 @@ function editItems(t, markers, people) {
   for (const e of t.board || []) if (e.to != null) items.push({ at: e.from / 1000, dur: (e.to - e.from) / 1000, label: `${e.mode === 'bed' ? 'Music bed' : e.mode === 'effect' ? 'Effect' : 'Jingle'}: ${e.name}`, group: 'Soundboard' });
   return items.sort((a, b) => a.at - b.at);
 }
+// a marker's name for editors: its kind first, unless the label already says it ("Great bit 1", "Cough — Guest")
+function markerName(i) {
+  if (i.group === 'Marker' || String(i.label).toLowerCase().startsWith(String(i.group).toLowerCase().replace(/s$/, ''))) return i.label;
+  return `${i.group}: ${i.label}`;
+}
 function editList(items, title) {
   const groups = ['Cut this', 'Retake', 'Great bit', 'Producer note', 'Ad break', 'Segment', 'Marker', 'Soundboard', 'Filler words', 'Cough', 'Talkback', 'Long pause'];
   const lines = [`${title} — edit list`, 'Times are from the start of the recordings (the untouched and cleaned files). Coughs and talkback are already muted in the Producer mix.', ''];
@@ -154,7 +159,7 @@ function sesx(title, tracks, markers) {
         </audioClip>
       </audioTrack>`;
   }).join('');
-  const mk = (markers || []).map((m, i) => `<marker duration="0" id="${i}" name="${xmlEsc(m.label)}" startPoint="${S(m.at)}" type="cue"/>`).join('');
+  const mk = (markers || []).map((m, i) => `<marker duration="${S(m.dur || 0)}" id="${i}" name="${xmlEsc(m.label)}" startPoint="${S(m.at)}" type="cue"/>`).join(''); // a range when it has a length
   return `<?xml version="1.0" encoding="UTF-8" standalone="no" ?>
 <!DOCTYPE sesx>
 <sesx version="1.4">
@@ -211,4 +216,40 @@ function auditionMarkersCsv(markers) {
   return 'Name\tStart\tDuration\tTime Format\tType\tDescription\r\n' + markers.map(m => `${m.label.replace(/\t/g, ' ')}\t${t(m.at)}\t${t(m.dur || 0)}\tdecimal\tCue\t${(m.group || '').replace(/\t/g, ' ')}`).join('\r\n') + '\r\n';
 }
 
-module.exports = { TAGS, editItems, editList, hms, transcriptTxt, transcriptSrt, transcriptVtt, chapters, levelReport, verdict, sesx, fcpXml, auditionMarkersCsv };
+// ---------- guest invite (email text + calendar file) ----------
+/** when: a Date or null; tz: an IANA time zone for showing the time (falls back to UTC) */
+function guestInvite({ studio, show, guest, host, link, when, minutes = 60, tz, note }) {
+  let tzOk = 'UTC';
+  try { if (tz) { new Intl.DateTimeFormat('en-GB', { timeZone: tz }); tzOk = tz; } } catch { /* unknown zone: show UTC */ }
+  const at = when && !Number.isNaN(+when) ? when : null;
+  const fmt = at && new Intl.DateTimeFormat('en-GB', { timeZone: tzOk, weekday: 'long', day: 'numeric', month: 'long', hour: '2-digit', minute: '2-digit', timeZoneName: 'short' }).format(at);
+  const subject = `You're invited to record ${show}${at ? ` — ${fmt}` : ''}`;
+  const text = [
+    `Hi ${guest || 'there'},`, '',
+    `${host || 'The host'} has invited you to record ${show}${at ? ` on ${fmt}` : ''}.`,
+    ...(note ? ['', note] : []), '',
+    'Your link (nothing to install):', link, '',
+    'Before the show — takes 5 minutes:',
+    '1. Use Chrome or Edge on a laptop or desktop. A phone works too, but a computer is best.',
+    '2. Plug in headphones (wired is best) — this stops echo.',
+    '3. Find a quiet room. Soft furnishings help; avoid echoey kitchens.',
+    '4. Test any time before the show: open your link, press "Turn on camera & mic", check the level bar moves into the green when you talk, and try "Sound check". You won\'t join until you press "Join studio".',
+    '5. Keep your laptop plugged in, and close other apps that use the camera or mic (Zoom, Teams, FaceTime…).', '',
+    'On the day: open your link a few minutes early and press "Join studio" — the host will let you in.',
+    'Your voice is recorded in full quality on your own computer as you talk. When we finish, please keep the page open until it says "Saved ✓".', '',
+    'See you then!', host ? `— ${host}` : '',
+  ].join('\n').trim() + '\n';
+  let ics = null;
+  if (at) {
+    const z = d => d.toISOString().replace(/[-:]/g, '').replace(/\.\d{3}/, '');
+    const e = v => String(v).replace(/\\/g, '\\\\').replace(/[;,]/g, m => '\\' + m).replace(/\r?\n/g, '\\n');
+    ics = ['BEGIN:VCALENDAR', 'VERSION:2.0', 'PRODID:-//Rolling//Guest invite//EN', 'METHOD:PUBLISH', 'BEGIN:VEVENT',
+      `UID:${z(at)}-${Math.random().toString(36).slice(2)}@rolling`, `DTSTAMP:${z(new Date())}`, `DTSTART:${z(at)}`, `DTEND:${z(new Date(+at + minutes * 60000))}`,
+      `SUMMARY:${e(`Recording: ${show}`)}`, `DESCRIPTION:${e(`Your link: ${link}\n\nOpen it a few minutes early, with headphones on.`)}`, `URL:${e(link)}`, `LOCATION:${e(link)}`,
+      'BEGIN:VALARM', 'TRIGGER:-PT15M', 'ACTION:DISPLAY', `DESCRIPTION:${e(`${show} starts in 15 minutes`)}`, 'END:VALARM',
+      'END:VEVENT', 'END:VCALENDAR', ''].join('\r\n');
+  }
+  return { subject, text, ics, studio };
+}
+
+module.exports = { TAGS, editItems, markerName, guestInvite, editList, hms, transcriptTxt, transcriptSrt, transcriptVtt, chapters, levelReport, verdict, sesx, fcpXml, auditionMarkersCsv };

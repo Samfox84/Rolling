@@ -149,6 +149,15 @@ test('full take: record, upload lossless audio, build every file', { skip: !hasW
     'Mix - all voices.wav', 'Steve - cleaned -16 LUFS.wav', 'Guest - cleaned -16 LUFS.wav', 'Producer mix -16 LUFS.wav', 'Edit list.txt', 'Transcript.txt', 'Transcript.srt', 'Transcript.vtt', 'Level report.txt', 'Markers.txt', 'Chapters.json',
     'Test Show - Ep 7 - Testing (Audition).sesx', 'Test Show - Ep 7 - Testing (Premiere, Resolve, Audition).xml']) assert.ok(files.includes(f), `missing ${f}`);
 
+  // "Download everything": one zip with every file, readable by an ordinary unzip program
+  const zipRes = await fetch(`${srv.url}/zip/${room.id}/${take.id}?k=${room.hostKey}`);
+  assert.equal(zipRes.status, 200);
+  const zipFile = path.join(srv.dataDir, 'everything.zip');
+  fs.writeFileSync(zipFile, Buffer.from(await zipRes.arrayBuffer()));
+  const listing = require('child_process').execFileSync('unzip', ['-l', zipFile]).toString();
+  for (const f of files) assert.ok(listing.includes(f), `${f} missing from the zip`);
+  assert.equal((await fetch(`${srv.url}/zip/${room.id}/${take.id}?k=wrong`)).status, 403);
+
   // lossless audio, lined up: 40 s of audio that started 50 ms into the take
   assert.ok(Math.abs(duration(path.join(out, 'Steve.wav')) - 40.05) < 0.03);
   // normalised copies really hit their targets (measured by ffmpeg, not by our own code)
@@ -194,6 +203,10 @@ test('full take: record, upload lossless audio, build every file', { skip: !hasW
   // session files are valid XML and reference the people
   const sesx = fs.readFileSync(path.join(out, 'Test Show - Ep 7 - Testing (Audition).sesx'), 'utf8');
   assert.ok(xmlWellFormed(sesx)); assert.match(sesx, /relativePath="Steve.wav"/);
+  // every edit point is in the session for the editor: markers, notes, and ranges (coughs, filler words) with a length
+  assert.match(sesx, /name="Producer note: Great story about the AOL disks/);
+  assert.match(sesx, /<marker duration="[1-9]\d*" id="\d+" name="Filler words: um, uh — /);
+  assert.match(sesx, /<marker duration="[1-9]\d*" id="\d+" name="Cough — Guest"/);
   assert.ok(xmlWellFormed(fs.readFileSync(path.join(out, 'Test Show - Ep 7 - Testing (Premiere, Resolve, Audition).xml'), 'utf8')));
   // downloads are named after the episode
   const dl = await fetch(`${srv.url}/dl/${room.id}/${take.id}/Steve.wav?k=${room.hostKey}`);
@@ -345,6 +358,86 @@ test('green room, remote guest help, scenes and the shared script', { skip: !has
   saved = JSON.parse(fs.readFileSync(path.join(srv.dataDir, 'rooms', r2.id, 'room.json'), 'utf8'));
   assert.equal(saved.script.share, 'all');
   for (const c of [host, steve, guest, late]) c.ws.close();
+});
+
+test('cloud backup: checks the account, uploads finished takes, retries by itself after a failure', async () => {
+  const set = remote => fetch(srv.url + '/api/settings', { method: 'POST', headers: { cookie, 'Content-Type': 'application/json' }, body: JSON.stringify({ cloud: { remote } }) });
+  const testCloud = async remote => (await fetch(srv.url + '/api/settings/cloud-test', { method: 'POST', headers: { cookie, 'Content-Type': 'application/json' }, body: JSON.stringify({ remote }) })).json();
+  assert.equal((await set('no colon here')).status, 400, 'not a remote');
+  assert.equal((await set('gdrive:../../etc')).status, 400, 'no climbing out of the folder');
+  assert.match((await testCloud('dropbox:Rolling')).error, /no rclone remote called "dropbox:" — you have: gdrive:/);
+  assert.equal((await testCloud('gdrive:Rolling')).ok, true);
+  assert.equal((await set('gdrive:Rolling')).status, 200);
+  const cloudRoot = path.join(srv.dataDir, 'pretend-cloud');
+  try {
+    const info = await (await fetch(`${srv.url}/api/rooms/${room.id}?k=${room.hostKey}`)).json();
+    const take = info.takes.find(t => t.status === 'ready');
+    assert.ok(take, 'a finished take from the earlier test');
+    // the connection is down: the upload fails, says why, and tries again by itself
+    fs.mkdirSync(cloudRoot, { recursive: true }); fs.writeFileSync(path.join(cloudRoot, 'fail'), '');
+    assert.equal((await fetch(`${srv.url}/api/rooms/${room.id}/takes/${take.id}/cloud?k=${room.hostKey}`, { method: 'POST' })).status, 200);
+    const failed = await waitFor(async () => { const t = (await (await fetch(`${srv.url}/api/rooms/${room.id}?k=${room.hostKey}`)).json()).takes.find(x => x.id === take.id); return t.cloud && !t.cloud.busy && !t.cloud.ok && t.cloud; }, 20000, 100);
+    assert.match(failed.error, /no such host/);
+    fs.rmSync(path.join(cloudRoot, 'fail'));
+    const ok = await waitFor(async () => { const t = (await (await fetch(`${srv.url}/api/rooms/${room.id}?k=${room.hostKey}`)).json()).takes.find(x => x.id === take.id); return t.cloud && t.cloud.ok && t.cloud; }, 20000, 100);
+    const showDir = path.join(cloudRoot, 'gdrive', 'Rolling');
+    const takeDirs = fs.readdirSync(path.join(showDir, fs.readdirSync(showDir)[0]));
+    assert.match(takeDirs[0], /^Take \d+ - \d{4}-\d\d-\d\d \d\d-\d\d$/);
+    const uploaded = fs.readdirSync(path.join(showDir, fs.readdirSync(showDir)[0], takeDirs[0]));
+    assert.ok(uploaded.some(f => /Steve.*\.wav$/.test(f)) && uploaded.some(f => /\.sesx$/.test(f)), `uploaded: ${uploaded.join(', ')}`);
+    assert.ok(!uploaded.some(f => f.startsWith('.')), 'no hidden working files');
+    assert.ok(ok.dest.startsWith('gdrive:Rolling/'));
+  } finally { await set(''); }
+});
+
+test('admin password: wrong guesses are paused after 8, per person (the real address behind the tunnel)', async () => {
+  const tryLogin = (password, ip) => fetch(srv.url + '/api/login', { method: 'POST', headers: { 'Content-Type': 'application/json', 'CF-Connecting-IP': ip }, body: JSON.stringify({ password }) });
+  const guesses = await Promise.all(Array.from({ length: 8 }, () => tryLogin('nope', '203.0.113.9')));
+  assert.ok(guesses.every(r => r.status === 401));
+  assert.equal((await tryLogin('nope', '203.0.113.9')).status, 429, 'paused');
+  assert.equal((await tryLogin('testpass', '203.0.113.9')).status, 429, 'even with the right password, until the pause is over');
+  assert.equal((await tryLogin('testpass', '198.51.100.7')).status, 200, 'someone else can still log in');
+});
+
+test('invite a guest: copy the text, or email it with a calendar entry', async () => {
+  // a tiny pretend email server on this machine
+  const got = [];
+  const smtp = require('net').createServer(sock => {
+    let data = false, buf = '';
+    sock.write('220 test ESMTP\r\n');
+    sock.on('data', d => {
+      buf += d;
+      if (data) { if (buf.includes('\r\n.\r\n')) { got.push(buf); buf = ''; data = false; sock.write('250 OK\r\n'); } return; }
+      for (let i; (i = buf.indexOf('\r\n')) >= 0;) {
+        const line = buf.slice(0, i); buf = buf.slice(i + 2);
+        if (/^(EHLO|HELO)/i.test(line)) sock.write('250 test\r\n');
+        else if (/^DATA/i.test(line)) { data = true; sock.write('354 go\r\n'); }
+        else if (/^QUIT/i.test(line)) { sock.end('221 bye\r\n'); }
+        else sock.write('250 OK\r\n');
+      }
+    });
+  });
+  await new Promise(r => smtp.listen(0, '127.0.0.1', r));
+  try {
+    const url = `${srv.url}/api/rooms/${room.id}/invite?k=${room.hostKey}`, post_ = body => fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+    // copy: the text, with this studio's guest link
+    const copy = await (await post_({ name: 'Leo', host: 'Sam', when: '2026-12-01T19:00:00Z', tz: 'Europe/London' })).json();
+    assert.match(copy.subject, /You're invited to record .* — Tuesday 1 December at 19:00 GMT/);
+    assert.ok(copy.text.includes(`/r/${room.id}`) && !copy.text.includes(room.hostKey), 'the guest link — never the host key');
+    // send: refused until email is set up, then sent with a calendar entry
+    assert.equal((await post_({ email: 'leo@example.com', send: true })).status, 400);
+    const set = await fetch(srv.url + '/api/settings', { method: 'POST', headers: { cookie, 'Content-Type': 'application/json' }, body: JSON.stringify({ smtp: { host: '127.0.0.1', port: smtp.address().port, from: 'studio@example.com' } }) });
+    assert.equal(set.status, 200);
+    assert.equal((await post_({ email: 'not an email', send: true })).status, 400);
+    assert.equal((await fetch(url.replace(room.hostKey, 'wrong'), { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' })).status, 403);
+    const sent = await post_({ name: 'Leo', email: 'leo@example.com', when: '2026-12-01T19:00:00Z', tz: 'Europe/London', send: true });
+    assert.equal(sent.status, 200, await sent.clone().text());
+    await waitFor(() => got.length === 1, 5000, 50);
+    assert.match(got[0], /To: leo@example\.com/); assert.match(got[0], /BEGIN:VCALENDAR/); assert.match(got[0], /DTSTART:20261201T190000Z/);
+  } finally {
+    smtp.close();
+    await fetch(srv.url + '/api/settings', { method: 'POST', headers: { cookie, 'Content-Type': 'application/json' }, body: JSON.stringify({ smtp: { host: '' } }) });
+  }
 });
 
 test('a damaged take file is reported and kept, and the server carries on', async () => {

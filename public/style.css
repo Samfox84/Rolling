@@ -371,3 +371,19 @@ body.console-open .studio { visibility: hidden; }
 .pr-text::after { content: ''; display: block; height: 40vh; } /* so the last line can scroll up to the top */
 .pr-editor { padding: 10px; border-top: 1px solid #fff2; }
 .pr-editor textarea { width: 100%; height: min(160px, 22vh); box-sizing: border-box; font: 14px/1.4 system-ui, sans-serif; }
+
+/* guest invite */
+.invgrid { display: grid; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); gap: 8px 12px; margin-top: 10px; }
+.invgrid label { display: flex; flex-direction: column; gap: 4px; margin: 0; }
+#invNote { width: 100%; box-sizing: border-box; }
+.invpreview { white-space: pre-wrap; background: #0008; border-radius: 8px; padding: 10px; font: 12px/1.45 system-ui, sans-serif; max-height: 260px; overflow: auto; }
+
+/* phones: the timecode bar wraps instead of overlapping, and phone-only tips */
+.phoneonly { display: none; } body.phone .phoneonly { display: list-item; }
+@media (max-width: 760px) {
+  .tcbar { flex-wrap: wrap; gap: 6px; padding: 6px 8px; overflow: visible; }
+  .tcbar .tcbtns { display: none; } /* the full-screen and pop-out clocks are for a second screen */
+  .tcblock { flex: none; min-width: max-content; padding: 0 6px; }
+  .tc { font-size: 15px; }
+  .tally { padding: 6px 10px; }
+}

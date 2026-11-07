@@ -166,3 +166,69 @@ test('Rolling Desk app: host the whole studio on this computer (no server) — g
     if (app) { await app.evaluate(({ dialog }) => { dialog.showMessageBoxSync = () => 1; }).catch(() => {}); await app.close().catch(() => {}); } // a failed test mustn't hang on "stop the studio?"
   }
 });
+
+test('Rolling Desk app: host with your own address (named tunnel), free space shown, and a crash leaves nothing running', { skip, timeout: 300000 }, async () => {
+  const home = tmpDir('desk-own-home'), studioFolder = path.join(tmpDir('desk-own'), 'Rolling Studio');
+  const tools = tmpDir('desk-own-tools'), tunnelLog = path.join(tools, 'tunnel.log'), which = n => require('child_process').execFileSync('which', [n]).toString().trim();
+  fs.symlinkSync(which('ffmpeg'), path.join(tools, 'ffmpeg')); fs.symlinkSync(which('ffprobe'), path.join(tools, 'ffprobe'));
+  const fakeTunnel = path.join(__dirname, '..', 'fixtures', 'fake-cloudflared.js'); fs.chmodSync(fakeTunnel, 0o755);
+  fs.symlinkSync(fakeTunnel, path.join(tools, 'cloudflared'));
+  const TOKEN = 'eyJhIjoiZmFrZS1hY2NvdW50IiwidCI6ImZha2UtdHVubmVsIiwicyI6ImZha2Utc2VjcmV0In0abcdefgh';
+  const port = 20000 + Math.floor(Math.random() * 20000);
+  const env = { ...process.env, ROLLING_DESK_HOME: home, ROLLING_DESK_TOOLS: tools, FAKE_TUNNEL_LOG: tunnelLog, NO_EXTERNAL_CALLS: '1' };
+  const launch = () => pw._electron.launch({ executablePath: electronBin, args: ['--no-sandbox', path.join(__dirname, '../../desk')], env });
+  let app = await launch();
+  try {
+    const start = await app.firstWindow();
+    await start.waitForSelector('#tHost'); await start.click('#tHost');
+    await start.evaluate(f => { document.getElementById('sfolder').value = f; }, studioFolder);
+    // free space is shown for the chosen folder
+    await waitFor(async () => /GB free/.test(await start.textContent('#sspace')), 5000);
+    // your own address: the steps and sign-up links appear; a bad address or token is refused with a clear reason
+    await start.check('input[name=gl][value=own]');
+    await start.waitForSelector('#own:not([hidden])');
+    assert.ok(await start.$('a[href="https://dash.cloudflare.com/sign-up"]'), 'sign-up link');
+    await start.fill('#addr', 'not an address'); await start.fill('#token', TOKEN);
+    await start.click('#hgo');
+    await waitFor(async () => /your own address/i.test(await start.textContent('#herr')), 5000);
+    await start.fill('#addr', 'https://Podcast.Example.com/'); await start.fill('#token', 'short');
+    await start.click('#hgo');
+    await waitFor(async () => /tunnel token/i.test(await start.textContent('#herr')), 5000);
+    await start.click('summary'); await start.fill('#port', String(port));
+    // pasting Cloudflare's whole install command works: the token is the long code at its end
+    await start.fill('#token', `sudo cloudflared service install ${TOKEN}`);
+    const [desk] = await Promise.all([app.waitForEvent('window'), start.click('#hgo')]);
+    await desk.waitForSelector('#dash:not(.hidden)', { timeout: 60000 });
+    const local = `http://127.0.0.1:${port}`;
+    await waitFor(async () => (await (await fetch(local + '/api/info')).json()).link === 'https://podcast.example.com', 10000, 200);
+    const tunnel = JSON.parse(fs.readFileSync(tunnelLog, 'utf8').trim().split('\n')[0]);
+    assert.ok(tunnel.args.includes('run'), 'a named tunnel'); assert.equal(tunnel.token, TOKEN, 'token given to cloudflared');
+    assert.ok(!tunnel.args.join(' ').includes(TOKEN), 'the token is never on the command line');
+    assert.ok(!fs.readFileSync(path.join(home, 'config.json'), 'utf8').includes(TOKEN), 'the token is not in the settings file');
+    await waitFor(async () => /guests: https:\/\/podcast\.example\.com · \d+ GB free/.test(await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].getTitle())), 10000, 200);
+    // ---- the diary: a page error is written down with the steps before it; Help › Save a problem report is safe to share ----
+    await desk.click('text=Recordings').catch(() => {}); // a step to find in the report
+    await desk.evaluate(() => setTimeout(() => { throw new Error('pretend page problem'); }, 0));
+    await waitFor(() => fs.readdirSync(home).some(f => /^crash-.*\.txt$/.test(f)), 10000, 200);
+    const crashFile = fs.readdirSync(home).find(f => /^crash-.*\.txt$/.test(f));
+    assert.match(fs.readFileSync(path.join(home, crashFile), 'utf8'), /Where: the studio page[\s\S]*pretend page problem[\s\S]*hosting on this computer/);
+    const reportPath = path.join(home, 'report.txt');
+    await app.evaluate(({ dialog }, p) => { dialog.showSaveDialog = async () => ({ canceled: false, filePath: p }); }, reportPath);
+    await app.evaluate(({ Menu }) => Menu.getApplicationMenu().items.find(i => i.label === 'Help').submenu.items.find(i => /problem report/.test(i.label)).click());
+    await waitFor(() => fs.existsSync(reportPath), 10000, 200);
+    const report = fs.readFileSync(reportPath, 'utf8');
+    assert.match(report, /ROLLING DESK — PROBLEM REPORT/); assert.match(report, /pretend page problem/); assert.match(report, /studio started on this computer/);
+    assert.match(report, /END OF THE STUDIO'S LOG/);
+    assert.ok(!report.includes(TOKEN) && !report.includes(require('os').homedir()), 'nothing private in the report');
+    // ---- the app crashes: the studio stops by itself; the guest-link program is stopped next time ----
+    app.process().kill('SIGKILL'); app = null;
+    await waitFor(async () => { try { await fetch(local + '/api/info', { signal: AbortSignal.timeout(1000) }); return false; } catch { return true; } }, 15000);
+    process.kill(tunnel.pid, 0); // still running (nothing could stop it)
+    app = await launch(); // opens straight back into hosting
+    await waitFor(() => { try { process.kill(tunnel.pid, 0); return false; } catch { return true; } }, 30000);
+    await waitFor(async () => { try { return (await fetch(local + '/api/info')).ok; } catch { return false; } }, 60000, 500);
+  } finally {
+    if (app) { await app.evaluate(({ dialog }) => { dialog.showMessageBoxSync = () => 1; }).catch(() => {}); await app.close().catch(() => {}); }
+    for (const l of (fs.existsSync(tunnelLog) ? fs.readFileSync(tunnelLog, 'utf8').trim().split('\n') : [])) try { process.kill(JSON.parse(l).pid); } catch { /* already stopped */ }
+  }
+});

@@ -34,6 +34,7 @@ say "Installing system packages (ffmpeg, curl, rsync)"
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq
 apt-get install -y -qq ffmpeg curl ca-certificates rsync >/dev/null
+apt-get install -y -qq rclone >/dev/null 2>&1 || warn "rclone isn't available here — cloud backup will be off (everything else works)"
 
 # ---------- 2. Node.js 18+ ----------
 NODE_MAJOR=0

@@ -54,6 +54,11 @@
       <label>Backup folder</label><input type="text" id="sBackup" placeholder="/mnt/usb-drive/Podcast Studio Backups">
       <div id="backupStatus" class="small-text" style="margin-top:6px"></div>
 
+      <h2 style="margin-top:22px">☁️ Cloud backup</h2>
+      <p class="muted small-text" style="margin:0">Every finished take is also uploaded to Google Drive, Dropbox, OneDrive or similar, in the background. Set up your account once on the server with <code>rclone config</code> — see the <a href="https://github.com/Samfox84/Rolling/blob/main/docs/cloud-backup.md" target="_blank" rel="noopener">step-by-step guide</a>. Leave empty for no cloud backup.</p>
+      <label>rclone remote and folder</label><input type="text" id="sCloud" placeholder="gdrive:Rolling" autocomplete="off" spellcheck="false">
+      <div class="row" style="margin-top:8px"><button class="small" id="testCloud">Test cloud backup</button><span id="cloudStatus" class="small-text"></span></div>
+
       <h2 style="margin-top:22px">🛰 Relay for strict networks (Cloudflare TURN — free)</h2>
       <p class="muted small-text" style="margin:0">Lets guests on locked-down office/hotel Wi-Fi still see and hear everyone. Cloudflare dashboard → <b>Realtime</b> → <b>TURN Server</b> → <b>Create</b>, then paste the Key ID and API token here. (Recordings upload fine without this.)</p>
       <div class="grid2">
@@ -181,7 +186,7 @@ async function loadSettings() {
   if (!sr.ok) { toast(sr.error); return; }
   const s = sr.data;
   $('#sHost').value = s.smtp.host; $('#sPort').value = s.smtp.port; $('#sUser').value = s.smtp.user; $('#sPass').value = s.smtp.pass; $('#sFrom').value = s.smtp.from;
-  $('#sBackup').value = s.backupDir; $('#tKey').value = s.turn.keyId; $('#tTok').value = s.turn.token; $('#sUrl').value = s.publicUrl;
+  $('#sBackup').value = s.backupDir; $('#sCloud').value = (s.cloud && s.cloud.remote) || ''; $('#tKey').value = s.turn.keyId; $('#tTok').value = s.turn.token; $('#sUrl').value = s.publicUrl;
   showBackup(s.backup);
   if (!s.emailAvailable) $('#testEmail').disabled = true;
   const tx = s.transcribe || {};
@@ -205,7 +210,7 @@ function showBackup(b) {
 }
 function settingsBody() {
   return { smtp: { host: $('#sHost').value, port: $('#sPort').value, user: $('#sUser').value, pass: $('#sPass').value, from: $('#sFrom').value },
-    turn: { keyId: $('#tKey').value, token: $('#tTok').value }, backupDir: $('#sBackup').value, publicUrl: $('#sUrl').value,
+    turn: { keyId: $('#tKey').value, token: $('#tTok').value }, backupDir: $('#sBackup').value, cloud: { remote: $('#sCloud').value.trim() }, publicUrl: $('#sUrl').value,
     transcribe: { enabled: $('#txOn').checked, model: $('#txModel').value, language: $('#txLang').value }, autoCompact: $('#autoCompact').checked, fps: Number($('#fpsSel').value),
     clean: { auto: $('#clAuto').checked, noise: $('#clNoise').value, mains: Number($('#clMains').value), rumble: $('#clRumble').checked, declip: $('#clDeclip').checked,
       deess: $('#clDeess').checked, compress: $('#clComp').checked, gate: $('#clGate').checked, pauses: Number($('#clPauses').value) } };
@@ -224,6 +229,13 @@ $('#testEmail').onclick = async () => {
   const res = await api('/api/settings/test-email', { json: { to: $('#sTestTo').value }, timeout: 60000 });
   $('#testEmail').disabled = false;
   toast(res.ok ? 'Test email sent ✓ — check your inbox' : 'Email failed: ' + res.error, 6000);
+};
+$('#testCloud').onclick = async () => {
+  if (!$('#sCloud').value.trim()) { $('#cloudStatus').textContent = 'Type the remote first, e.g. gdrive:Rolling'; return; }
+  if (!(await saveSettings())) return;
+  $('#cloudStatus').textContent = 'Testing…';
+  const res = await api('/api/settings/cloud-test', { json: { remote: $('#sCloud').value.trim() }, timeout: 90000 });
+  $('#cloudStatus').innerHTML = res.ok ? '<span style="color:var(--ok)">✓ Cloud backup works</span>' : `<span style="color:var(--rec)">${esc(res.error)}</span>`;
 };
 $('#testTurn').onclick = async () => {
   if (!(await saveSettings())) return;

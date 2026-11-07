@@ -70,3 +70,27 @@ test('Mac: picks the right download for Intel or Apple Silicon and swaps the app
 test('the .deb (or a dev copy) can\'t replace itself, so it only points to the download page', () => {
   assert.equal(new Updater({ current: '0.1.0', workDir: '/tmp', platform: 'linux', appImage: undefined }).kind(), 'manual');
 });
+
+test('Windows: downloads and checks the new installer, then runs it silently after the app quits and reopens the app', async () => {
+  const dir = tmpDir('upd-win'), exe = path.join(dir, 'Programs', 'Rolling Desk', 'Rolling Desk.exe');
+  fs.mkdirSync(path.dirname(exe), { recursive: true }); fs.writeFileSync(exe, 'old');
+  const installer = 'pretend NSIS installer', sum = crypto.createHash('sha256').update(installer).digest('hex');
+  const name = 'Rolling-Desk-0.3.0-win-x64.exe';
+  const gh = await fakeGitHub({ [name]: installer, 'SHA256SUMS.txt': `${sum}  ${name}\n` }, () => ({
+    tag_name: 'desk-v0.3.0', html_url: 'https://github.com/Samfox84/Rolling/releases/tag/desk-v0.3.0',
+    assets: [name, 'Rolling-Desk-0.3.0-linux-x86_64.AppImage', 'SHA256SUMS.txt'].map(n => ({ name: n, browser_download_url: `${gh.url}/${n}` })),
+  }));
+  try {
+    const u = new Updater({ current: '0.2.2', workDir: dir, platform: 'win32', arch: 'x64', execPath: exe, api: gh.url });
+    assert.equal(u.kind(), 'windows');
+    assert.equal(new Updater({ current: '0', workDir: dir, platform: 'win32', execPath: 'C:\\dev\\node_modules\\electron\\dist\\electron.exe' }).kind(), 'manual', 'not while developing');
+    const info = await u.check();
+    assert.equal(info.asset.name, name, 'the Windows installer, not another computer\'s download');
+    const ready = await u.download(info);
+    assert.equal(fs.readFileSync(ready.path, 'utf8'), installer);
+    const cmd = u.windowsScript(4242);
+    assert.match(cmd, /tasklist \/FI "PID eq 4242"/, 'waits for the app to quit');
+    assert.ok(cmd.includes(`"${ready.path}" /S --force-run`), 'silent install, then opens the new version');
+    assert.ok(cmd.includes('\r\n'), 'Windows line endings');
+  } finally { gh.srv.close(); }
+});

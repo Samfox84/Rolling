@@ -50,7 +50,7 @@ jobs:
         with:
           node-version: 22
       - run: npm install --no-audit --no-fund
-      - run: for f in main.js mirror.js preload.js connect-preload.js updater.js host.js scripts/*.js; do node --check "$f"; done
+      - run: for f in main.js mirror.js preload.js connect-preload.js updater.js host.js activity.js scripts/*.js; do node --check "$f"; done
       - name: The studio, for "Host it on this computer"
         run: node scripts/prepare-studio.js
       - name: ffmpeg, ffprobe and the guest-link program

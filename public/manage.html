@@ -21,6 +21,20 @@
     <div class="card" style="margin-bottom:18px">
       <label style="margin-top:0">Guest link — send this to guests</label>
       <div class="linkbox"><input type="text" readonly id="guestLink"><button class="small" id="copyGuest">Copy</button></div>
+      <details style="margin-top:14px" id="inviteBox">
+        <summary><b>✉️ Invite a guest</b> <span class="muted small-text">— their link, a 5-minute setup checklist and a calendar entry</span></summary>
+        <div class="invgrid">
+          <label>Their name<input id="invName" maxlength="80" placeholder="Leo"></label>
+          <label>Their email<input id="invEmail" type="email" maxlength="200" placeholder="leo@example.com"></label>
+          <label>When <span class="muted small-text">(optional)</span><input id="invWhen" type="datetime-local"></label>
+          <label>How long<select id="invMins"><option value="30">30 min</option><option value="60" selected>1 hour</option><option value="90">1½ hours</option><option value="120">2 hours</option></select></label>
+          <label>From<input id="invHost" maxlength="80" placeholder="Your name"></label>
+        </div>
+        <label>A note for them <span class="muted small-text">(optional)</span></label>
+        <textarea id="invNote" maxlength="1000" rows="2" placeholder="e.g. We'll talk about your first modem — bring a story!"></textarea>
+        <div class="row" style="gap:8px;margin-top:8px"><button class="small primary" id="invSend">Send invite email</button><button class="small" id="invCopy">Copy invite to send yourself</button><span class="small-text muted" id="invNoteTxt"></span></div>
+        <pre id="invPreview" class="invpreview hidden"></pre>
+      </details>
       <details style="margin-top:14px">
         <summary><b>Show settings</b> <span class="muted small-text">— intro &amp; outro, waiting room, email</span></summary>
         <label style="margin-top:14px">Intro and outro audio</label>
@@ -83,6 +97,7 @@ async function load() {
     settingsLoaded = true;
     $('#waitingRoom').checked = r.waitingRoom; $('#notifyEmail').value = r.notifyEmail;
     $('#emailNote').textContent = r.emailReady ? '' : 'Email isn\'t set up on this studio yet (Studio settings on the main page), so nothing will be sent until it is.';
+    $('#invSend').disabled = !r.emailReady; $('#invNoteTxt').textContent = r.emailReady ? '' : 'Email isn\'t set up on this studio — copy the invite and send it yourself.';
   }
   for (const el of document.querySelectorAll('.asset')) {
     const a = (r.assets || {})[el.dataset.kind];
@@ -106,12 +121,14 @@ async function load() {
     const name = t.episode && t.episode.n ? `Episode ${esc(t.episode.n)}${t.episode.title ? ' — ' + esc(t.episode.title) : ''} <span class="muted small-text">(take ${t.n})</span>` : `Take ${t.n}`;
     const outs = [...t.outputs].sort((a, b) => (a.person === 'Everyone') - (b.person === 'Everyone') || a.person.localeCompare(b.person) || ORDER[a.kind] - ORDER[b.kind]);
     const backup = t.backup ? (t.backup.ok ? '<span class="pill ok">💾 Backed up</span>' : `<span class="pill warn" title="${esc(t.backup.error)}">💾 Backup failed</span>`) : '';
+    const cloud = !t.cloud ? '' : t.cloud.busy ? '<span class="pill warn">☁️ Uploading to the cloud…</span>' : t.cloud.ok ? `<span class="pill ok" title="${esc(t.cloud.dest)}">☁️ In the cloud</span>`
+      : `<span class="pill warn" title="${esc(t.cloud.error)}">☁️ Cloud upload failed</span> <button class="small ghost" data-cloud="${t.id}">Upload again</button>`;
     const busy = ['queued', 'processing', 'waiting'].includes(t.status);
     const levels = Object.entries(t.levels || {}).filter(([, l]) => l);
     el.innerHTML = `
       <div class="row spread">
         <div><b>${name}</b> <span class="muted small-text">· ${when}${t.stopped ? ' · ' + dur(t.started, t.stopped) : ''} · ${esc(t.people.join(', ') || 'nobody')}</span></div>
-        <div class="row"><span class="pill ${cls}">${label}</span>${backup}
+        <div class="row"><span class="pill ${cls}">${label}</span>${backup}${cloud}
           ${t.outputs.length ? `<a href="/zip/${roomId}/${t.id}${q}"><button class="small primary">⬇ Download everything (${mb(t.totalSize)})</button></a>` : ''}</div>
       </div>
       ${busy ? `<div class="small-text muted" style="margin-top:6px">${esc(t.progress || label)} — ${t.pct || 0}%</div><div class="pbar big"><span style="width:${t.pct || 0}%"></span></div>` : ''}
@@ -169,10 +186,25 @@ for (const el of document.querySelectorAll('.asset')) {
   };
   el.querySelector('.adel').onclick = async () => { const r = await api(`/api/rooms/${roomId}/asset/${kind}${q}`, { method: 'DELETE' }); if (!r.ok) toast(r.error); lastJson = ''; load(); };
 }
+// ---------- invite a guest ----------
+async function invite(send) {
+  const when = $('#invWhen').value ? new Date($('#invWhen').value).toISOString() : '';
+  const body = { name: $('#invName').value, email: $('#invEmail').value, when, minutes: $('#invMins').value, host: $('#invHost').value, note: $('#invNote').value,
+    tz: Intl.DateTimeFormat().resolvedOptions().timeZone, send };
+  try { localStorage.setItem('ps_invhost', body.host); } catch { /* remembering your name is only a convenience */ }
+  const r = await api(`/api/rooms/${roomId}/invite${q}`, { json: body });
+  if (!r.ok) return toast(r.error);
+  $('#invPreview').textContent = `${r.data.subject}\n\n${r.data.text}`; $('#invPreview').classList.remove('hidden');
+  if (send) { toast(`✉️ Invite sent to ${body.email}`); $('#invEmail').value = ''; return; }
+  navigator.clipboard.writeText(`${r.data.subject}\n\n${r.data.text}`).then(() => toast('Invite copied — paste it into an email, WhatsApp or Messages'), () => toast('Select the text below and copy it'));
+}
+try { $('#invHost').value = localStorage.getItem('ps_invhost') || ''; } catch { /* not remembered: type it */ }
+
 document.addEventListener('focusin', e => { if (e.target.closest('.mklist')) editing = true; });
 document.addEventListener('click', async e => {
   const b = e.target.closest('button'); if (!b) return;
   if (b.id === 'saveRoom') saveRoom({ notifyEmail: $('#notifyEmail').value });
+  if (b.id === 'invSend' || b.id === 'invCopy') invite(b.id === 'invSend');
   if (b.id === 'copyGuest') navigator.clipboard.writeText($('#guestLink').value).then(() => toast('Guest link copied'), () => $('#guestLink').select());
   if (b.classList.contains('mkdel')) { editing = true; b.closest('.mk').remove(); }
   if (b.classList.contains('mksave')) {
@@ -181,6 +213,7 @@ document.addEventListener('click', async e => {
     const res = await api(`/api/rooms/${roomId}/takes/${b.dataset.take}/markers${q}`, { json: { markers } });
     toast(res.ok ? 'Markers saved — updating files…' : 'Could not save: ' + res.error); editing = false; lastJson = ''; load();
   }
+  if (b.dataset.cloud) { const r = await api(`/api/rooms/${roomId}/takes/${b.dataset.cloud}/cloud${q}`, { method: 'POST' }); toast(r.ok ? 'Uploading to the cloud again…' : r.error); lastJson = ''; load(); }
   if (b.dataset.clean) { const r = await api(`/api/rooms/${roomId}/takes/${b.dataset.clean}/clean${q}`, { method: 'POST' }); toast(r.ok ? 'Cleaning up again with the current settings — watch the progress bar' : r.error); lastJson = ''; load(); }
   if (b.dataset.transcribe) { const r = await api(`/api/rooms/${roomId}/takes/${b.dataset.transcribe}/transcribe${q}`, { method: 'POST' }); toast(r.ok ? 'Making the transcript — the progress bar shows how far it has got' : r.error); lastJson = ''; load(); }
   if (b.dataset.rebuild) { const r = await api(`/api/rooms/${roomId}/takes/${b.dataset.rebuild}/rebuild${q}`, { method: 'POST' }); if (!r.ok) toast(r.error); lastJson = ''; load(); }

@@ -1,0 +1,19 @@
+# Keeps Rolling's building blocks up to date and flags any with a known security problem.
+# GitHub opens a pull request for each update; the tests run on it before it's merged.
+version: 2
+updates:
+  - package-ecosystem: npm          # the studio (server)
+    directory: /
+    schedule: { interval: weekly }
+    open-pull-requests-limit: 5
+  - package-ecosystem: npm          # Rolling Desk (the app)
+    directory: /desk
+    schedule: { interval: weekly }
+    open-pull-requests-limit: 5
+    ignore:
+      # Electron 44+ needs macOS 13 Ventura; Rolling Desk stays on 43 so it still runs on older Macs (e.g. Mac Pro 2013)
+      - dependency-name: electron
+        versions: [">=44"]
+  - package-ecosystem: github-actions
+    directory: /
+    schedule: { interval: monthly }

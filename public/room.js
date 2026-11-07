@@ -557,7 +557,7 @@ function onMsg(m) {
       document.querySelectorAll('.hostonly').forEach(e => e.classList.toggle('hidden', !isHost));
       $('#recordingsLink').href = `/m/${roomId}?k=${encodeURIComponent(hostKey)}`;
       if (m.nextEpisode) nextEpisode = m.nextEpisode;
-      if (!joined) { joined = true; show('studio'); if (controlMode) enterControlMode(); else addMyTile(); if (screenStream) showScreenTile('me', screenStream, 'Your screen'); (m.chat || []).forEach(c => addChat(c, true)); }
+      if (!joined) { joined = true; keepScreenOn(); show('studio'); if (controlMode) enterControlMode(); else addMyTile(); if (screenStream) showScreenTile('me', screenStream, 'Your screen'); (m.chat || []).forEach(c => addChat(c, true)); }
       $('#uploadLine').textContent = '';
       for (const p of m.peers) addPeer(p, true);
       for (const w of m.waiting || []) showKnock(w);
@@ -1651,6 +1651,23 @@ function addChat(m, quiet) {
   if (!quiet && drawerTab !== 'chat' && m.pid !== myId) { unread++; $('#chatBadge').textContent = unread; $('#chatBadge').classList.remove('hidden'); toast(`💬 ${m.from}: ${m.text.slice(0, 60)}`); }
 }
 $('#chatForm').onsubmit = e => { e.preventDefault(); const t = $('#chatInput').value.trim(); if (!t) return; wsSend({ t: 'chat', text: t }); $('#chatInput').value = ''; };
+
+// ---------- phones and tablets: keep the screen on, and warn if the page was put in the background ----------
+// A phone pauses a page that isn't on screen — the mic stops with it — so the screen is kept awake while in the
+// studio, and anyone who switched away mid-recording is told to stay on this page.
+const onPhone = /Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent) || (navigator.maxTouchPoints > 1 && /Macintosh/.test(navigator.userAgent));
+let wakeLock = null, hiddenWhileRecording = false;
+async function keepScreenOn() {
+  if (!('wakeLock' in navigator) || wakeLock || document.visibilityState !== 'visible') return;
+  try { wakeLock = await navigator.wakeLock.request('screen'); wakeLock.addEventListener('release', () => { wakeLock = null; }); }
+  catch (e) { quiet('keep the screen on')(e); }
+}
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'hidden') { if (onPhone && recStartedAt) hiddenWhileRecording = true; return; }
+  if (joined) keepScreenOn(); // the system lets go of it whenever the page is hidden
+  if (hiddenWhileRecording) { hiddenWhileRecording = false; toast('📱 Please keep Rolling open on screen while we record — your phone can pause the microphone when you switch apps or lock the screen.', 9000); }
+});
+document.body.classList.toggle('phone', onPhone);
 
 // ---------- green room (hosts see who's waiting there, and bring them on air) ----------
 function renderGreen(p) {

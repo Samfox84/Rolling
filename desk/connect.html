@@ -17,7 +17,8 @@
   button:disabled { opacity: .6; cursor: default; }
   .help { color: var(--muted); font-size: 13px; margin: 6px 0 0; }
   .tabs { display: flex; gap: 6px; margin-bottom: 8px; } .tab { flex: 1; } .tab.on { background: var(--accent); color: #fff; }
-  ul.help { padding-left: 18px; } ul.help li { margin: 4px 0; }
+  ul.help, ol.help { padding-left: 18px; } .choice { display: flex; gap: 8px; align-items: flex-start; font-weight: 400; margin: 6px 0; } .choice input { width: auto; margin-top: 3px; }
+  .ownbox { border: 1px solid #fff2; border-radius: 10px; padding: 4px 14px 10px; margin: 8px 0; } .ownbox a { color: #7cf; } .lowspace { color: #fb6; } ul.help li { margin: 4px 0; }
   .err { color: #fff; background: var(--rec); border-radius: 10px; padding: 10px 12px; margin-top: 18px; display: none; }
 </style>
 </head>
@@ -38,14 +39,32 @@
   </form>
 
   <form id="h" hidden>
-    <p class="help" style="font-size:14px;margin-top:0">No server needed: Rolling Desk runs the whole studio on this computer and makes a free internet link for your guests. Everything works as on a server — the Console, recordings, transcripts, all the files.</p>
+    <p class="help" style="font-size:14px;margin-top:0">No server needed: Rolling Desk runs the whole studio on this computer and makes an internet link for your guests. Everything works as on a server — the Console, recordings, transcripts, all the files.</p>
     <label for="sfolder">Keep the studio (shows and recordings) in</label>
     <div class="row"><input id="sfolder" readonly><button type="button" id="spick">Change…</button></div>
-    <p class="help">About 4 GB per person per hour of recording. Use a drive with plenty of space.</p>
+    <p class="help" id="sspace">About 4 GB per person per hour of recording. Use a drive with plenty of space.</p>
+
+    <label>Guest link</label>
+    <label class="choice"><input type="radio" name="gl" value="quick"> <span><b>A new free link each time</b> — no account needed. It looks like <i>something.trycloudflare.com</i> and changes every time you start, so send it out after you start.</span></label>
+    <label class="choice"><input type="radio" name="gl" value="own"> <span><b>My own address, the same every time</b> — e.g. <i>podcast.yourname.com</i>. Needs a domain and a free Cloudflare account.</span></label>
+    <div id="own" hidden class="ownbox">
+      <ol class="help">
+        <li>No Cloudflare account yet? <a href="https://dash.cloudflare.com/sign-up" data-ext>Sign up free</a>, then <a href="https://developers.cloudflare.com/fundamentals/manage-domains/add-site/" data-ext>add your domain</a> (or <a href="https://www.cloudflare.com/products/registrar/" data-ext>buy one there</a>).</li>
+        <li>At <a href="https://one.dash.cloudflare.com/" data-ext>one.dash.cloudflare.com</a> go to <b>Networks › Tunnels › Create a tunnel</b> › <b>Cloudflared</b>, name it (e.g. <i>rolling</i>).</li>
+        <li>Copy the install command it shows and paste it below (or just the long token at its end). You don't need to run it.</li>
+        <li>Press <b>Next</b> and add a <b>Public hostname</b>: your address, type <b>HTTP</b>, URL <b>localhost:<span id="portShow">8790</span></b>. Save.</li>
+      </ol>
+      <label for="addr">Your address</label>
+      <input id="addr" placeholder="podcast.yourname.com" autocomplete="off" spellcheck="false">
+      <label for="token">Tunnel token</label>
+      <input id="token" type="password" placeholder="Paste the install command or token from Cloudflare" autocomplete="off" spellcheck="false">
+      <p class="help" id="tokenHelp">Kept only on this computer, encrypted.</p>
+      <details class="help"><summary>Advanced</summary><label for="port">Port on this computer</label><input id="port" type="number" min="1024" max="65535" style="width:120px"></details>
+    </div>
+
     <ul class="help">
       <li>This computer is the studio for the show: keep it on, awake and online until the files are ready (Rolling Desk stops it sleeping).</li>
       <li>Everyone's full-quality recording comes to this computer: a home broadband connection is fine.</li>
-      <li>The guest link is new each time you start (it looks like <i>something.trycloudflare.com</i>) — send it out after you start.</li>
       <li>If the internet drops, the call drops but no recording is lost: they upload when people come back.</li>
     </ul>
     <div class="err" id="herr"></div>
@@ -62,16 +81,33 @@
   $('pick').onclick = async () => { const f = await window.desk.pickFolder('Where should Rolling Desk save recordings?'); if (f) $('folder').value = f; };
   $('spick').onclick = async () => { // a "Rolling Studio" folder is made inside the one you pick
     const f = await window.desk.pickFolder('Where should your studio keep its shows and recordings?');
-    if (f) $('sfolder').value = /Rolling Studio[\\/]?$/.test(f) ? f : f.replace(/[\\/]+$/, '') + (f.includes('\\') ? '\\' : '/') + 'Rolling Studio';
+    if (f) { $('sfolder').value = /Rolling Studio[\\/]?$/.test(f) ? f : f.replace(/[\\/]+$/, '') + (f.includes('\\') ? '\\' : '/') + 'Rolling Studio'; showSpace(); }
   };
   $('f').onsubmit = async e => {
     e.preventDefault(); showErr('err', ''); $('go').disabled = true; $('go').textContent = 'Connecting…';
     const r = await window.desk.connect($('link').value, $('folder').value);
     if (r && r.error) { showErr('err', r.error); $('go').disabled = false; $('go').textContent = 'Connect'; }
   };
+  // guest link choice
+  const gl = () => document.querySelector('input[name=gl]:checked').value;
+  document.querySelector(`input[name=gl][value=${q.get('guestMode') === 'own' ? 'own' : 'quick'}]`).checked = true;
+  $('addr').value = q.get('address') || ''; $('port').value = q.get('port') || '8790'; $('portShow').textContent = $('port').value;
+  if (q.get('hasToken')) $('tokenHelp').textContent = 'Your token is saved (encrypted, on this computer only). Paste a new one only to change it.';
+  const showOwn = () => { $('own').hidden = gl() !== 'own'; };
+  document.querySelectorAll('input[name=gl]').forEach(r => { r.onchange = showOwn; }); showOwn();
+  $('port').oninput = () => { $('portShow').textContent = $('port').value; };
+  document.querySelectorAll('a[data-ext]').forEach(a => { a.onclick = ev => { ev.preventDefault(); window.desk.openLink(a.href); }; });
+  // live free space where the studio will keep its recordings
+  const showSpace = async () => {
+    const s = await window.desk.space($('sfolder').value);
+    if (!s || s.error) { $('sspace').textContent = 'About 4 GB per person per hour of recording.'; return; }
+    $('sspace').innerHTML = `<b>${s.freeGB.toFixed(0)} GB free</b> — enough for about <b>${Math.floor(s.personHours / 3)} hours</b> of a 3-person show (4 GB per person per hour).`;
+    $('sspace').classList.toggle('lowspace', s.personHours < 6);
+  };
+  showSpace();
   $('h').onsubmit = async e => {
     e.preventDefault(); showErr('herr', ''); $('hgo').disabled = true; $('hgo').textContent = 'Starting…';
-    const r = await window.desk.host($('sfolder').value);
+    const r = await window.desk.host($('sfolder').value, { mode: gl(), address: $('addr').value, token: $('token').value, port: $('port').value });
     if (r && r.error) { showErr('herr', r.error); $('hgo').disabled = false; $('hgo').textContent = 'Start my studio'; }
   };
 </script>
