@@ -27,8 +27,8 @@ The Mac app isn't signed by Apple (that costs £79 a year). The first time you o
 xattr -dr com.apple.quarantine "/Applications/Rolling Desk.app"
 ```
 
-## Host it on this computer (no server)
-Don't have a server? On the start screen choose **Host it on this computer** and press **Start my studio**. Rolling Desk runs the whole studio itself: the dashboard, the Console, recording, the finished files and transcripts — the same as on a server.
+## Host locally on this computer (no server)
+Don't have a server? On the start screen choose **Host locally on this computer** and press **Start my studio**. Rolling Desk runs the whole studio itself: the dashboard, the Console, recording, the finished files and transcripts — the same as on a server.
 - **The guest link** is a free Cloudflare address (like `something.trycloudflare.com`) made when you start. It's new each time, so send it out after you start. Your window's title shows it, and **File › Copy the guest link address** copies it. The dashboard and the studio's **Copy guest link** use it automatically.
 - **Everything is saved in your studio folder** (default `~/Rolling Studio`, change it on the start screen). About 4 GB per person per hour.
 - **Keep the computer on, awake and online** until the files are ready. Rolling Desk stops it sleeping while hosting, and asks before you close it if anyone's recording, in the studio, or the files aren't finished.

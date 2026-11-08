@@ -8,7 +8,9 @@
  *  • Linux AppImage: the same, replacing the AppImage file.
  *  • Windows: downloads and checks the new installer, then runs it silently once the app has quit, and it opens the
  *    new version (the installer keeps your settings and installs to the same place).
- *  • Anything else (the .deb, or an app it can't write over): tells you a new version is out and opens the page.
+ *  • Linux .deb (installed in /opt): downloads and checks the new .deb, then installs it with your password (the
+ *    usual Ubuntu password box, via pkexec) and reopens the app.
+ *  • Anything else (an app it can't write over): tells you a new version is out and opens the page.
  * Never restarts on its own: main.js only offers it when nothing is recording or saving.
  */
 const fs = require('fs');
@@ -23,20 +25,24 @@ const q = s => `'${String(s).replace(/'/g, `'\\''`)}'`; // safe inside a shell s
 
 class Updater extends EventEmitter {
   constructor({ current, workDir, platform = process.platform, arch = process.arch, execPath = process.execPath, appImage = process.env.APPIMAGE,
-    api = 'https://api.github.com', repo = REPO, log = () => {} }) {
+    api = 'https://api.github.com', repo = REPO, log = () => {}, pkexec = 'pkexec' }) {
     super();
-    Object.assign(this, { current, workDir, platform, arch, execPath, appImage, api, repo, log });
+    Object.assign(this, { current, workDir, platform, arch, execPath, appImage, api, repo, log, pkexec });
     this.ready = null; // { version, path, page } once downloaded and checked
   }
-  /** 'mac' | 'appimage' | 'windows' | 'manual' */
+  /** 'mac' | 'appimage' | 'windows' | 'deb' | 'manual' */
   kind() {
     if (this.platform === 'darwin' && /\.app\/Contents\/MacOS\//.test(this.execPath)) return 'mac';
     if (this.platform === 'linux' && this.appImage) return 'appimage';
     if (this.platform === 'win32' && /\.exe$/i.test(this.execPath) && !/electron\.exe$/i.test(this.execPath)) return 'windows';
+    if (this.platform === 'linux' && this.execPath.startsWith('/opt/')) return 'deb'; // where the .deb installs it
     return 'manual';
   }
   target() { return this.kind() === 'mac' ? this.execPath.replace(/(\.app)\/Contents\/MacOS\/.*$/, '$1') : this.kind() === 'windows' ? this.execPath : this.appImage; }
-  canReplace() { try { fs.accessSync(path.dirname(this.target()), fs.constants.W_OK); return true; } catch { return false; } }
+  canReplace() {
+    if (this.kind() === 'deb') return true; // installed with your password, not by writing over the files
+    try { fs.accessSync(path.dirname(this.target()), fs.constants.W_OK); return true; } catch { return false; }
+  }
 
   /** newest desk release, or null if this is the newest */
   async check() {
@@ -48,7 +54,7 @@ class Updater extends EventEmitter {
     if (!/^desk-v\d+\.\d+\.\d+$/.test(r.tag_name || '')) return null;
     r.version = r.tag_name.slice(6);
     if (r.version === this.current) return null;
-    const want = { mac: new RegExp(`-mac-${this.arch}\\.zip$`), appimage: /\.AppImage$/, windows: new RegExp(`-win-${this.arch}\\.exe$`) }[this.kind()] || null;
+    const want = { mac: new RegExp(`-mac-${this.arch}\\.zip$`), appimage: /\.AppImage$/, windows: new RegExp(`-win-${this.arch}\\.exe$`), deb: new RegExp(`-${this.arch === 'arm64' ? 'arm64' : 'amd64'}\\.deb$`) }[this.kind()] || null;
     return { version: r.version, page: r.html_url, notes: r.body || '', asset: want && r.assets.find(a => want.test(a.name)), sums: r.assets.find(a => a.name === 'SHA256SUMS.txt') };
   }
 
@@ -75,7 +81,7 @@ class Updater extends EventEmitter {
       const app = (await fsp.readdir(path.join(dir, 'app'))).find(f => f.endsWith('.app'));
       if (!app) throw new Error('The downloaded update had no app inside');
       ready = path.join(dir, 'app', app);
-    } else if (this.kind() !== 'windows') await fsp.chmod(file, 0o755);
+    } else if (this.kind() !== 'windows' && this.kind() !== 'deb') await fsp.chmod(file, 0o755);
     this.ready = { version: info.version, path: ready, page: info.page };
     this.emit('ready', this.ready);
     return this.ready;
@@ -101,6 +107,21 @@ class Updater extends EventEmitter {
       `tasklist /FI "PID eq ${Number(pid)}" /NH | find "${Number(pid)}" >nul && (timeout /t 1 /nobreak >nul & goto wait)`,
       `"${exe}" /S --force-run`,
       ''].join('\r\n');
+  }
+  /** .deb: install the downloaded package with the usual password box (pkexec). Resolves when installed. */
+  installDeb() {
+    if (!this.ready || this.kind() !== 'deb') return Promise.reject(new Error('No .deb update downloaded'));
+    return new Promise((resolve, reject) => {
+      const p = spawn(this.pkexec, ['apt-get', 'install', '-y', '--allow-downgrades', this.ready.path], { stdio: ['ignore', 'pipe', 'pipe'] });
+      let out = '';
+      p.stdout.on('data', d => { out += d; }); p.stderr.on('data', d => { out += d; });
+      p.on('error', e => reject(new Error(e.code === 'ENOENT' ? `This computer can't ask for your password here. Install it in a terminal instead: sudo apt install ${this.ready.path}` : e.message)));
+      p.on('exit', code => {
+        if (code === 0) return resolve();
+        if (code === 126 || code === 127) return reject(new Error('Cancelled — the update wasn\'t installed'));
+        reject(new Error(`The install didn't finish (${code}): ${out.trim().split('\n').slice(-2).join(' ')}`));
+      });
+    });
   }
   /** start the swap; the caller then quits the app */
   apply(pid = process.pid) {

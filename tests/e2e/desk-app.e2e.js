@@ -91,6 +91,7 @@ test('Rolling Desk app: host the whole studio on this computer (no server) — g
     // ---- the start screen: "Host it on this computer" ----
     const start = await app.firstWindow();
     await start.waitForSelector('#tHost');
+    assert.equal(await start.isChecked('#remember'), false, 'asks every time unless you choose otherwise');
     await start.click('#tHost');
     await start.evaluate(f => { document.getElementById('sfolder').value = f; }, studioFolder);
     const [desk] = await Promise.all([app.waitForEvent('window'), start.click('#hgo')]);
@@ -197,6 +198,7 @@ test('Rolling Desk app: host with your own address (named tunnel), free space sh
     await start.click('summary'); await start.fill('#port', String(port));
     // pasting Cloudflare's whole install command works: the token is the long code at its end
     await start.fill('#token', `sudo cloudflared service install ${TOKEN}`);
+    await start.check('#remember'); // go straight to hosting next time
     const [desk] = await Promise.all([app.waitForEvent('window'), start.click('#hgo')]);
     await desk.waitForSelector('#dash:not(.hidden)', { timeout: 60000 });
     const local = `http://127.0.0.1:${port}`;
@@ -224,7 +226,7 @@ test('Rolling Desk app: host with your own address (named tunnel), free space sh
     app.process().kill('SIGKILL'); app = null;
     await waitFor(async () => { try { await fetch(local + '/api/info', { signal: AbortSignal.timeout(1000) }); return false; } catch { return true; } }, 15000);
     process.kill(tunnel.pid, 0); // still running (nothing could stop it)
-    app = await launch(); // opens straight back into hosting
+    app = await launch(); // "Remember my choice" was ticked: opens straight back into hosting
     await waitFor(() => { try { process.kill(tunnel.pid, 0); return false; } catch { return true; } }, 30000);
     await waitFor(async () => { try { return (await fetch(local + '/api/info')).ok; } catch { return false; } }, 60000, 500);
   } finally {

@@ -67,8 +67,8 @@ test('Mac: picks the right download for Intel or Apple Silicon and swaps the app
   assert.match(s, /else \[ -e .* \] && \[ ! -e .* \] && mv/, 'puts the old app back if the swap fails');
 });
 
-test('the .deb (or a dev copy) can\'t replace itself, so it only points to the download page', () => {
-  assert.equal(new Updater({ current: '0.1.0', workDir: '/tmp', platform: 'linux', appImage: undefined }).kind(), 'manual');
+test('a copy run from somewhere else (e.g. while developing) only points to the download page', () => {
+  assert.equal(new Updater({ current: '0.1.0', workDir: '/tmp', platform: 'linux', appImage: undefined, execPath: '/home/sam/Rolling/desk/node_modules/electron/dist/electron' }).kind(), 'manual');
 });
 
 test('Windows: downloads and checks the new installer, then runs it silently after the app quits and reopens the app', async () => {
@@ -92,5 +92,31 @@ test('Windows: downloads and checks the new installer, then runs it silently aft
     assert.match(cmd, /tasklist \/FI "PID eq 4242"/, 'waits for the app to quit');
     assert.ok(cmd.includes(`"${ready.path}" /S --force-run`), 'silent install, then opens the new version');
     assert.ok(cmd.includes('\r\n'), 'Windows line endings');
+  } finally { gh.srv.close(); }
+});
+
+test('Linux .deb: downloads and checks the new .deb, installs it with the password box (pkexec), and says when it was cancelled', async () => {
+  const dir = tmpDir('upd-deb'), log = path.join(dir, 'pkexec.log');
+  // a stand-in for pkexec: records what it was asked to run; exits 126 (cancelled) when told to
+  const fake = path.join(dir, 'pkexec');
+  fs.writeFileSync(fake, `#!/bin/sh\necho "$@" >> '${log}'\n[ -f '${dir}/cancel' ] && exit 126\nexit 0\n`, { mode: 0o755 });
+  const deb = 'pretend .deb', sum = crypto.createHash('sha256').update(deb).digest('hex'), name = 'Rolling-Desk-0.3.1-linux-amd64.deb';
+  const gh = await fakeGitHub({ [name]: deb, 'SHA256SUMS.txt': `${sum}  ${name}\n` }, () => ({
+    tag_name: 'desk-v0.3.1', html_url: 'https://github.com/Samfox84/Rolling/releases/tag/desk-v0.3.1',
+    assets: [name, 'Rolling-Desk-0.3.1-linux-x86_64.AppImage', 'SHA256SUMS.txt'].map(n => ({ name: n, browser_download_url: `${gh.url}/${n}` })),
+  }));
+  try {
+    const u = new Updater({ current: '0.3.0', workDir: dir, platform: 'linux', arch: 'x64', execPath: '/opt/Rolling Desk/rolling-desk', appImage: undefined, api: gh.url, pkexec: fake });
+    assert.equal(u.kind(), 'deb'); assert.equal(u.canReplace(), true);
+    const info = await u.check();
+    assert.equal(info.asset.name, name, 'the .deb, not the AppImage');
+    const ready = await u.download(info);
+    await u.installDeb();
+    assert.equal(fs.readFileSync(log, 'utf8').trim(), `apt-get install -y --allow-downgrades ${ready.path}`);
+    fs.writeFileSync(path.join(dir, 'cancel'), '');
+    await assert.rejects(u.installDeb(), /Cancelled/);
+    const missing = new Updater({ current: '0.3.0', workDir: dir, platform: 'linux', arch: 'x64', execPath: '/opt/Rolling Desk/rolling-desk', api: gh.url, pkexec: path.join(dir, 'no-such-program') });
+    missing.ready = u.ready;
+    await assert.rejects(missing.installDeb(), /sudo apt install/);
   } finally { gh.srv.close(); }
 });

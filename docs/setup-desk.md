@@ -37,7 +37,7 @@ Rolling Desk is a free app for **Mac, Windows and Linux**. You can use it in two
 ## Connect to your studio
 
 1. On your Rolling dashboard, copy the link under **Open studio as host** for your show.
-2. Open Rolling Desk, choose **Connect to my studio server**, and paste the link.
+2. Open Rolling Desk, choose **Connect to a hosting server**, and paste the link.
 3. Choose where to save recordings on this computer (the default is **Rolling Recordings** in your home folder),
    then press **Connect**.
 4. Your studio opens. Choose **Run the show from the control room** for the full mixing desk (🎛 Console), or join
@@ -50,7 +50,7 @@ file. If you try to close it before everything's saved, it warns you.
 
 ## Host a studio on your computer (no server)
 
-1. Open Rolling Desk and choose **Host it on this computer**.
+1. Open Rolling Desk and choose **Host locally on this computer**.
 2. Choose where to keep your shows and recordings (a **Rolling Studio** folder is made there). The screen shows how
    much space is free and roughly how many hours of recording that is (about 4 GB per person per hour).
 3. Choose your **guest link** (see below), then press **Start my studio**. After a few seconds you're signed in to your own dashboard.
@@ -86,9 +86,12 @@ file. If you try to close it before everything's saved, it warns you.
 
 ## Updates
 
-Rolling Desk **updates itself** on Mac, Windows and the Linux AppImage. It checks GitHub when it opens and every
-6 hours, and asks you to restart — never during a show. You can also use **File › Check for updates…**. The `.deb`
-tells you when there's a new version and opens the download page.
+Rolling Desk **updates itself** on Mac, Windows and Linux. It checks GitHub when it opens and every 6 hours,
+downloads the new version, checks it, and asks you to restart — never during a show. On Ubuntu/Debian (the `.deb`)
+it asks for your password once to install it. You can also use **File › Check for updates…**.
+
+**The start screen** asks each time whether to connect to a hosting server or host locally. Tick **Remember my
+choice** to go straight there next time; to change it later use **File › Connect to a hosting server, or host locally…**.
 
 ## If something goes wrong
 
@@ -100,7 +103,7 @@ taken out first, so it's safe to share. If the app hits a problem, it offers to 
 |---|---|
 | **"The studio couldn't start"** (hosting) | The message says why. Save a problem report (above). The logs are in the app's settings folder (**Help › Open the log folder**): Mac `~/Library/Application Support/Rolling Desk`, Windows `%APPDATA%\Rolling Desk`, Linux `~/.config/Rolling Desk`. |
 | **"The studio didn't accept that link"** | Copy **Open studio as host** again from your dashboard — the guest link won't work here. |
-| **The app opens straight into an old studio** | It remembers the last one. **File › Connect to a different studio, or host it myself…** |
+| **The app opens straight into an old studio** | It remembers the last one. **File › Connect to a hosting server, or host locally…** |
 | **Guests can't hear or see each other** | Ask everyone to use Chrome or Edge. On strict office Wi-Fi, set up the free relay in **Studio settings**. |
 | **Want to start completely fresh** | Close the app and delete its settings folder (above). Your recordings aren't in there and are kept. |
 

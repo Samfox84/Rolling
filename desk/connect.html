@@ -25,7 +25,9 @@
 <body>
   <h1>🎛 Rolling Desk</h1>
   <p class="sub">Your producer's desk. Mix the show, run it, and keep every recording.</p>
-  <div class="tabs"><button type="button" id="tConnect" class="tab">Connect to my studio server</button><button type="button" id="tHost" class="tab">Host it on this computer</button></div>
+  <p class="help" style="margin:0 0 6px">How do you want to use Rolling Desk today?</p>
+  <div class="tabs"><button type="button" id="tConnect" class="tab">Connect to a hosting server</button><button type="button" id="tHost" class="tab">Host locally on this computer</button></div>
+  <label class="choice remember"><input type="checkbox" id="remember"> <span><b>Remember my choice</b> — go straight there next time. (Change it any time: File › Connect to a hosting server, or host locally…)</span></label>
 
   <form id="f">
     <label for="link">Your studio's host link</label>
@@ -72,6 +74,7 @@
   </form>
 <script>
   const q = new URLSearchParams(location.search), $ = id => document.getElementById(id);
+  $('remember').checked = q.get('remember') === '1';
   $('link').value = q.get('link') || ''; $('folder').value = q.get('folder') || ''; $('sfolder').value = q.get('studioFolder') || '';
   const showErr = (id, m) => { $(id).textContent = m; $(id).style.display = m ? 'block' : 'none'; };
   const mode = m => { $('f').hidden = m !== 'connect'; $('h').hidden = m !== 'host'; $('tConnect').classList.toggle('on', m === 'connect'); $('tHost').classList.toggle('on', m === 'host'); };
@@ -85,7 +88,7 @@
   };
   $('f').onsubmit = async e => {
     e.preventDefault(); showErr('err', ''); $('go').disabled = true; $('go').textContent = 'Connecting…';
-    const r = await window.desk.connect($('link').value, $('folder').value);
+    const r = await window.desk.connect($('link').value, $('folder').value, $('remember').checked);
     if (r && r.error) { showErr('err', r.error); $('go').disabled = false; $('go').textContent = 'Connect'; }
   };
   // guest link choice
@@ -107,7 +110,7 @@
   showSpace();
   $('h').onsubmit = async e => {
     e.preventDefault(); showErr('herr', ''); $('hgo').disabled = true; $('hgo').textContent = 'Starting…';
-    const r = await window.desk.host($('sfolder').value, { mode: gl(), address: $('addr').value, token: $('token').value, port: $('port').value });
+    const r = await window.desk.host($('sfolder').value, { mode: gl(), address: $('addr').value, token: $('token').value, port: $('port').value }, $('remember').checked);
     if (r && r.error) { showErr('herr', r.error); $('hgo').disabled = false; $('hgo').textContent = 'Start my studio'; }
   };
 </script>

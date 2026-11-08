@@ -108,19 +108,24 @@ async function showInProgress() {
 }
 
 // ---------- updates from GitHub (never while a show is going on) ----------
+let updating = false, toldAbout = ''; // one check (and one question) at a time; don't ask again about the same version
 async function checkForUpdates(byHand = false) {
-  if (!updater) return;
+  if (!updater || updating) return;
+  updating = true;
   try {
     const info = await updater.check();
     if (!info) { if (byHand) dialog.showMessageBox({ message: `Rolling Desk ${app.getVersion()} is the newest version.` }); return; }
     if (updater.kind() === 'manual' || !info.asset || !updater.canReplace()) {
-      const c = await dialog.showMessageBox({ type: 'info', buttons: ['Open the download page', 'Later'], defaultId: 0, cancelId: 1, message: `Rolling Desk ${info.version} is out`, detail: 'This copy can\'t update itself (the Linux .deb, or an app in a folder it can\'t change). Download the new version from GitHub.' });
+      if (!byHand && toldAbout === info.version) return; // told once already
+      toldAbout = info.version;
+      const c = await dialog.showMessageBox({ type: 'info', buttons: ['Open the download page', 'Later'], defaultId: 0, cancelId: 1, message: `Rolling Desk ${info.version} is out`, detail: 'This copy can\'t update itself (it\'s in a folder it can\'t change). Download the new version from GitHub.' });
       if (c.response === 0) shell.openExternal(info.page);
       return;
     }
-    if (!updater.ready || updater.ready.version !== info.version) await updater.download(info);
-    offerRestart();
+    if (!updater.ready || updater.ready.version !== info.version) { step(`downloading Rolling Desk ${info.version}`); await updater.download(info); }
+    if (byHand || toldAbout !== info.version) await offerRestart();
   } catch (e) { log('warn', 'update check: ' + e.message, e); if (byHand) dialog.showMessageBox({ type: 'warning', message: 'Couldn\'t check for updates', detail: e.message }); }
+  finally { updating = false; }
 }
 async function offerRestart() {
   if (!updater || !updater.ready) return;
@@ -129,9 +134,18 @@ async function offerRestart() {
     if (hosting()) setTimeout(() => offerRestart().catch(e => log('warn', 'update prompt', e)), 60000);
     return;
   }
-  offerWhenSafe = false;
-  const c = await dialog.showMessageBox({ type: 'info', buttons: ['Restart now', 'Later'], defaultId: 0, cancelId: 1, message: `Rolling Desk ${updater.ready.version} is ready`, detail: 'Restart to start using it. Your settings and recordings are kept.' });
-  if (c.response === 0) { updater.apply(); quitting = true; app.quit(); }
+  offerWhenSafe = false; toldAbout = updater.ready.version;
+  const deb = updater.kind() === 'deb';
+  const c = await dialog.showMessageBox({ type: 'info', buttons: [deb ? 'Install and restart' : 'Restart now', 'Later'], defaultId: 0, cancelId: 1, message: `Rolling Desk ${updater.ready.version} is ready`,
+    detail: deb ? 'It\'s downloaded and checked. Ubuntu will ask for your password to install it, then Rolling Desk reopens. Your settings and recordings are kept.' : 'Restart to start using it. Your settings and recordings are kept.' });
+  if (c.response !== 0) return;
+  step(`installing Rolling Desk ${updater.ready.version}`);
+  if (deb) {
+    try { await updater.installDeb(); }
+    catch (e) { log('warn', 'installing the update', e); dialog.showMessageBox({ type: 'warning', message: 'The update wasn\'t installed', detail: e.message }); return; }
+    app.relaunch(); quitting = true; app.quit(); return;
+  }
+  updater.apply(); quitting = true; app.quit();
 }
 
 // ---------- windows ----------
@@ -150,7 +164,7 @@ function openConnect(error = '') {
     webPreferences: { preload: path.join(__dirname, 'connect-preload.js'), contextIsolation: true, sandbox: true } });
   const gl = config.guestLink || {};
   win.loadFile(path.join(__dirname, 'connect.html'), { query: { mode: config.mode, link: config.link || '', folder: config.folder, studioFolder: config.studioFolder, error,
-    guestMode: gl.mode || 'quick', address: gl.address || '', port: String(gl.port || DEFAULT_PORT), hasToken: loadToken() ? '1' : '' } });
+    remember: config.remember ? '1' : '', guestMode: gl.mode || 'quick', address: gl.address || '', port: String(gl.port || DEFAULT_PORT), hasToken: loadToken() ? '1' : '' } });
 }
 
 // the studio's own window: the dashboard / Console. Only the studio's pages open in it; links elsewhere open in your browser.
@@ -293,7 +307,7 @@ ipcMain.handle('desk:pick-folder', async (e, title) => {
   return r.canceled ? null : r.filePaths[0];
 });
 const writable = folder => { try { fs.mkdirSync(folder, { recursive: true }); fs.accessSync(folder, fs.constants.W_OK); return ''; } catch (er) { return `Can't save in that folder: ${er.message}`; } };
-ipcMain.handle('desk:connect', async (e, { link, folder }) => {
+ipcMain.handle('desk:connect', async (e, { link, folder, remember }) => {
   let parsed;
   try { parsed = parseHostLink(link); } catch (er) { return { error: er.message }; }
   try { // check the link really opens the studio before switching to it
@@ -303,13 +317,13 @@ ipcMain.handle('desk:connect', async (e, { link, folder }) => {
   } catch (er) { return { error: `Couldn't reach ${parsed.base} — check the link and your internet connection (${er.message})` }; }
   const bad = writable(folder); if (bad) return { error: bad };
   stopEverything();
-  Object.assign(config, { mode: 'connect', link: link.trim(), folder }); saveConfig();
+  Object.assign(config, { mode: 'connect', link: link.trim(), folder, remember: !!remember }); saveConfig();
   openStudio();
   return { ok: true };
 });
 ipcMain.handle('desk:open-link', (e, url) => { if (/^https:\/\/([a-z0-9-]+\.)*cloudflare\.com\//.test(url)) return shell.openExternal(url); }); // help links on the start screen (Cloudflare only)
 ipcMain.handle('desk:space', (e, folder) => { try { return space(folder); } catch (er) { return { error: er.message }; } });
-ipcMain.handle('desk:host', async (e, { folder, link = {} }) => {
+ipcMain.handle('desk:host', async (e, { folder, link = {}, remember }) => {
   // the studio gets a folder of its own, even if you pick e.g. your home folder
   if (path.basename(folder) !== 'Rolling Studio') folder = path.join(folder, 'Rolling Studio');
   const bad = writable(folder); if (bad) return { error: bad };
@@ -326,7 +340,7 @@ ipcMain.handle('desk:host', async (e, { folder, link = {} }) => {
     if (token) saveToken(token);
     guest = { mode: 'own', address, port };
   }
-  Object.assign(config, { mode: 'host', studioFolder: folder, guestLink: guest }); saveConfig();
+  Object.assign(config, { mode: 'host', studioFolder: folder, guestLink: guest, remember: !!remember }); saveConfig();
   openHost().catch(er => { log('error', 'hosting', er); openConnect(er.message); });
   return { ok: true };
 });
@@ -360,7 +374,7 @@ function buildMenu() {
     { label: 'File', submenu: [
       { label: config.mode === 'host' ? 'Open studio folder (recordings)' : 'Open recordings folder', accelerator: 'CmdOrCtrl+Shift+O', click: () => shell.openPath(savedFolder()) },
       ...(hosting() ? [{ label: 'Copy the guest link address', click: () => guestLink && clipboard.writeText(guestLink) }] : []),
-      { label: hosting() ? 'Stop hosting / change the studio folder or guest link…' : 'Connect to a different studio, or host it myself…', click: () => setTimeout(() => back().catch(er => log('warn', 'switch', er)), 0) }, // after the menu has closed
+      { label: hosting() ? 'Stop hosting locally / change the studio folder or guest link…' : 'Connect to a hosting server, or host locally…', click: () => setTimeout(() => back().catch(er => log('warn', 'switch', er)), 0) }, // after the menu has closed
       { label: 'Check for updates…', click: () => checkForUpdates(true) },
       { type: 'separator' },
       ...(config.mode === 'connect' ? [{ label: 'Remove live copies once the finished files are saved', type: 'checkbox', checked: config.removeLive,
@@ -388,7 +402,9 @@ else {
     loadConfig(); buildMenu();
     updater = new Updater({ current: app.getVersion(), workDir: app.getPath('userData'), log, ...(process.env.ROLLING_DESK_UPDATE_API ? { api: process.env.ROLLING_DESK_UPDATE_API } : {}) });
     if (app.isPackaged || process.env.ROLLING_DESK_UPDATE_API) { setTimeout(() => checkForUpdates(), 15000); setInterval(() => checkForUpdates(), 6 * 3600 * 1000); }
+    // the start screen asks "connect or host?" every time — unless you ticked "Remember my choice"
     const start = () => {
+      if (!config.remember) return openConnect();
       if (config.mode === 'host') return openHost().catch(e => { log('error', 'hosting', e); openConnect(e.message); });
       let ok = false;
       try { ok = !!config.link && !!parseHostLink(config.link); } catch (e) { log('warn', 'saved studio link is not usable', e); }

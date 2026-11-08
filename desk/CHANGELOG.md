@@ -4,6 +4,13 @@ What changed in each version of the app. Newest first. Downloads are on the
 [Releases page](https://github.com/Samfox84/Rolling/releases). The studio itself has its own list:
 [../CHANGELOG.md](../CHANGELOG.md).
 
+## 0.3.1
+- **The start screen asks each time:** "Connect to a hosting server" or "Host locally on this computer". Tick
+  **Remember my choice** to go straight there next time (change it from the File menu)
+- **The Linux .deb updates itself too:** it downloads and checks the new version, asks for your password in the usual
+  Ubuntu box, installs it and reopens
+- Fix: the "new version" message could appear twice at once; now it's asked once per version
+
 ## 0.3.0
 - **Your own guest-link address** when hosting (e.g. podcast.yourname.com, the same every time) with a free
   Cloudflare account — step-by-step with sign-up links on the start screen. Your tunnel token is kept only on this
