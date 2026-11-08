@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'unsafe-inline'; script-src 'unsafe-inline'">
+<title>Updating Rolling Desk</title>
+<style>
+  :root { --bg: #0d0f12; --panel: #1a1d22; --text: #eee; --muted: #999; --accent: #3b82f6; }
+  body { margin: 0; background: var(--bg); color: var(--text); font: 15px/1.45 system-ui, -apple-system, Segoe UI, sans-serif; padding: 22px 24px; }
+  .top { display: flex; gap: 14px; align-items: center; }
+  h1 { margin: 0; font-size: 18px; } p { margin: 2px 0 0; }
+  .muted { color: var(--muted); font-size: 13px; }
+  .bar { position: relative; height: 12px; border-radius: 6px; background: var(--panel); overflow: hidden; margin: 18px 0 8px; }
+  .fill { position: absolute; inset: 0 auto 0 0; width: 0; background: linear-gradient(90deg, #2f9be0, #6fd08c); border-radius: 6px; transition: width .2s; }
+  .bar.busy .fill { width: 35%; animation: slide 1.2s ease-in-out infinite; }
+  @keyframes slide { from { left: -35%; } to { left: 100%; } }
+</style>
+</head>
+<body>
+  <div class="top">
+    <img src="studio/public/icon.svg" alt="" width="48" height="48">
+    <div><h1 id="title">Updating Rolling Desk</h1><p id="text">Starting…</p></div>
+  </div>
+  <div class="bar busy" id="bar" role="progressbar" aria-valuemin="0" aria-valuemax="100"><div class="fill" id="fill"></div></div>
+  <p class="muted" id="detail"></p>
+<script>
+// main.js calls show({ title, text, detail, fraction }) — fraction 0–1 fills the bar; null means "working on it"
+function show(s) {
+  document.getElementById('title').textContent = s.title;
+  document.getElementById('text').textContent = s.text || '';
+  document.getElementById('detail').textContent = s.detail || '';
+  const bar = document.getElementById('bar'), fill = document.getElementById('fill');
+  const busy = s.fraction === null || s.fraction === undefined;
+  bar.classList.toggle('busy', busy);
+  fill.style.width = busy ? '' : Math.round(s.fraction * 100) + '%';
+  if (busy) bar.removeAttribute('aria-valuenow'); else bar.setAttribute('aria-valuenow', String(Math.round(s.fraction * 100)));
+  document.title = s.title;
+}
+</script>
+</body>
+</html>

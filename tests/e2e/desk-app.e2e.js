@@ -235,3 +235,58 @@ test('Rolling Desk app: host with your own address (named tunnel), free space sh
     for (const l of (fs.existsSync(tunnelLog) ? fs.readFileSync(tunnelLog, 'utf8').trim().split('\n') : [])) try { process.kill(JSON.parse(l).pid); } catch { /* already stopped */ }
   }
 });
+
+test('Rolling Desk app: updating — asks first, shows the download filling up, says it will close and reopen, then the new version starts', { skip, timeout: 180000 }, async () => {
+  const http = require('http'), crypto = require('crypto');
+  const home = tmpDir('desk-upd-home'), dir = tmpDir('desk-upd'), marker = path.join(dir, 'new-version-started');
+  // pretend this copy is an AppImage, and GitHub has a new one (2 MB, sent slowly so the progress can be seen)
+  const appImage = path.join(dir, 'Rolling-Desk.AppImage');
+  fs.writeFileSync(appImage, '#!/bin/sh\necho old\n', { mode: 0o755 });
+  const newApp = Buffer.concat([Buffer.from(`#!/bin/sh\necho started > '${marker}'\nexit 0\n`), Buffer.alloc(2e6, 0x23)]);
+  const name = 'Rolling-Desk-9.9.9-linux-x86_64.AppImage', sum = crypto.createHash('sha256').update(newApp).digest('hex');
+  const gh = http.createServer(async (req, res) => {
+    if (req.url === '/repos/Samfox84/Rolling/releases/latest') {
+      res.setHeader('Content-Type', 'application/json');
+      return res.end(JSON.stringify({ tag_name: 'desk-v9.9.9', html_url: 'https://github.com/Samfox84/Rolling/releases', assets: [name, 'SHA256SUMS.txt'].map(n => ({ name: n, size: n === name ? newApp.length : 80, browser_download_url: `http://127.0.0.1:${gh.address().port}/${n}` })) }));
+    }
+    if (req.url === '/SHA256SUMS.txt') return res.end(`${sum}  ${name}\n`);
+    if (req.url !== '/' + name) { res.statusCode = 404; return res.end(); }
+    res.setHeader('Content-Length', newApp.length);
+    for (let i = 0; i < newApp.length; i += 100000) { res.write(newApp.subarray(i, i + 100000)); await new Promise(r => setTimeout(r, 150)); }
+    res.end();
+  });
+  await new Promise(r => gh.listen(0, '127.0.0.1', r));
+  let app, proc;
+  try {
+    app = await pw._electron.launch({ executablePath: electronBin, args: ['--no-sandbox', path.join(__dirname, '../../desk')],
+      env: { ...process.env, ROLLING_DESK_HOME: home, APPIMAGE: appImage, ROLLING_DESK_UPDATE_API: `http://127.0.0.1:${gh.address().port}` } });
+    proc = app.process();
+    await (await app.firstWindow()).waitForSelector('#tConnect');
+    // answer "Update now" when asked, and keep what was asked
+    await app.evaluate(({ dialog }) => { global.asked = []; dialog.showMessageBox = async (...a) => { global.asked.push(a.at(-1)); return { response: 0 }; }; });
+    // watch the "Updating Rolling Desk" window until the app closes itself
+    const seen = new Set(); let asked = [], gone = false;
+    proc.once('exit', () => { gone = true; });
+    while (!gone) {
+      const now = await app.evaluate(async ({ BrowserWindow }) => ({ asked: global.asked.map(o => o.message),
+        shown: await Promise.all(BrowserWindow.getAllWindows().filter(w => w.getTitle() !== 'Rolling Desk').map(w => w.webContents.executeJavaScript("document.getElementById('title').textContent + ' | ' + document.getElementById('text').textContent").catch(() => ''))) })).catch(() => null);
+      if (now) { asked = now.asked; now.shown.forEach(x => x && seen.add(x)); }
+      await new Promise(r => setTimeout(r, 100));
+    }
+    const shown = [...seen];
+    assert.deepEqual(asked, ['Rolling Desk 9.9.9 is out'], 'asks before downloading anything');
+    assert.ok(shown.some(x => /^Downloading Rolling Desk 9\.9\.9 \| [1-9]\d?% — \d+ MB of 2 MB$/.test(x)), `the download fills up: ${shown.join(' / ')}`);
+    assert.ok(shown.includes('Installing Rolling Desk 9.9.9 | Rolling Desk will close now and open again by itself in a few seconds.'), `says what happens next: ${shown.join(' / ')}`);
+    await waitFor(() => fs.existsSync(marker), 20000, 200);
+    assert.equal(fs.readFileSync(appImage).length, newApp.length, 'new version in place');
+    assert.deepEqual(JSON.parse(fs.readFileSync(path.join(home, 'config.json'), 'utf8')).updatingTo, { from: require('../../desk/package.json').version, to: '9.9.9' }, 'the new version will say it worked');
+    // next start: it says how the update went, once
+    app = await pw._electron.launch({ executablePath: electronBin, args: ['--no-sandbox', path.join(__dirname, '../../desk')], env: { ...process.env, ROLLING_DESK_HOME: home } });
+    proc = app.process();
+    await (await app.firstWindow()).waitForSelector('#tConnect');
+    assert.equal(JSON.parse(fs.readFileSync(path.join(home, 'config.json'), 'utf8')).updatingTo, undefined, 'told once, then forgotten');
+  } finally {
+    gh.close();
+    if (proc && proc.exitCode === null) await app.close().catch(() => {});
+  }
+});

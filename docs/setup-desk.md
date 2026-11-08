@@ -86,9 +86,12 @@ file. If you try to close it before everything's saved, it warns you.
 
 ## Updates
 
-Rolling Desk **updates itself** on Mac, Windows and Linux. It checks GitHub when it opens and every 6 hours,
-downloads the new version, checks it, and asks you to restart — never during a show. On Ubuntu/Debian (the `.deb`)
-it asks for your password once to install it. You can also use **File › Check for updates…**.
+Rolling Desk **updates itself** on Mac, Windows and Linux. It checks GitHub when it opens and every 6 hours, and
+when there's a new version it asks **Update now** or **Later** — never during a show. Choose **Update now** and a
+small **Updating Rolling Desk** window shows the download filling up, then the check and the install. Rolling Desk
+then **closes and opens again by itself** (a few seconds on Mac and Linux, about half a minute on Windows) — no need
+to open it yourself — and tells you it's updated. On Ubuntu/Debian (the `.deb`) it asks for your password to install
+it. You can also use **File › Check for updates…**, and **Help › What's new in Rolling Desk** shows what changed.
 
 **The start screen** asks each time whether to connect to a hosting server or host locally. Tick **Remember my
 choice** to go straight there next time; to change it later use **File › Connect to a hosting server, or host locally…**.

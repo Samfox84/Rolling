@@ -4,6 +4,14 @@ What changed in each version of the app. Newest first. Downloads are on the
 [Releases page](https://github.com/Samfox84/Rolling/releases). The studio itself has its own list:
 [../CHANGELOG.md](../CHANGELOG.md).
 
+## 0.3.3
+- **Updating shows what's going on:** it asks first ("Rolling Desk X is out — Update now / Later"), then a small
+  **Updating Rolling Desk** window shows the download filling up (percentage and MB; the dock / taskbar icon too),
+  "Checking", then "Installing — Rolling Desk will close now and open again by itself". When it reopens it says
+  **"Rolling Desk is updated to X ✓"** (or that the update didn't finish, and what to do)
+- **Help › What's new in Rolling Desk**
+- This is how updates *from* 0.3.3 onwards look: the update to 0.3.3 itself still uses the old, silent way
+
 ## 0.3.2
 - **A proper Rolling icon** for the app (Mac dock, Windows taskbar, Linux menu) and on the start screen
 - Carries studio 0.9.1 when hosting: the Health panel in plain words and a clearer "your computer is struggling"

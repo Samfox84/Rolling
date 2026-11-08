@@ -71,8 +71,19 @@ class Updater extends EventEmitter {
     const file = path.join(dir, info.asset.name), hash = crypto.createHash('sha256');
     const res = await this.fetchOk(info.asset.browser_download_url, 30 * 60 * 1000);
     const out = fs.createWriteStream(file);
-    for await (const chunk of res.body) { hash.update(chunk); if (!out.write(chunk)) await new Promise(r => out.once('drain', r)); }
+    // 'progress' {version, done, total} for the progress bar: a few times a second, and once at the end
+    const total = Number(res.headers.get('content-length')) || info.asset.size || 0;
+    let done = 0, last = 0;
+    const progress = () => this.emit('progress', { version: info.version, done, total });
+    progress();
+    for await (const chunk of res.body) {
+      hash.update(chunk); done += chunk.length;
+      if (Date.now() - last > 200) { last = Date.now(); progress(); }
+      if (!out.write(chunk)) await new Promise(r => out.once('drain', r));
+    }
     await new Promise((r, j) => out.end(e => (e ? j(e) : r())));
+    progress();
+    this.emit('checking', { version: info.version });
     const got = hash.digest('hex');
     if (got !== expected) { await fsp.rm(dir, { recursive: true, force: true }); throw new Error('The download was damaged (fingerprint didn\'t match) — it will try again later'); }
     let ready = file;

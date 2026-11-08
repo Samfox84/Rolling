@@ -82,7 +82,7 @@ function startMirror() {
     lastStatus = s;
     if (win && !win.isDestroyed()) win.webContents.send('desk-status', s);
     keepAwake(s.busy);
-    if (!s.busy && offerWhenSafe) offerRestart();
+    if (!s.busy && offerWhenSafe && pending) offerUpdate(pending).catch(e => log('warn', 'update prompt', e));
   });
   mirror.start().catch(e => log('error', 'local saving could not start', e));
 }
@@ -108,9 +108,11 @@ async function showInProgress() {
 }
 
 // ---------- updates from GitHub (never while a show is going on) ----------
-let updating = false, toldAbout = ''; // one check (and one question) at a time; don't ask again about the same version
+// Asks first, then a small "Updating Rolling Desk" window shows the download, the check and the install (the dock /
+// taskbar icon shows the download too), says the app will close and reopen by itself, and the new version says it's done.
+let updating = false, installing = false, toldAbout = '', pending = null, upWin = null, upLoaded = null;
 async function checkForUpdates(byHand = false) {
-  if (!updater || updating) return;
+  if (!updater || updating || installing) return;
   updating = true;
   try {
     const info = await updater.check();
@@ -122,30 +124,85 @@ async function checkForUpdates(byHand = false) {
       if (c.response === 0) shell.openExternal(info.page);
       return;
     }
-    if (!updater.ready || updater.ready.version !== info.version) { step(`downloading Rolling Desk ${info.version}`); await updater.download(info); }
-    if (byHand || toldAbout !== info.version) await offerRestart();
+    if (!byHand && toldAbout === info.version) return; // asked once already ("Later"): ask again next time it opens
+    await offerUpdate(info);
   } catch (e) { log('warn', 'update check: ' + e.message, e); if (byHand) dialog.showMessageBox({ type: 'warning', message: 'Couldn\'t check for updates', detail: e.message }); }
   finally { updating = false; }
 }
-async function offerRestart() {
-  if (!updater || !updater.ready) return;
+async function offerUpdate(info) {
+  if (installing) return;
   if (await showInProgress()) { // ask again once the show is over
-    offerWhenSafe = true;
-    if (hosting()) setTimeout(() => offerRestart().catch(e => log('warn', 'update prompt', e)), 60000);
+    pending = info; offerWhenSafe = true;
+    if (hosting()) setTimeout(() => offerUpdate(info).catch(e => log('warn', 'update prompt', e)), 60000);
     return;
   }
-  offerWhenSafe = false; toldAbout = updater.ready.version;
-  const deb = updater.kind() === 'deb';
-  const c = await dialog.showMessageBox({ type: 'info', buttons: [deb ? 'Install and restart' : 'Restart now', 'Later'], defaultId: 0, cancelId: 1, message: `Rolling Desk ${updater.ready.version} is ready`,
-    detail: deb ? 'It\'s downloaded and checked. Ubuntu will ask for your password to install it, then Rolling Desk reopens. Your settings and recordings are kept.' : 'Restart to start using it. Your settings and recordings are kept.' });
-  if (c.response !== 0) return;
-  step(`installing Rolling Desk ${updater.ready.version}`);
-  if (deb) {
-    try { await updater.installDeb(); }
-    catch (e) { log('warn', 'installing the update', e); dialog.showMessageBox({ type: 'warning', message: 'The update wasn\'t installed', detail: e.message }); return; }
-    app.relaunch(); quitting = true; app.quit(); return;
+  pending = null; offerWhenSafe = false; toldAbout = info.version;
+  const deb = updater.kind() === 'deb', size = info.asset.size ? ` (${mbText(info.asset.size)})` : '';
+  const c = await dialog.showMessageBox({ type: 'info', buttons: ['Update now', 'Later'], defaultId: 0, cancelId: 1, message: `Rolling Desk ${info.version} is out`,
+    detail: `Update now downloads it${size}, checks it and installs it — a progress bar shows how it's going. ${deb ? 'Ubuntu asks for your password, then Rolling Desk' : 'Then Rolling Desk'} closes and opens again by itself. Your settings and recordings are kept.` });
+  if (c.response === 0) await installUpdate(info);
+}
+const WHATS_NEW = 'https://github.com/Samfox84/Rolling/blob/main/desk/CHANGELOG.md';
+const mbText = b => `${Math.max(1, Math.round(b / 1e6))} MB`;
+function updateWindow(state) {
+  if (!upWin || upWin.isDestroyed()) {
+    upWin = new BrowserWindow({ width: 480, height: 230, resizable: false, maximizable: false, fullscreenable: false, title: 'Updating Rolling Desk',
+      backgroundColor: '#0d0f12', autoHideMenuBar: true, webPreferences: { contextIsolation: true, sandbox: true } });
+    upWin.removeMenu();
+    upLoaded = upWin.loadFile(path.join(__dirname, 'update.html'));
   }
-  updater.apply(); quitting = true; app.quit();
+  const w = upWin;
+  upLoaded.then(() => !w.isDestroyed() && w.webContents.executeJavaScript(`show(${JSON.stringify(state)})`)).catch(e => log('warn', 'update window', e));
+}
+function dockProgress(f) { if (win && !win.isDestroyed()) win.setProgressBar(f); } // 0–1; 2 = busy; -1 = none
+async function installUpdate(info) {
+  if (installing) return;
+  installing = true;
+  const v = info.version, kind = updater.kind();
+  const onProgress = ({ done, total }) => {
+    const f = total ? Math.min(1, done / total) : null;
+    updateWindow({ title: `Downloading Rolling Desk ${v}`, text: f === null ? `${mbText(done)} so far` : `${Math.floor(f * 100)}% — ${mbText(done)} of ${mbText(total)}`,
+      detail: 'You can keep using Rolling Desk while it downloads.', fraction: f });
+    dockProgress(f === null ? 2 : f);
+  };
+  const onChecking = () => { updateWindow({ title: `Checking Rolling Desk ${v}`, text: 'Making sure the download is complete and undamaged…', fraction: null }); dockProgress(2); };
+  try {
+    if (!updater.ready || updater.ready.version !== v) {
+      step(`downloading Rolling Desk ${v}`);
+      updater.on('progress', onProgress); updater.on('checking', onChecking);
+      try { await updater.download(info); } finally { updater.off('progress', onProgress); updater.off('checking', onChecking); }
+    }
+    step(`installing Rolling Desk ${v}`);
+    config.updatingTo = { from: app.getVersion(), to: v }; saveConfig(); // the new version says it worked (or didn't)
+    if (kind === 'deb') {
+      updateWindow({ title: `Installing Rolling Desk ${v}`, text: 'Type your password in the box Ubuntu shows.', detail: 'Rolling Desk opens again by itself when it\'s done.', fraction: null });
+      await updater.installDeb();
+      updateWindow({ title: `Rolling Desk ${v} is installed`, text: 'Opening the new version…', fraction: 1 });
+      await new Promise(r => setTimeout(r, 1200));
+      app.relaunch(); quitting = true; app.quit(); return;
+    }
+    updateWindow({ title: `Installing Rolling Desk ${v}`, text: `Rolling Desk will close now and open again by itself in ${kind === 'windows' ? 'about half a minute' : 'a few seconds'}.`,
+      detail: 'No need to open it yourself — just wait for it to come back.', fraction: null });
+    await new Promise(r => setTimeout(r, 3000));
+    updater.apply(); quitting = true; app.quit();
+  } catch (e) {
+    log('warn', 'installing the update', e);
+    delete config.updatingTo; saveConfig();
+    if (upWin && !upWin.isDestroyed()) upWin.close();
+    dialog.showMessageBox({ type: 'warning', message: 'The update wasn\'t installed', detail: `${e.message}\n\nYou can try again from File › Check for updates…` });
+  } finally { installing = false; dockProgress(-1); }
+}
+// after an update: say it worked, or that it didn't
+function afterUpdate() {
+  const u = config.updatingTo;
+  if (!u) return;
+  delete config.updatingTo; saveConfig();
+  const now = app.getVersion();
+  if (now === u.to) {
+    dialog.showMessageBox({ type: 'info', buttons: ['OK', 'See what\'s new'], defaultId: 0, cancelId: 0, message: `Rolling Desk is updated to ${now} ✓`, detail: 'Everything went to plan. Your settings and recordings are as you left them.' })
+      .then(c => { if (c.response === 1) shell.openExternal(WHATS_NEW); }).catch(e => log('warn', 'update message', e));
+  }
+  else dialog.showMessageBox({ type: 'warning', message: 'The update didn\'t finish', detail: `Rolling Desk is still ${now} (it was updating to ${u.to}). Try again with File › Check for updates…, or save a problem report (Help menu) and send it to Sam.` });
 }
 
 // ---------- windows ----------
@@ -388,6 +445,7 @@ function buildMenu() {
       { label: 'Save a problem report…', click: () => saveReport() },
       { label: 'Open the log folder', click: () => shell.openPath(app.getPath('userData')) },
       { type: 'separator' },
+      { label: 'What\'s new in Rolling Desk', click: () => shell.openExternal(WHATS_NEW) },
       { label: 'How to use Rolling Desk', click: () => shell.openExternal('https://github.com/Samfox84/Rolling/blob/main/docs/setup-desk.md') },
       { label: 'Rolling on GitHub', click: () => shell.openExternal('https://github.com/Samfox84/Rolling') },
     ] },
@@ -400,6 +458,7 @@ else {
   app.on('second-instance', () => { if (win) { if (win.isMinimized()) win.restore(); win.focus(); } });
   app.whenReady().then(() => {
     loadConfig(); buildMenu();
+    afterUpdate();
     updater = new Updater({ current: app.getVersion(), workDir: app.getPath('userData'), log, ...(process.env.ROLLING_DESK_UPDATE_API ? { api: process.env.ROLLING_DESK_UPDATE_API } : {}) });
     if (app.isPackaged || process.env.ROLLING_DESK_UPDATE_API) { setTimeout(() => checkForUpdates(), 15000); setInterval(() => checkForUpdates(), 6 * 3600 * 1000); }
     // the start screen asks "connect or host?" every time — unless you ticked "Remember my choice"

@@ -20,6 +20,7 @@ const find = () => {
 (async () => {
   const { bin, res } = find(), exe = process.platform === 'win32' ? '.exe' : '';
   for (const t of ['ffmpeg', 'ffprobe', 'cloudflared', 'whisper-cli']) if (!fs.existsSync(path.join(res, 'tools', t + exe))) throw new Error(`the app is missing ${t}`);
+  for (const f of ['connect.html', 'update.html', 'studio/public/icon.svg']) if (!fs.existsSync(path.join(res, 'app', f))) throw new Error(`the app is missing ${f}`);
   if (!(fs.statSync(path.join(res, 'tools', 'models', 'ggml-base.en.bin')).size > 1e8)) throw new Error('the app is missing the speech model');
   const data = fs.mkdtempSync(path.join(os.tmpdir(), 'rolling-check-')), port = 18000 + Math.floor(Math.random() * 1000);
   const p = spawn(bin, [path.join(res, 'app', 'studio', 'server.js')], { env: { ...process.env, ELECTRON_RUN_AS_NODE: '1', PORT: String(port), BIND: '127.0.0.1', DATA_DIR: data, ADMIN_PASSWORD: 'check', SECRET: 'check', NO_EXTERNAL_CALLS: '1', FFMPEG: path.join(res, 'tools', 'ffmpeg' + exe), FFPROBE: path.join(res, 'tools', 'ffprobe' + exe) } });
