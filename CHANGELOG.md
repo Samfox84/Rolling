@@ -4,6 +4,20 @@ What changed in each version of the studio — the part that runs on your server
 Newest first. The desktop app has its own list: [desk/CHANGELOG.md](desk/CHANGELOG.md).
 Rolling is still pre-release, so versions are 0.x.
 
+## 0.9.1 — a Health panel in plain words
+- **🩺 Health, rewritten for people, not engineers:** a summary at the top ("Everything looks good" or the list of
+  things to look at), then:
+  - **The studio:** free space and roughly how many hours of recording that is, whether files are being made,
+    transcripts, backups (drive and cloud), email, version
+  - **Each person:** how they sound (good / a bit quiet / too loud / no sound / muted), whether their recording is
+    safe (recording and keeping up / finishing upload / everything saved), their connection (good / OK / poor — and
+    that it only affects the live call), and their computer — each with what to do about it. The numbers are still
+    there under "Technical details"
+- Fix: "about Infinity h of recording left" when nobody else was in the room
+- **"Your computer is struggling" now explains itself:** how many times and how much sound was missed, whether it
+  affected your recording (or, in the control room, only what you hear), and what to do — including if you're on battery
+- Fix: clicking the tab you're already on closed the Health/Chat/Desk panel; now only ✕ closes it
+
 ## 0.9.0 — guests, backups and safety
 - **✉️ Invite a guest** (Recordings page): emails them their link, a 5-minute setup checklist and a calendar entry
   with a reminder — or copy the invite to send yourself on WhatsApp, Messages or email

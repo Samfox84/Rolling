@@ -22,7 +22,7 @@ const createTranscriber = require('./transcribe');
 let nodemailer = null;
 try { nodemailer = require('nodemailer'); } catch { /* email optional */ }
 
-const VERSION = '0.9.0';
+const VERSION = '0.9.1';
 
 // ---------- settings (from .env next to this file) ----------
 (function loadEnv() {
@@ -160,6 +160,15 @@ function listTakes(room) {
   const d = path.join(roomDir(room), 'takes');
   if (!fs.existsSync(d)) return [];
   return fs.readdirSync(d).map(id => loadTake(room, id)).filter(Boolean).sort((a, b) => b.started - a.started);
+}
+// what the Health panel shows about the studio itself, in one go
+async function studioStatus() {
+  return {
+    version: VERSION, disk: await diskInfo(), making: queued.size, // takes waiting for or having their files made
+    transcripts: transcriber.available() ? (transcriber.enabled() ? 'on' : 'off') : 'missing',
+    backup: settings.backupDir || '', cloud: settings.cloud.remote || '', email: !!(nodemailer && settings.smtp.host),
+    relay: !!(settings.turn.keyId && settings.turn.token) || !!process.env.TURN_URLS,
+  };
 }
 async function diskInfo() { try { const s = await fsp.statfs(DATA_DIR); return { free: s.bavail * s.bsize, total: s.blocks * s.bsize }; } catch { return null; } }
 
@@ -1452,7 +1461,7 @@ wss.on('connection', ws => {
       roomToneSeconds: ROOM_TONE_SECONDS, roomTone: lr.roomTone && lr.roomTone.end > Date.now() ? lr.roomTone : null,
       rundown: room.rundown || [], segment: lr.segment || null, fps: settings.fps, channels: peer.isHost ? room.channels || {} : undefined, sounds: peer.isHost ? room.sounds || [] : undefined, scenes: peer.isHost ? room.scenes || {} : undefined, script: scriptFor(room, peer), coughing: [...lr.peers.values()].filter(p => p.coughing).map(p => p.id),
       chat: lr.chat.slice(-100), waiting: peer.isHost ? [...lr.waiting.values()].map(w => ({ id: w.id, name: w.name })) : [],
-      disk: peer.isHost ? await diskInfo() : null, gbPerPersonHour: GB_PER_PERSON_HOUR, minFreeGB: MIN_FREE_GB });
+      disk: peer.isHost ? await diskInfo() : null, studio: peer.isHost ? await studioStatus() : null, gbPerPersonHour: GB_PER_PERSON_HOUR, minFreeGB: MIN_FREE_GB });
     if (t && !peer.control && !peer.green) {
       const existing = info.recSeg && t.segs[info.recSeg] && t.segs[info.recSeg].clientId === info.clientId ? info.recSeg : null;
       // a fresh page for the same person: their earlier part can't send any more, so stop waiting on it
@@ -1689,7 +1698,7 @@ setInterval(() => {
   transcriber.tickLive(takes);
 }, (Number(process.env.LIVE_TX_SECONDS) || 10) * 1000);
 // hosts get server health every 30 s
-setInterval(async () => { const d = await diskInfo(); for (const lr of live.values()) if (lr.peers.size) toHosts(lr, { t: 'server', disk: d }); }, 30000);
+setInterval(async () => { const st = await studioStatus(); for (const lr of live.values()) if (lr.peers.size) toHosts(lr, { t: 'server', disk: st.disk, studio: st }); }, 15000);
 
 // ---------- start-up: carry on after a restart / power cut ----------
 for (const id of fs.readdirSync(ROOMS_DIR)) {

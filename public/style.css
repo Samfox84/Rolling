@@ -387,3 +387,14 @@ body.console-open .studio { visibility: hidden; }
   .tc { font-size: 15px; }
   .tally { padding: 6px 10px; }
 }
+
+/* Health panel in plain words */
+.hsummary { margin-bottom: 10px; }
+.hsum { border-radius: 10px; padding: 10px 12px; font-size: 13px; }
+.hsum.good { background: #14532d66; border: 1px solid var(--ok); }
+.hsum.warn { background: #7c2d1266; border: 1px solid var(--warn); }
+.hsum ul { margin: 6px 0 0; padding-left: 18px; }
+.hitem { font-size: 13px; margin: 6px 0 0; line-height: 1.35; }
+.hitem.good { color: var(--ok); } .hitem.warn { color: var(--warn); } .hitem.bad { color: var(--rec); } .hitem.muted { color: #9aa3ad; }
+.hitem .htip { color: #c9d1d9; font-size: 12px; margin: 2px 0 0 22px; }
+.hrow details { margin-top: 6px; } .hrow details summary { cursor: pointer; }

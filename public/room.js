@@ -22,7 +22,7 @@ let roomTone = null, roomToneSeconds = 20;
 let screenStream = null;
 let net = null;                     // connection test result
 let videoBps = 4000000;
-let serverDisk = null, gbPerPersonHour = 4;
+let serverDisk = null, gbPerPersonHour = 4, studioInfo = null; // studioInfo: what the studio says about itself (Health panel)
 let controlMode = false;            // host running the show with no camera/mic (not recorded)
 let myLoud = null;                  // my own loudness (EBU R128) from the audio engine
 let nextEpisode = 1;
@@ -346,7 +346,7 @@ const WARN_TEXT = {
   'mic-lost': ['Your microphone disconnected — trying to reconnect it…', 'mic disconnected'],
   'cam-lost': ['Your camera disconnected. Your voice is still recording.', 'camera disconnected'],
   'clipping': ['Your mic is too loud and distorting — move back a little or turn the input down.', 'mic distorting (too loud)'],
-  'glitch': ['Your computer is struggling to keep up — close other apps and plug in to power.', 'computer struggling — audio glitches'],
+  'glitch': ['Your computer missed some sound — it\'s too busy.', 'computer too busy — short gaps in their sound'], // the full message is glitchText()
   'behind': ['Your upload is falling behind. It will catch up — keep this tab open after the show.', 'upload falling behind'],
   'offline': ['Lost connection to the studio — still recording safely on your computer, reconnecting…', 'disconnected — reconnecting'],
   'storage': ['This browser won\'t let us save to disk (private window?) — keep this tab open until it says Saved.', 'can\'t save to disk (private window?)'],
@@ -354,6 +354,21 @@ const WARN_TEXT = {
   'disk': ['The studio server is nearly out of space.', 'server nearly full'],
 };
 const warns = new Set();
+// what "the computer is struggling" actually means, for whoever is seeing it: how much sound went missing, whether it
+// touched their recording, and what usually fixes it
+let onBattery = false;
+if (navigator.getBattery) navigator.getBattery().then(b => { const upd = () => { onBattery = !b.charging; if (warns.has('glitch')) renderWarnBar(); }; upd(); b.addEventListener('chargingchange', upd); }).catch(quiet('battery status'));
+function glitchText() {
+  const n = glitchTimes.length, ms = Math.round(glitchTimes.reduce((t, g) => t + g.ms, 0));
+  const what = `This computer was too busy to handle the sound ${n} time${n === 1 ? '' : 's'} in the last 30 seconds (${ms} ms of sound missed).`;
+  const effect = controlMode ? 'You may hear small dropouts here, but nobody\'s recording is affected — you aren\'t being recorded in the control room.'
+    : recStartedAt ? 'Your recording has tiny silent gaps at those moments; everyone else\'s recording is fine.'
+    : 'Nothing is being recorded yet, but it would cause tiny gaps in your recording.';
+  const fix = `To fix it: close other apps and browser tabs (especially video, games or big downloads)${onBattery ? ', plug in to power — you\'re on battery, which slows the computer down' : ''}, and keep this window in front.`;
+  return `${what} ${effect} ${fix}`;
+}
+setInterval(() => { if (warns.has('glitch')) renderWarnBar(); }, 3000); // keep the numbers current while it's showing
+window.__studio.glitch = frames => onWorklet({ data: { type: 'glitch', frames } }); // lets the tests pretend the computer was too busy
 function setWarn(code, on) {
   if (on === warns.has(code)) return;
   on ? warns.add(code) : warns.delete(code);
@@ -362,11 +377,11 @@ function setWarn(code, on) {
 function renderWarnBar() {
   const bar = $('#warnBar');
   bar.classList.toggle('hidden', !warns.size);
-  bar.innerHTML = [...warns].map(c => `<div>⚠ ${esc(WARN_TEXT[c] ? WARN_TEXT[c][0] : c)}</div>`).join('');
+  bar.innerHTML = [...warns].map(c => `<div>⚠ ${esc(c === 'glitch' ? glitchText() : WARN_TEXT[c] ? WARN_TEXT[c][0] : c)}</div>`).join('');
   layout();
 }
 let localPeak = 0, lastSoundAt = performance.now();
-const clipTimes = [], glitchTimes = [];
+const clipTimes = [], glitchTimes = []; // glitchTimes: { at, ms } — each moment the computer couldn't keep up, and for how long
 let glitches = 0;
 function onWorklet(e) {
   const m = e.data;
@@ -377,14 +392,14 @@ function onWorklet(e) {
     if (m.clips > 2 && micOn) clipTimes.push(performance.now());
     return;
   }
-  if (m.type === 'glitch') { glitches++; glitchTimes.push(performance.now()); return; }
+  if (m.type === 'glitch') { glitches++; glitchTimes.push({ at: performance.now(), ms: (m.frames / ((ctx && ctx.sampleRate) || 48000)) * 1000 }); return; }
   if (m.type === 'pcm') return onPcm(m);
   if (m.type === 'stopped') { const r = audioTarget; audioTarget = null; if (r) { r.audioStopped = true; maybeFinish(r); } }
 }
 setInterval(() => {
   const now = performance.now();
   while (clipTimes.length && now - clipTimes[0] > 15000) clipTimes.shift();
-  while (glitchTimes.length && now - glitchTimes[0] > 30000) glitchTimes.shift();
+  while (glitchTimes.length && now - glitchTimes[0].at > 30000) glitchTimes.shift();
   const at = stream && stream.getAudioTracks()[0];
   setWarn('mic-silent', !!(joined && micOn && at && at.readyState === 'live' && now - lastSoundAt > 15000));
   setWarn('clipping', clipTimes.length >= 3);
@@ -553,6 +568,7 @@ function onMsg(m) {
       inWaiting = false;
       myId = m.id; isHost = m.isHost; iceServers = m.ice || []; roomToneSeconds = m.roomToneSeconds || 20; gbPerPersonHour = m.gbPerPersonHour || 4;
       if (m.disk) serverDisk = m.disk;
+      if (m.studio) studioInfo = m.studio;
       $('#roomTitle').textContent = m.roomName; document.title = m.roomName + ' — ' + m.studio;
       document.querySelectorAll('.hostonly').forEach(e => e.classList.toggle('hidden', !isHost));
       $('#recordingsLink').href = `/m/${roomId}?k=${encodeURIComponent(hostKey)}`;
@@ -599,7 +615,7 @@ function onMsg(m) {
     case 'marker': markers.push(m); if (m.tag === 'note') addNoteRow(m); else toast(`📍 ${m.label} at ${fmtTime(m.at)}`); break;
     case 'knock': showKnock(m); chime(); break;
     case 'knock-gone': { const k = document.getElementById('knock-' + m.id); if (k) k.remove(); break; }
-    case 'server': serverDisk = m.disk; break;
+    case 'server': serverDisk = m.disk; if (m.studio) studioInfo = m.studio; break;
     case 'meter': { const p = peers.get(m.id); if (p) p.loud = m.m; break; }
     case 'build': build = m; renderBuild(); break;
     case 'tx': txLive = m; renderLiveTx(); break;
@@ -1642,7 +1658,7 @@ $('#chatBtn').onclick = () => openDrawer('chat');
 $('#healthBtn').onclick = () => openDrawer('health');
 $('#deskBtn').onclick = () => openDrawer('desk');
 $('#drawerClose').onclick = closeDrawer;
-document.querySelectorAll('.drawer-tabs .tab').forEach(b => { b.onclick = () => openDrawer(b.dataset.tab); });
+document.querySelectorAll('.drawer-tabs .tab').forEach(b => { b.onclick = () => { if (drawerTab !== b.dataset.tab) openDrawer(b.dataset.tab); }; }); // the tab you're on stays open (✕ closes)
 function addChat(m, quiet) {
   const el = document.createElement('div');
   el.className = 'chatmsg' + (m.pid === myId ? ' mine' : '');
@@ -1759,6 +1775,65 @@ function txHtml() {
   const fail = x.failed.length ? `<div class="hwarn">⚠ ${x.failed.map(f => esc(f.who) + ': ' + esc(f.error)).join(' · ')}</div>` : '';
   return `<div class="hrow ${fail ? 'has-warn' : ''}"><b>📝 Live transcript</b><div class="small-text muted">${x.pct}% of the audio so far · ${x.lines} line${x.lines === 1 ? '' : 's'} (runs ~30 s behind)</div><div class="pbar"><span style="width:${x.pct}%"></span></div>${fail}</div>`;
 }
+// ---------- Health panel: everything in plain words — what's fine, what isn't, and what to do ----------
+const hItem = (cls, icon, text, tip = '') => `<div class="hitem ${cls}">${icon} ${text}${tip ? `<div class="htip">${tip}</div>` : ''}</div>`;
+function plainSound(r) { // how someone sounds, from their own loudness meter and warnings
+  const s = r.s, ws = s.warnings || [], L = r.loud, v = L && (Number.isFinite(L.I) ? L.I : L.S);
+  if (s.mic === false) return ['muted', '🔇', 'Muted — their microphone is off'];
+  if (ws.includes('mic-lost')) return ['bad', '🎙', 'Microphone unplugged — reconnecting it', 'Ask them to check the cable or Bluetooth.'];
+  if (ws.includes('mic-silent')) return ['bad', '🎙', 'No sound from their microphone', 'Ask them to check it\'s plugged in, not muted on the device itself, and the right one is picked. You can switch it for them with ⚙ HELP on the Console.'];
+  if (ws.includes('clipping')) return ['bad', '🎙', 'Too loud — the sound is distorting', 'Ask them to move back a little or turn their mic input down.'];
+  if (!Number.isFinite(v)) return ['muted', '🎙', 'Sound level: waiting for them to talk'];
+  if (v > -12) return ['warn', '🎙', `Very loud (${v.toFixed(0)} LUFS)`, 'Ask them to move back a little.'];
+  if (v < -35) return ['warn', '🎙', `Very quiet (${v.toFixed(0)} LUFS)`, 'Ask them to move closer to the mic or turn it up. (It can be evened out afterwards, but more background noise comes up with it.)'];
+  if (v < -28) return ['warn', '🎙', `A bit quiet (${v.toFixed(0)} LUFS)`, 'Fine to record — moving a little closer to the mic would help.'];
+  return ['good', '🎙', `Sound level good (${v.toFixed(0)} LUFS)`];
+}
+function plainConnection(r) { // the live call — never the recording, which is made on their own computer
+  const s = r.s, loss = (s.loss || 0) * 100, rtt = s.rtt || 0;
+  if ((s.warnings || []).includes('offline') || r.conn === 'failed' || r.conn === 'disconnected') return ['bad', '📶', 'Connection lost — reconnecting', 'Their recording carries on safely on their computer and uploads when they\'re back.'];
+  const how = loss < 2 && rtt < 200 ? 'good' : loss < 6 && rtt < 400 ? 'ok' : 'poor';
+  const words = { good: 'Connection good', ok: 'Connection OK', poor: 'Connection poor' }[how];
+  const tip = how === 'good' ? '' : `The live call may ${how === 'poor' ? 'stutter or freeze' : 'stutter now and then'} — their recording isn\'t affected. Wired internet or sitting nearer the Wi-Fi helps.${s.relay ? ' (Going through the relay for strict networks.)' : ''}`;
+  return [how === 'good' ? 'good' : how === 'ok' ? 'warn' : 'bad', '📶', words, tip];
+}
+function plainRecording(r) { // is their full-quality recording safe yet?
+  const s = r.s, left = s.pending || 0, behind = (s.warnings || []).includes('behind');
+  if (s.durable === false) return ['bad', '💾', 'Not saving to their disk (private window?)', 'Their recording is only in memory: they must keep this page open until it says Saved. Next time, don\'t use a private window.'];
+  if (s.rec === 'recording') return behind ? ['warn', '⏺', `Recording — upload ${fmtMB(left)} behind`, 'Their internet is slower than their recording. Nothing is lost: it catches up, possibly after the show — they must keep the page open until it says Saved.'] : ['good', '⏺', 'Recording — upload keeping up'];
+  if (s.rec === 'uploading') return ['warn', '⬆', `Finishing upload — ${fmtMB(left)} left`, 'Ask them to keep the page open until it says Saved ✓.'];
+  if (s.rec === 'saved') return ['good', '✅', 'Everything saved on the studio'];
+  return ['muted', '⏸', 'Not recording'];
+}
+function plainComputer(r) {
+  const s = r.s;
+  if ((s.warnings || []).includes('glitch')) return ['warn', '💻', 'Their computer is too busy', 'It missed some sound, which leaves tiny gaps in their recording. Ask them to close other apps and tabs and plug in to power.'];
+  if ((s.warnings || []).includes('storage')) return ['bad', '💻', 'Their browser won\'t save to disk', 'Ask them to keep the page open until it says Saved, and not use a private window next time.'];
+  return ['good', '💻', `Computer keeping up${s.glitches ? ` (${s.glitches} short hiccup${s.glitches > 1 ? 's' : ''} earlier)` : ''}`];
+}
+function studioCard(people) {
+  const st = studioInfo || {}, out = [];
+  if (serverDisk) {
+    // nobody being recorded yet (e.g. just you in the control room): show it for a typical 2-person show instead
+    const counted = people || 2, gb = serverDisk.free / 1073741824, hrs = gb / (counted * gbPerPersonHour);
+    const hText = hrs >= 10 ? Math.floor(hrs) : hrs.toFixed(1);
+    out.push(hItem(hrs < 1 ? 'bad' : hrs < 3 ? 'warn' : 'good', '💽', `${gb.toFixed(0)} GB free — room for about <b>${hText} hours</b> ${people ? `with ${people} ${people === 1 ? 'person' : 'people'} recording` : 'of a 2-person show'}`,
+      hrs < 3 ? 'Download and delete old takes on the Recordings page to make room (each person uses about ' + gbPerPersonHour + ' GB an hour).' : ''));
+    setWarn('disk', isHost && !!recStartedAt && hrs < 0.5);
+  }
+  if (st.making != null) out.push(hItem(st.making ? 'warn' : 'good', '⚙', st.making ? `Making the files for ${st.making} take${st.making > 1 ? 's' : ''} now` : 'No files being made — ready for the next take', st.making ? 'They\'ll appear on the Recordings page when they\'re ready.' : ''));
+  if (st.transcripts) out.push(hItem({ on: 'good', off: 'muted', missing: 'warn' }[st.transcripts], '📝', { on: 'Transcripts: on', off: 'Transcripts: switched off (Studio settings)', missing: 'Transcripts: not installed' }[st.transcripts], st.transcripts === 'missing' ? 'Re-run the installer on the server to add the transcript engine.' : ''));
+  if (studioInfo) {
+    out.push(hItem(st.backup || st.cloud ? 'good' : 'muted', '🛟', st.backup && st.cloud ? `Backups: copied to ${esc(st.backup)} and to the cloud (${esc(st.cloud)})` : st.backup ? `Backups: copied to ${esc(st.backup)}` : st.cloud ? `Backups: copied to the cloud (${esc(st.cloud)})` : 'Backups: not set up', st.backup || st.cloud ? '' : 'Set a backup drive or cloud backup in Studio settings, so finished takes are kept in a second place.'));
+    out.push(hItem(st.email ? 'good' : 'muted', '✉️', st.email ? 'Email when files are ready: set up' : 'Email: not set up', st.email ? '' : 'Optional — set it up in Studio settings to get an email when a take is ready, and to send guest invites.'));
+    out.push(`<div class="small-text muted" style="margin-top:4px">Studio version ${esc(st.version || '')}${st.relay ? ' · relay for strict networks: on' : ''}</div>`);
+  }
+  return `<div class="hrow"><b>The studio</b>${out.join('')}</div>`;
+}
+// it refreshes 4 times a second: only touch the page when something changed (so it doesn't flicker), and keep any
+// "Technical details" someone opened open
+const healthOpen = new Set(), setHtml = (el, html) => { if (el.dataset.last !== html) { el.innerHTML = html; el.dataset.last = html; } };
+document.addEventListener('toggle', e => { const d = e.target; if (d.dataset && d.dataset.hid) d.open ? healthOpen.add(d.dataset.hid) : healthOpen.delete(d.dataset.hid); }, true);
 function renderHealth() {
   let totalWarn = warns.size;
   for (const p of peers.values()) totalWarn += ((p.state && p.state.warnings) || []).length;
@@ -1766,27 +1841,27 @@ function renderHealth() {
   if (drawerTab !== 'health') return;
   const rows = controlMode ? [] : [{ id: myId, name: $('#nameInput').value.trim() + ' (you)', s: myState(), level: localPeak, loud: myLoud }];
   for (const p of peers.values()) if (!p.control) rows.push({ id: p.id, name: p.name, s: p.state || {}, level: p.level || 0, conn: p.pc.connectionState, loud: p.loud });
-  const people = rows.length;
-  if (serverDisk) {
-    const gb = serverDisk.free / 1073741824, hrs = gb / (people * gbPerPersonHour);
-    $('#healthServer').innerHTML = `<div class="hrow"><b>Studio server</b><div class="${hrs < 1 ? 'bad' : hrs < 3 ? 'warnc' : 'goodc'}">${gb.toFixed(0)} GB free · about ${hrs >= 10 ? Math.floor(hrs) : hrs.toFixed(1)} h of recording left</div></div>`;
-    setWarn('disk', isHost && !!recStartedAt && hrs < 0.5);
-  }
-  $('#healthTx').innerHTML = txHtml();
-  $('#healthRows').innerHTML = rows.map(r => {
-    const s = r.s, ws = s.warnings || [];
-    const n = s.net || {};
-    const rec = s.rec === 'recording' ? '<span class="pill rec">● REC</span>' : s.rec === 'uploading' ? `<span class="pill warn">↑ uploading ${fmtMB(s.pending || 0)}</span>` : s.rec === 'saved' ? '<span class="pill ok">✓ saved</span>' : '<span class="pill">idle</span>';
-    const behind = s.pendingAudio > 1048576 ? ` · audio ${fmtMB(s.pendingAudio)} behind` : '';
-    return `<div class="hrow ${ws.length ? 'has-warn' : ''}">
-      <div class="row spread"><b>${esc(r.name)}</b>${rec}</div>
+  setHtml($('#healthServer'), studioCard(rows.length));
+  setHtml($('#healthTx'), txHtml());
+  const problems = [];
+  setHtml($('#healthRows'), rows.length ? rows.map(r => {
+    const s = r.s, n = s.net || {}, items = [plainSound(r), plainRecording(r), plainConnection(r), plainComputer(r)];
+    for (const [cls, , text] of items) if (cls === 'bad' || cls === 'warn') problems.push(`${esc(r.name)}: ${text.replace(/<[^>]+>/g, '')}`);
+    const worst = items.some(i => i[0] === 'bad') ? 'bad' : items.some(i => i[0] === 'warn') ? 'warn' : 'good';
+    return `<div class="hrow ${worst !== 'good' ? 'has-warn' : ''}">
+      <div class="row spread"><b>${esc(r.name)}</b><span class="pill ${worst === 'good' ? 'ok' : worst === 'warn' ? 'warn' : 'rec'}">${worst === 'good' ? '✓ All good' : worst === 'warn' ? 'Keep an eye on' : 'Needs attention'}</span></div>
+      ${items.map(i => hItem(...i)).join('')}
       ${loudMeter(r.loud, s.mic === false)}
       ${histSvg(loudHist.get(r.id))}
-      <div class="small-text muted">${s.mic === false ? '🔇 muted · ' : ''}${n.up ? `up ${n.up} Mbps · ` : ''}${s.rtt ? `ping ${s.rtt} ms · ` : ''}loss ${Math.round((s.loss || 0) * 100)}%${s.relay ? ' · via relay' : ''}${s.glitches ? ` · ${s.glitches} glitch${s.glitches > 1 ? 'es' : ''}` : ''}${behind}${s.durable === false ? ' · ⚠ not saving to disk' : ''}</div>
-      ${ws.map(w => `<div class="hwarn">⚠ ${esc(WARN_TEXT[w] ? WARN_TEXT[w][1] : w)}</div>`).join('')}
+      <details class="small-text muted" data-hid="${esc(r.id)}" ${healthOpen.has(r.id) ? 'open' : ''}><summary>Technical details</summary>${n.up ? `upload speed ${n.up} Mbps · ` : ''}${s.rtt ? `round trip ${s.rtt} ms · ` : ''}packets lost ${Math.round((s.loss || 0) * 100)}%${s.relay ? ' · via relay' : ''} · ${s.glitches || 0} audio hiccup${s.glitches === 1 ? '' : 's'}${s.pendingAudio ? ` · ${fmtMB(s.pendingAudio)} audio waiting to upload` : ''}</details>
     </div>`;
-  }).join('');
-  $('#healthMarkers').innerHTML = markers.length ? '<b>Markers this take</b><br>' + markers.map(m => `📍 ${fmtTime(m.at)} — ${esc(m.label)}`).join('<br>') : (recStartedAt ? 'Press <b>M</b> or 📍 to drop a marker for editing.' : '');
+  }).join('') : `<div class="hrow small-text muted">Nobody is on mic yet. When people join, each one gets a card here: how they sound, whether their recording is safe, and their connection.</div>`);
+  if (studioInfo && studioInfo.transcripts === 'missing') problems.push('Transcripts aren\'t installed on the studio');
+  if (serverDisk && serverDisk.free / 1073741824 / ((rows.length || 2) * gbPerPersonHour) < 3) problems.push('The studio is getting full');
+  setHtml($('#healthSummary'), problems.length
+    ? `<div class="hsum warn">⚠ <b>${problems.length} thing${problems.length > 1 ? 's' : ''} to look at</b><ul>${problems.map(p => `<li>${p}</li>`).join('')}</ul></div>`
+    : `<div class="hsum good">✅ <b>Everything looks good</b>${rows.length ? ` — ${rows.length} ${rows.length === 1 ? 'person' : 'people'} on mic` : ''}</div>`);
+  setHtml($('#healthMarkers'), markers.length ? '<b>Markers this take</b><br>' + markers.map(m => `📍 ${fmtTime(m.at)} — ${esc(m.label)}`).join('<br>') : (recStartedAt ? 'Press <b>M</b> or 📍 to drop a marker for editing.' : ''));
 }
 setInterval(renderHealth, 250);
 // loudness history: short-term LUFS once a second, last 5 minutes, per person

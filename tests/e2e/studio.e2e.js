@@ -68,9 +68,22 @@ test('host sees live loudness (LUFS) on every tile and in the Health panel; gues
 
 test('control room: host runs the show without camera/mic and is not recorded', { skip }, async () => {
   const host = await person('Producer', true, { control: true });
+  // alone in the control room (the Health panel opens by itself there): it speaks plainly — real hours (not
+  // "Infinity"), and the studio's state. Clicking the tab you're on keeps it open.
+  await host.p.waitForSelector('#tab-health:not(.hidden)');
+  await host.p.click('[data-tab="health"]');
+  assert.ok(await host.p.isVisible('#tab-health'), 'still open');
+  await waitFor(async () => /GB free — room for about \d[\d.]* hours of a 2-person show/.test(await host.p.textContent('#healthServer')), 15000);
+  const studioCardText = await host.p.textContent('#healthServer');
+  assert.match(studioCardText, /Transcripts: on/); assert.match(studioCardText, /Backups: /); assert.match(studioCardText, /Studio version \d/);
+  assert.ok(!/Infinity|NaN|undefined/.test(studioCardText), studioCardText);
+  assert.match(await host.p.textContent('#healthSummary'), /Everything looks good|to look at/);
   const guest = await person('Guest2', false);
   await host.p.waitForSelector('.knock button.primary').then(b => b.click());
   await guest.p.waitForSelector('#studio:not(.hidden)');
+  await waitFor(async () => /with 1 person recording/.test(await host.p.textContent('#healthServer')), 15000);
+  // the guest's card: plain words for their sound, recording, connection and computer
+  await waitFor(async () => { const t = await host.p.textContent('#healthRows'); return /Guest2/.test(t) && /Connection (good|OK|poor)/.test(t) && /(Not recording|Recording)/.test(t) && /Computer keeping up|too busy/.test(t); }, 20000);
   await host.p.click('#recBtn'); await host.p.click('#modalAlt');
   await new Promise(r => setTimeout(r, 6000));
   await host.p.click('#recBtn'); await host.p.click('#modalYes');
@@ -184,6 +197,15 @@ test('a guest on a phone: nothing overlaps or runs off the screen, phone tips sh
   assert.equal(spill, 0, 'timecode numbers spill out of their box');
   assert.equal(await p.evaluate(() => document.body.classList.contains('phone')), true);
   assert.ok(await p.evaluate(() => getComputedStyle(document.querySelector('.phoneonly')).display !== 'none'), 'phone tips shown');
+  // the computer is too busy: the warning says how often, how much sound, what it affects, and what to do
+  await p.evaluate(() => { window.__studio.glitch(4800); window.__studio.glitch(2400); });
+  await waitFor(async () => /too busy/.test(await p.textContent('#warnBar')), 5000); // (the pretend mic may also show "too loud")
+  const warn = await p.textContent('#warnBar');
+  // (2 pretend hiccups of 100 + 50 ms — the emulated phone may add real ones of its own)
+  const [, times, ms] = /too busy to handle the sound (\d+) times in the last 30 seconds \((\d+) ms of sound missed\)/.exec(warn) || [];
+  assert.ok(Number(times) >= 2 && Number(ms) >= 150, warn);
+  assert.match(warn, /would cause tiny gaps in your recording|Your recording has tiny silent gaps/);
+  assert.match(warn, /close other apps and browser tabs/);
   assert.deepEqual([...host.errors, ...phone.errors], []);
   await host.b.close(); await phone.b.close();
 });
