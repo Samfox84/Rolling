@@ -27,6 +27,7 @@ test('Rolling Desk app: connect, Console, record, everything saved on this compu
     // ---- first run: the connect screen; a bad link is explained ----
     const connect = await app.firstWindow();
     await connect.waitForSelector('#link');
+    await connect.waitForFunction(() => document.querySelector('h1.title img')?.naturalWidth > 0); // the Rolling icon shows
     await connect.fill('#link', `${srv.url}/r/${room.id}`);
     await connect.click('#go');
     await waitFor(async () => /not a host link/.test(await connect.textContent('#err')), 5000);

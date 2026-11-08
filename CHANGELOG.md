@@ -16,6 +16,7 @@ Rolling is still pre-release, so versions are 0.x.
 - Fix: "about Infinity h of recording left" when nobody else was in the room
 - **"Your computer is struggling" now explains itself:** how many times and how much sound was missed, whether it
   affected your recording (or, in the control room, only what you hear), and what to do — including if you're on battery
+- **The Rolling logo:** on the login page, next to the studio name on every page, and as the browser-tab icon
 - Fix: clicking the tab you're already on closed the Health/Chat/Desk panel; now only ✕ closes it
 
 ## 0.9.0 — guests, backups and safety

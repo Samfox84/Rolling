@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 340 270" role="img" aria-label="Rolling">
+  <defs><linearGradient id="g" x1="20" y1="0" x2="320" y2="0" gradientUnits="userSpaceOnUse">
+    <stop offset="0" stop-color="#2f9be0"/><stop offset="1" stop-color="#6fd08c"/></linearGradient></defs>
+  <g fill="none" stroke="url(#g)" stroke-width="9" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M20 112H48V96H60V136H74V66H88V176H102V112H112"/>
+    <path d="M130 178V86Q130 46 168 46Q206 46 206 86Q206 124 168 124H130M164 124L200 178"/>
+    <path d="M136 30A80 80 0 0 1 244 126"/>
+    <path d="M232 112H246V94H258V130H270V112H320"/>
+  </g>
+  <circle cx="168" cy="86" r="16" fill="#ef4444"/>
+  <text x="170" y="258" text-anchor="middle" fill="#ffffff" font-family="system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif" font-size="46" font-weight="700" letter-spacing="7">ROLLING</text>
+</svg>

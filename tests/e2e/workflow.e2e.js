@@ -141,6 +141,11 @@ test('basic user: make a room, record a take with a guest, download everything',
   // ---- dashboard: wrong password is refused, right one works, make a room ----
   const admin = await browser(null);
   await admin.p.goto(srv.url);
+  // the Rolling logo shows on the login page and as the tab icon
+  await admin.p.waitForFunction(() => ['.login-logo', '.brand .logo'].every(q => document.querySelector(q)?.naturalWidth > 0));
+  assert.equal(await admin.p.getAttribute('link[rel=icon]', 'href'), '/icon.svg');
+  const ico = await fetch(srv.url + '/icon.svg');
+  assert.equal(ico.status, 200); assert.match(ico.headers.get('content-type'), /svg/);
   await admin.p.fill('#pw', 'nope'); await admin.p.press('#pw', 'Enter');
   await waitFor(async () => /./.test(await admin.p.textContent('#loginErr')), 5000);
   await admin.p.fill('#pw', 'testpass'); await admin.p.press('#pw', 'Enter');

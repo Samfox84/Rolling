@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" role="img" aria-label="Rolling">
+  <defs><linearGradient id="g" x1="20" y1="80" x2="80" y2="20" gradientUnits="userSpaceOnUse">
+    <stop offset="0" stop-color="#2f9be0"/><stop offset="1" stop-color="#6fd08c"/></linearGradient></defs>
+  <rect width="100" height="100" rx="22" fill="#14292f"/>
+  <path d="M33 80V43Q33 21 54 21Q75 21 75 43Q75 63 54 63H33M52 63L73 80" fill="none" stroke="url(#g)" stroke-width="9" stroke-linecap="round" stroke-linejoin="round"/>
+  <circle cx="54" cy="43" r="9" fill="#ef4444"/>
+</svg>

@@ -4,6 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Studio</title>
+<link rel="icon" href="/icon.svg" type="image/svg+xml">
 <link rel="stylesheet" href="/style.css">
 </head>
 <body>
@@ -14,7 +15,7 @@
 <!-- 1. Lobby: check camera + mic + connection before joining -->
 <div id="lobby" class="wrap">
   <div class="topbar">
-    <div class="brand"><span class="dot"></span><span class="studio-name">Podcast Studio</span></div>
+    <div class="brand"><img class="logo" src="/icon.svg" alt=""><span class="studio-name">Podcast Studio</span></div>
     <span class="pill" id="roleBadge">Guest</span>
   </div>
   <h1 id="lobbyTitle">Get ready</h1>
@@ -74,7 +75,7 @@
 <div id="studio" class="studio hidden">
   <header>
     <div class="row" style="gap:14px; min-width:0">
-      <div class="brand" style="font-size:16px; min-width:0"><span class="dot"></span><span id="roomTitle" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">Studio</span></div>
+      <div class="brand" style="font-size:16px; min-width:0"><img class="logo" src="/icon.svg" alt=""><span id="roomTitle" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">Studio</span></div>
     </div>
     <div class="row">
       <span class="uploadline" id="uploadLine"></span>
@@ -172,7 +173,7 @@
 
 <!-- 3. Message screen (waiting room / left / errors / finishing uploads) -->
 <div id="message" class="wrap hidden">
-  <div class="topbar"><div class="brand"><span class="dot"></span><span class="studio-name">Podcast Studio</span></div></div>
+  <div class="topbar"><div class="brand"><img class="logo" src="/icon.svg" alt=""><span class="studio-name">Podcast Studio</span></div></div>
   <div class="card">
     <h1 id="msgTitle">You've left the studio</h1>
     <p id="msgText" class="muted"></p>

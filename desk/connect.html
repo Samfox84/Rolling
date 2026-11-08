@@ -8,7 +8,7 @@
   :root { --bg: #0d0f12; --panel: #1a1d22; --text: #eee; --muted: #999; --accent: #3b82f6; --rec: #ef4444; --ok: #22c55e; }
   * { box-sizing: border-box; }
   body { margin: 0; background: var(--bg); color: var(--text); font: 15px/1.5 system-ui, -apple-system, Segoe UI, sans-serif; padding: 32px; }
-  h1 { margin: 0 0 4px; font-size: 26px; } .sub { color: var(--muted); margin: 0 0 24px; }
+  h1 { margin: 0 0 4px; font-size: 26px; } h1.title { display: flex; align-items: center; gap: 12px; } .sub { color: var(--muted); margin: 0 0 24px; }
   label { display: block; font-weight: 700; margin: 18px 0 6px; }
   input { width: 100%; padding: 12px; border-radius: 10px; border: 1px solid #fff2; background: var(--panel); color: var(--text); font: inherit; }
   .row { display: flex; gap: 8px; align-items: center; } .row input { flex: 1; }
@@ -23,7 +23,7 @@
 </style>
 </head>
 <body>
-  <h1>🎛 Rolling Desk</h1>
+  <h1 class="title"><img src="studio/public/icon.svg" alt="" width="40" height="40"> Rolling Desk</h1>
   <p class="sub">Your producer's desk. Mix the show, run it, and keep every recording.</p>
   <p class="help" style="margin:0 0 6px">How do you want to use Rolling Desk today?</p>
   <div class="tabs"><button type="button" id="tConnect" class="tab">Connect to a hosting server</button><button type="button" id="tHost" class="tab">Host locally on this computer</button></div>

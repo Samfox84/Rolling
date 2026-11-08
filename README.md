@@ -1,3 +1,5 @@
+<p align="center"><img src="docs/logo.png" alt="Rolling" width="480"></p>
+
 # Rolling
 
 **A free, open-source, self-hosted remote recording studio for podcasts** — a bit like Riverside, but on your own server.

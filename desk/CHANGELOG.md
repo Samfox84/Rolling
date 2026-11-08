@@ -4,6 +4,11 @@ What changed in each version of the app. Newest first. Downloads are on the
 [Releases page](https://github.com/Samfox84/Rolling/releases). The studio itself has its own list:
 [../CHANGELOG.md](../CHANGELOG.md).
 
+## 0.3.2
+- **A proper Rolling icon** for the app (Mac dock, Windows taskbar, Linux menu) and on the start screen
+- Carries studio 0.9.1 when hosting: the Health panel in plain words and a clearer "your computer is struggling"
+  message
+
 ## 0.3.1
 - **The start screen asks each time:** "Connect to a hosting server" or "Host locally on this computer". Tick
   **Remember my choice** to go straight there next time (change it from the File menu)

@@ -4,16 +4,18 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Podcast Studio</title>
+<link rel="icon" href="/icon.svg" type="image/svg+xml">
 <link rel="stylesheet" href="/style.css">
 </head>
 <body>
 <div class="wrap">
   <div class="topbar">
-    <div class="brand"><span class="dot"></span><span class="studio-name">Podcast Studio</span></div>
+    <div class="brand"><img class="logo" src="/icon.svg" alt=""><span class="studio-name">Podcast Studio</span></div>
     <button class="small ghost hidden" id="logoutBtn">Log out</button>
   </div>
 
   <div id="login" class="card hidden" style="max-width:420px">
+    <img class="login-logo" src="/logo.svg" alt="Rolling">
     <h1>Log in</h1>
     <p class="muted" style="margin-top:0">Studio admin password (shown when it was installed).</p>
     <form id="loginForm">
