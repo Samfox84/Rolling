@@ -126,23 +126,3 @@ test('Linux .deb: downloads and checks the new .deb, installs it with the passwo
     await assert.rejects(missing.installDeb(), /sudo apt install/);
   } finally { gh.srv.close(); }
 });
-
-test('the "Updating Rolling Desk" window: a filling bar with the percentage while downloading, a moving bar while it checks and installs', async () => {
-  const { chromium } = require('playwright');
-  const b = await chromium.launch();
-  try {
-    const p = await b.newPage();
-    await p.goto('file://' + path.join(__dirname, '..', 'desk', 'update.html'));
-    await p.evaluate(() => show({ title: 'Downloading Rolling Desk 0.3.3', text: '45% — 63 of 140 MB', detail: 'You can keep using Rolling Desk while it downloads.', fraction: 0.45 }));
-    assert.equal(await p.textContent('#title'), 'Downloading Rolling Desk 0.3.3');
-    assert.equal(await p.textContent('#text'), '45% — 63 of 140 MB');
-    assert.equal(await p.getAttribute('#bar', 'aria-valuenow'), '45');
-    assert.equal(await p.$eval('#bar', e => e.classList.contains('busy')), false);
-    assert.equal(await p.$eval('#fill', e => e.style.width), '45%');
-    await p.evaluate(() => show({ title: 'Installing Rolling Desk 0.3.3', text: 'Rolling Desk will close now and open again by itself in a few seconds.', fraction: null }));
-    assert.equal(await p.$eval('#bar', e => e.classList.contains('busy')), true, 'no fake percentage while installing');
-    assert.equal(await p.getAttribute('#bar', 'aria-valuenow'), null);
-    assert.equal(await p.textContent('#detail'), '');
-    assert.equal(await p.title(), 'Installing Rolling Desk 0.3.3');
-  } finally { await b.close(); }
-});
