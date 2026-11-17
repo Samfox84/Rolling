@@ -130,6 +130,7 @@ async function load() {
       <div class="row spread">
         <div><b>${name}</b> <span class="muted small-text">· ${when}${t.stopped ? ' · ' + dur(t.started, t.stopped) : ''} · ${esc(t.people.join(', ') || 'nobody')}</span></div>
         <div class="row"><span class="pill ${cls}">${label}</span>${backup}${cloud}
+          ${t.outputs.some(o => o.file.endsWith('.altaudio')) ? `<a href="/zip/${roomId}/${t.id}${q ? q + '&' : '?'}for=altered" title="A folder that opens in Altered Audio Editor: the session with everyone lined up and every marker, and the files sorted into folders"><button class="small">🎚 Download for Altered</button></a>` : ''}
           ${t.outputs.length ? `<a href="/zip/${roomId}/${t.id}${q}"><button class="small primary">⬇ Download everything (${mb(t.totalSize)})</button></a>` : ''}</div>
       </div>
       ${busy ? `<div class="small-text muted" style="margin-top:6px">${esc(t.progress || label)} — ${t.pct || 0}%</div><div class="pbar big"><span style="width:${t.pct || 0}%"></span></div>` : ''}

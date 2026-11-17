@@ -6,7 +6,7 @@ const assert = require('node:assert/strict');
 const fs = require('fs');
 const path = require('path');
 const { spawnSync } = require('child_process');
-const { startServer, login, waitFor, pcm24, talky, ffMeasure, duration, xmlWellFormed } = require('./helpers');
+const { startServer, login, waitFor, pcm24, talky, ffMeasure, duration, xmlWellFormed, alteredProblems } = require('./helpers');
 
 const hasWS = typeof WebSocket === 'function'; // Node 22+
 let srv, cookie, room;
@@ -147,7 +147,7 @@ test('full take: record, upload lossless audio, build every file', { skip: !hasW
   const files = take.outputs.map(o => o.file);
   for (const f of ['Steve.wav', 'Guest.wav', 'Steve - room tone.wav', 'Steve - normalised -16 LUFS.wav', 'Steve - normalised -23 LUFS.wav',
     'Mix - all voices.wav', 'Steve - cleaned -16 LUFS.wav', 'Guest - cleaned -16 LUFS.wav', 'Producer mix -16 LUFS.wav', 'Edit list.txt', 'Transcript.txt', 'Transcript.srt', 'Transcript.vtt', 'Level report.txt', 'Markers.txt', 'Chapters.json',
-    'Test Show - Ep 7 - Testing (Audition).sesx', 'Test Show - Ep 7 - Testing (Premiere, Resolve, Audition).xml']) assert.ok(files.includes(f), `missing ${f}`);
+    'Test Show - Ep 7 - Testing (Audition).sesx', 'Test Show - Ep 7 - Testing (Premiere, Resolve, Audition).xml', 'Test Show - Ep 7 - Testing (Altered).altaudio']) assert.ok(files.includes(f), `missing ${f}`);
 
   // "Download everything": one zip with every file, readable by an ordinary unzip program
   const zipRes = await fetch(`${srv.url}/zip/${room.id}/${take.id}?k=${room.hostKey}`);
@@ -208,6 +208,34 @@ test('full take: record, upload lossless audio, build every file', { skip: !hasW
   assert.match(sesx, /<marker duration="[1-9]\d*" id="\d+" name="Filler words: um, uh — /);
   assert.match(sesx, /<marker duration="[1-9]\d*" id="\d+" name="Cough — Guest"/);
   assert.ok(xmlWellFormed(fs.readFileSync(path.join(out, 'Test Show - Ep 7 - Testing (Premiere, Resolve, Audition).xml'), 'utf8')));
+  // Altered Audio Editor: a session Altered accepts, everyone lined up with their real lengths, every edit point as a marker
+  const alt = JSON.parse(fs.readFileSync(path.join(out, 'Test Show - Ep 7 - Testing (Altered).altaudio'), 'utf8'));
+  assert.deepEqual(alteredProblems(alt), []);
+  for (const n of ['Steve', 'Guest', 'Steve (cleaned)', 'Guest (cleaned)']) assert.ok(alt.tracks.some(t => t.name === n), `track ${n}: ${alt.tracks.map(t => t.name)}`);
+  for (const m of alt.media) {
+    const real = spawnSync('ffprobe', ['-v', 'error', '-select_streams', 'a:0', '-show_entries', 'stream=duration_ts,sample_rate', '-of', 'csv=p=0', path.join(out, m.relative_path)], { encoding: 'utf8' }).stdout.trim().split(',').map(Number);
+    assert.deepEqual([m.sample_rate, m.length], real, `${m.relative_path}: rate and length as the file really is`);
+  }
+  assert.ok(alt.tracks.find(t => t.name === 'Steve (cleaned)').hidden);
+  assert.ok(alt.markers.some(m => m.kind === 'chapter' && /Interview/.test(m.name)), `the segment is a chapter: ${alt.markers.map(m => m.kind + ' ' + m.name).join(' / ')}`);
+  assert.ok(alt.markers.some(m => m.kind === 'cue' && /^Producer note: Great story about the AOL disks/.test(m.name)));
+  assert.ok(alt.markers.some(m => m.kind === 'cue' && m.duration > 0 && /^Filler words: um, uh — /.test(m.name)), 'filler words as ranges');
+  assert.deepEqual([alt.metadata.show, alt.metadata.title, alt.metadata.episode_number], ['Test Show', 'Testing', 7]);
+  // "Download for Altered": the session on top, the files in folders, and every file the session uses really there
+  const altZip = await fetch(`${srv.url}/zip/${room.id}/${take.id}?k=${room.hostKey}&for=altered`);
+  assert.equal(altZip.status, 200);
+  assert.match(altZip.headers.get('content-disposition'), /Test Show - Ep 7 - Testing \(Altered\)\.zip/);
+  const altDir = path.join(srv.dataDir, 'altered-unzipped'), altFile = path.join(srv.dataDir, 'altered.zip');
+  fs.writeFileSync(altFile, Buffer.from(await altZip.arrayBuffer()));
+  require('child_process').execFileSync('unzip', ['-q', altFile, '-d', altDir]);
+  const top = path.join(altDir, 'Test Show - Ep 7 - Testing (Altered)');
+  const zipped = JSON.parse(fs.readFileSync(path.join(top, 'Test Show - Ep 7 - Testing.altaudio'), 'utf8'));
+  assert.deepEqual(alteredProblems(zipped), []);
+  for (const m of zipped.media) assert.ok(fs.existsSync(path.join(top, m.relative_path)), `${m.relative_path} is in the download`);
+  for (const f of ['Audio/Steve.wav', 'Audio/Guest.wav', 'Audio/Cleaned/Steve - cleaned -16 LUFS.wav', 'Audio/Room tone/Steve - room tone.wav',
+    'Mixes/Producer mix -16 LUFS.wav', 'Extras/Normalised/Steve - normalised -16 LUFS.wav', 'Notes/Edit list.txt', 'Notes/Transcript.srt']) assert.ok(fs.existsSync(path.join(top, f)), `missing ${f}`);
+  assert.deepEqual(fs.readdirSync(top).filter(f => /\.(sesx|xml|csv)$/.test(f)), [], 'no other editors\' sessions (their paths would point at nothing)');
+  assert.equal((await fetch(`${srv.url}/zip/${room.id}/${take.id}?k=wrong&for=altered`)).status, 403);
   // downloads are named after the episode
   const dl = await fetch(`${srv.url}/dl/${room.id}/${take.id}/Steve.wav?k=${room.hostKey}`);
   assert.equal(dl.status, 200);

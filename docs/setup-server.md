@@ -88,7 +88,8 @@ Open `https://podcast.yourname.com` — you should see the Rolling login page.
 7. Want to send guests their link with a setup checklist and a calendar entry? On the show's **Recordings** page,
    open **✉️ Invite a guest**.
 8. A few minutes later, open **Recordings** to download everything: each person's untouched track, cleaned copies,
-   the Producer mix, video, transcripts, chapters, and session files for Audition, Premiere or Resolve.
+   the Producer mix, video, transcripts, chapters, and session files for Altered Audio Editor, Audition, Premiere or Resolve.
+   **🎚 Download for Altered** gives one folder that opens straight in Altered Audio Editor.
 
 **Tips for everyone:** Chrome or Edge on a laptop, wired headphones, a quiet room.
 

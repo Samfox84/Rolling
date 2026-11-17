@@ -25,13 +25,14 @@ What's new: [studio changelog](CHANGELOG.md) · [Rolling Desk app changelog](des
 - **Room tone** — a 20-second "Quiet please" countdown when recording starts; a separate noise-print WAV per person. Grab another any time with 🤫.
 - **Everything lined up** — all files start at the same moment; camera video is matched to the audio automatically.
 - **Markers** — host presses **M** (or 📍) to mark edit points.
-- **Session file** — open in Audition (File › Open), Premiere or Resolve to get every file on its own track, with markers. Plus an Audition markers CSV.
+- **Session files** — open in [Altered Audio Editor](https://github.com/geekcastradio/altered-audio-editor), Audition (File › Open), Premiere or Resolve to get every file on its own track, with markers. Plus an Audition markers CSV.
+- **🎚 Download for Altered** — one folder that opens in Altered Audio Editor: everyone lined up, every marker as a chapter, ad slot or coloured cue (coughs, filler words and pauses as ranges), each person's cleaned version as a hidden track to switch to, and the files sorted into Audio, Mixes, Notes and Video folders.
 
 **Post-production**
 - **Live level bars** on every person's video tile (green / amber / red, peak hold, clip light) and **broadcast loudness meters** (EBU R128) for everyone, live in the host's Health panel.
 - **Level report + normalised copies** of every person at −16 LUFS (podcast) and −23 LUFS (broadcast), alongside the untouched recordings.
 - **Intro & outro** per show, added to the session files and a −16 LUFS Producer mix.
-- **Native Audition session (.sesx)** plus XML for Premiere / Resolve.
+- **Native Altered (.altaudio) and Audition (.sesx) sessions** plus XML for Premiere / Resolve.
 - **Transcripts** (TXT, SRT, VTT, with speaker names) made on your own server with [whisper.cpp](https://github.com/ggml-org/whisper.cpp), transcribed live in the background while you record. The Recordings page shows each transcript's progress or why it failed, with a **Make transcript** button for older takes.
 - **Chapters** from markers, **episode numbers and titles** in file names, progress bars for everything.
 - **Control room** — the host can run the show without being on camera.

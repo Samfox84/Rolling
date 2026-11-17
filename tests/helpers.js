@@ -86,4 +86,39 @@ async function waitFor(fn, ms = 120000, every = 500) {
     await new Promise(r => setTimeout(r, every));
   }
 }
-module.exports = { ROOT, FAKE_WHISPER, tmpDir, pcm24, talky, ffMeasure, duration, xmlWellFormed, startServer, login, waitFor };
+
+// An Altered Audio Editor session (.altaudio): checked against Altered's own published schema (tests/fixtures/altered),
+// plus the rules Altered checks when it opens one (its validate.rs): unique ids, clips point at real media and play
+// something, chapter data only on chapters, a contracted length only on ad slots, bit depth 16/24/32.
+// Returns a list of problems (empty = Altered will open it).
+let alteredSchema = null;
+function alteredProblems(doc) {
+  if (!alteredSchema) {
+    const Ajv = require('ajv/dist/2020');
+    const ajv = new Ajv({ strict: false, allErrors: true });
+    const schema = require('./fixtures/altered/session.schema.json');
+    const formats = new Set(); JSON.stringify(schema, (k, v) => { if (k === 'format' && typeof v === 'string') formats.add(v); return v; });
+    const uint = bits => n => Number.isInteger(n) && n >= 0 && n < 2 ** bits;
+    const known = { uuid: /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i, 'date-time': /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(\.\d+)?(Z|[+-]\d\d:\d\d)$/,
+      uint8: { type: 'number', validate: uint(8) }, uint16: { type: 'number', validate: uint(16) }, uint32: { type: 'number', validate: uint(32) },
+      uint64: { type: 'number', validate: n => Number.isSafeInteger(n) && n >= 0 }, double: { type: 'number', validate: Number.isFinite }, float: { type: 'number', validate: Number.isFinite } };
+    for (const f of formats) ajv.addFormat(f, known[f] || true);
+    alteredSchema = ajv.compile(schema);
+  }
+  const problems = alteredSchema(doc) ? [] : alteredSchema.errors.map(e => `${e.instancePath || '/'} ${e.message}`);
+  if (![16, 24, 32].includes(doc.bit_depth)) problems.push('bit depth must be 16, 24 or 32');
+  const ids = [doc.id, ...doc.media.map(m => m.id), ...doc.tracks.flatMap(t => [t.id, ...t.clips.map(c => c.id)]), ...doc.buses.map(b => b.id), ...doc.markers.map(m => m.id)];
+  if (new Set(ids).size !== ids.length) problems.push('duplicate ids');
+  const media = new Set(doc.media.map(m => m.id));
+  doc.tracks.forEach((t, i) => t.clips.forEach((c, j) => {
+    if (!media.has(c.media_id)) problems.push(`tracks[${i}].clips[${j}] uses missing media`);
+    if (!(c.source_out > c.source_in)) problems.push(`tracks[${i}].clips[${j}] plays nothing`);
+  }));
+  doc.markers.forEach((m, i) => {
+    if (m.chapter && m.kind !== 'chapter') problems.push(`markers[${i}] has chapter data but is not a chapter`);
+    if (m.contracted_duration != null && m.kind !== 'ad_slot') problems.push(`markers[${i}] has a contracted length but is not an ad slot`);
+  });
+  return problems;
+}
+
+module.exports = { alteredProblems, ROOT, FAKE_WHISPER, tmpDir, pcm24, talky, ffMeasure, duration, xmlWellFormed, startServer, login, waitFor };

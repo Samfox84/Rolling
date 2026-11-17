@@ -4,6 +4,11 @@ What changed in each version of the app. Newest first. Downloads are on the
 [Releases page](https://github.com/Samfox84/Rolling/releases). The studio itself has its own list:
 [../CHANGELOG.md](../CHANGELOG.md).
 
+## 0.3.4
+- Carries studio 0.9.2 when hosting: an **Altered Audio Editor session** with every take and **🎚 Download for
+  Altered** (one folder that opens straight in Altered). The recordings this app saves include the Altered session,
+  so you can open it right from your Rolling Recordings folder
+
 ## 0.3.3
 - **Updating shows what's going on:** it asks first ("Rolling Desk X is out — Update now / Later"), then a small
   **Updating Rolling Desk** window shows the download filling up (percentage and MB; the dock / taskbar icon too),

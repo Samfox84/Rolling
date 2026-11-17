@@ -22,7 +22,7 @@ const createTranscriber = require('./transcribe');
 let nodemailer = null;
 try { nodemailer = require('nodemailer'); } catch { /* email optional */ }
 
-const VERSION = '0.9.1';
+const VERSION = '0.9.2';
 
 // ---------- settings (from .env next to this file) ----------
 (function loadEnv() {
@@ -339,6 +339,11 @@ async function probe(file, entries, stream) {
     const r = await run(FFPROBE, ['-v', 'error', ...(stream ? ['-select_streams', stream] : []), '-show_entries', entries, '-of', 'csv=p=0', file], { timeoutMs: 60000 });
     return r.stdout.trim();
   } catch (e) { log.warn('probe', `could not read ${path.basename(file)}`, e); return ''; }
+}
+// sample rate, channels and length in samples of an audio file (for session files that count in samples)
+async function audioInfo(file) {
+  const [sr, channels, samples] = (await probe(file, 'stream=sample_rate,channels,duration_ts', 'a:0')).split(',').map(Number);
+  return { sr: sr || 48000, channels: channels || 1, samples: samples || 0 };
 }
 // decode some audio to a 500 Hz loudness envelope (for lining video up against the lossless audio)
 async function envelope(args) {
@@ -808,6 +813,18 @@ async function buildDocsUntraced(t, room, out, add, assets) {
   // named with its kind first ("Filler words: um — Steve: …"), so any editor can sort them without guessing
   const sessMarkers = edits.map(i => ({ label: post.markerName(i), at: introLen + i.at, dur: i.dur || 0, group: i.group }));
   await write(`${title} (Audition).sesx`, post.sesx(title, tracks, sessMarkers), 'session');
+  // Altered Audio Editor: the same tracks with each file's real format, plus everyone's cleaned version as a hidden,
+  // muted track to switch to; markers keep their kind (chapters, ad slots, cues, ranges)
+  const PEOPLE_COLORS = ['#3f73b8', '#3d9a5f', '#c7703d', '#8a5cc7', '#c75c9a'];
+  const altTracks = [];
+  for (const k of tracks) {
+    const person = audio.indexOf(k);
+    altTracks.push({ ...k, ...(await audioInfo(path.join(out, k.file))), color: person >= 0 ? PEOPLE_COLORS[person % 5] : '#7c8796' });
+    const cleaned = person >= 0 && t.outputs.find(o => o.kind === 'cleaned' && o.person === k.name);
+    if (cleaned) altTracks.push({ name: `${k.name} (cleaned)`, file: cleaned.file, start: k.start, muted: true, hidden: true, color: PEOPLE_COLORS[person % 5], ...(await audioInfo(path.join(out, cleaned.file))) });
+  }
+  await write(`${title} (Altered).altaudio`, post.altaudio({ title, show: room.name, episode: t.episode, tracks: altTracks.filter(k => k.samples > 0),
+    markers: edits.map(i => ({ label: post.markerName(i), at: introLen + i.at, dur: i.dur || 0, group: i.group, by: i.by })) }), 'session');
   const videos = [];
   for (const o of t.outputs.filter(o => o.kind === 'video' || (o.kind === 'screen' && o.file.endsWith('.mp4')))) {
     const wh = (await probe(path.join(out, o.file), 'stream=width,height', 'v:0')).split(',').map(Number);
@@ -1308,12 +1325,20 @@ app.get('/zip/:room/:take', (req, res) => {
   if (!canManage(req, r)) return res.status(403).send('Not allowed');
   const t = loadTake(r.id, req.params.take);
   if (!t || !t.outputs.length) return res.status(404).send('Nothing to download yet');
-  const base = takeLabel(r, t);
-  res.attachment(base + '.zip');
+  const base = takeLabel(r, t), files = t.serving || t.outputs, out = path.join(takeDir(r.id, t.id), 'out');
+  // ?for=altered: a folder that opens in Altered Audio Editor — the session on top, the files sorted into folders
+  const altered = req.query.for === 'altered' && files.find(o => o.file.endsWith('.altaudio'));
+  if (req.query.for === 'altered' && !altered) return res.status(404).send('This take has no Altered session (it was made before Rolling 0.9.2 — use Rebuild files)');
+  const folder = altered ? `${base} (Altered)` : base;
+  res.attachment(folder + '.zip');
   const z = new ZipArchive({ store: true });
   z.on('error', e => { log.error('zip', 'zip download failed', e); res.destroy(); });
   z.pipe(res);
-  for (const o of t.serving || t.outputs) z.file(path.join(takeDir(r.id, t.id), 'out', o.file), { name: `${base}/${o.file}` });
+  if (altered) {
+    const place = name => { const o = files.find(x => x.file === name); return (o && post.alteredPlace(o)) || name; };
+    z.append(post.relocateAltaudio(fs.readFileSync(path.join(out, altered.file), 'utf8'), place), { name: `${folder}/${base}.altaudio` });
+    for (const o of files) { const p = o === altered ? null : post.alteredPlace(o); if (p) z.file(path.join(out, o.file), { name: `${folder}/${p}` }); }
+  } else for (const o of files) z.file(path.join(out, o.file), { name: `${folder}/${o.file}` });
   z.finalize();
 });
 

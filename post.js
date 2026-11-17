@@ -1,7 +1,7 @@
 'use strict';
 /*
  * Rolling — the "paperwork" made for each take: transcript (TXT/SRT/VTT), chapters,
- * level report, and multitrack session files for Audition (.sesx) and Premiere/Resolve (XML).
+ * level report, and multitrack session files for Altered (.altaudio), Audition (.sesx) and Premiere/Resolve (XML).
  */
 const xmlEsc = s => String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&apos;' }[c]));
 const pad = (n, w = 2) => String(Math.floor(n)).padStart(w, '0');
@@ -124,6 +124,64 @@ function levelReport(t, title) {
     ...rows.map(([who, l]) => `${who.padEnd(26).slice(0, 26)} ${f(l.I)}     ${f(l.TP)}      ${f(l.LRA)}   ${verdict(l).text}`), '',
     'Targets: podcasts usually -16 LUFS (Apple, Spotify); broadcast EBU R128 is -23 LUFS; keep true peak below -1 dBTP.',
     'The "normalised" files are these same recordings turned up or down to each target. The originals are untouched.', ''].join('\r\n');
+}
+
+// ---------- Altered Audio Editor native session (.altaudio, session schema 1 — Altered 0.38) ----------
+// Opens straight in Altered: one track per file, lined up, markers with their real kinds (chapters, ad slots, cues
+// and ranges) and colours, the episode details filled in and Podcast mode on.
+// plan: { title, show, episode: { n, title }, tracks: [{ name, file, start (s), sr, channels, samples, muted, hidden, color }],
+//         markers: [{ label, at (s), dur (s), group, by }] }
+// file is the path relative to the session file ("Steve.wav", or "Audio/Steve.wav" in the Altered download).
+const ALTERED_COLORS = { 'Cut this': '#d64545', Retake: '#e08a2e', 'Great bit': '#3d9a5f', 'Producer note': '#8a5cc7', 'Ad break': '#d4b13a',
+  Segment: '#3f73b8', Marker: '#7c8796', Soundboard: '#2aa5a0', 'Filler words': '#c75c9a', Cough: '#9a7044', Talkback: '#5c8ac7', 'Long pause': '#6b7a8f' };
+function alteredMarkerKind(group) { return group === 'Segment' || group === 'Marker' ? 'chapter' : group === 'Ad break' ? 'ad_slot' : 'cue'; }
+function altaudio(plan, newId = () => require('crypto').randomUUID(), now = new Date()) {
+  const SR = 48000, S = sec => Math.max(0, Math.round(sec * SR));
+  const chain = () => ({ enabled: true, input_gain_db: 0, output_gain_db: 0, mix: 1, slots: [] });
+  const media = [], mediaId = new Map();
+  for (const k of plan.tracks) if (!mediaId.has(k.file)) {
+    const id = newId(); mediaId.set(k.file, id);
+    media.push({ id, path: k.file, relative_path: k.file, sample_rate: k.sr, channels: k.channels, length: k.samples });
+  }
+  const tracks = plan.tracks.map(k => ({
+    id: newId(), name: k.name, role: 'standard', channels: k.channels >= 2 ? 'stereo' : 'mono', color: k.color || null, height: 120,
+    volume_db: 0, pan: 0, muted: !!k.muted, solo: false, record_armed: false, monitor_input: false, output: { type: 'master' },
+    sends: [], effects: chain(), envelopes: [], ...(k.hidden ? { hidden: true } : {}),
+    clips: [{ id: newId(), name: k.name, media_id: mediaId.get(k.file), start: S(k.start), source_in: 0, source_out: k.samples,
+      gain_db: 0, muted: false, locked: false, fade_in: { length: 0, shape: 'cosine', curve: 0 }, fade_out: { length: 0, shape: 'cosine', curve: 0 },
+      envelopes: [], effects: chain() }],
+  }));
+  const markers = (plan.markers || []).map(m => ({
+    id: newId(), name: m.label, kind: alteredMarkerKind(m.group), position: S(m.at), duration: S(m.dur || 0),
+    description: [m.group, m.by && `by ${m.by}`].filter(Boolean).join(' — '), color: ALTERED_COLORS[m.group] || null, chapter: null, contracted_duration: null,
+  }));
+  const ep = plan.episode || {}, n = parseInt(ep.n, 10);
+  return JSON.stringify({
+    format: 'altaudio.session', schema_version: 1, id: newId(), name: plan.title, sample_rate: SR, bit_depth: 32,
+    created: now.toISOString(), modified: now.toISOString(), media, tracks, buses: [],
+    master: { channels: 'stereo', height: 64, volume_db: 0, effects: chain(), envelopes: [] },
+    markers, view: { samples_per_pixel: 4096, scroll: 0, scroll_y: 0, playhead: 0, selection: null },
+    modes: { podcast: true, voiceover: false }, libraries: [],
+    metadata: { show_id: null, title: ep.title || plan.title, show: plan.show || null, episode_number: String(n) === String(ep.n).trim() ? n : null,
+      season_number: null, description: null, artist: null, artwork: null, explicit: false },
+  }, null, 1);
+}
+// The Altered download: the same session, with the files sorted into folders beside it.
+const ALTERED_FOLDERS = { audio: 'Audio', soundboard: 'Audio', intro: 'Audio', outro: 'Audio', cleaned: 'Audio/Cleaned', roomtone: 'Audio/Room tone',
+  normalised: 'Extras/Normalised', mix: 'Mixes', producermix: 'Mixes', video: 'Video', screen: 'Video', 'video-original': 'Video/Camera originals',
+  markers: 'Notes', editlist: 'Notes', chapters: 'Notes', transcript: 'Notes', report: 'Notes', chat: 'Notes' };
+// an output's place in the Altered download; null = left out (the other editors' session files point at files next to them)
+function alteredPlace(o) {
+  if (o.kind === 'session' && !o.file.endsWith('.altaudio')) return null;
+  if (/\(Audition\)\.csv$/.test(o.file)) return null;
+  const dir = ALTERED_FOLDERS[o.kind];
+  return dir ? `${dir}/${o.file}` : o.file;
+}
+// the session file with its audio paths pointing into those folders
+function relocateAltaudio(text, place) {
+  const doc = JSON.parse(text);
+  for (const m of doc.media) { const p = place(m.relative_path); m.path = p; m.relative_path = p; }
+  return JSON.stringify(doc, null, 1);
 }
 
 // ---------- Adobe Audition native session (.sesx) ----------
@@ -252,4 +310,4 @@ function guestInvite({ studio, show, guest, host, link, when, minutes = 60, tz, 
   return { subject, text, ics, studio };
 }
 
-module.exports = { TAGS, editItems, markerName, guestInvite, editList, hms, transcriptTxt, transcriptSrt, transcriptVtt, chapters, levelReport, verdict, sesx, fcpXml, auditionMarkersCsv };
+module.exports = { TAGS, editItems, markerName, guestInvite, editList, hms, transcriptTxt, transcriptSrt, transcriptVtt, chapters, levelReport, verdict, sesx, fcpXml, auditionMarkersCsv, altaudio, alteredPlace, relocateAltaudio };

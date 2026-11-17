@@ -3,7 +3,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const post = require('../post');
-const { xmlWellFormed } = require('./helpers');
+const { xmlWellFormed, alteredProblems } = require('./helpers');
 
 const take = () => ({
   markers: [{ at: 65000, label: 'Topic two' }, { at: 12000, label: 'Topic one' }],
@@ -136,4 +136,79 @@ test('guest invite: link, checklist, time in the host\'s time zone, and a calend
   assert.match(inv.ics, /SUMMARY:Recording: AOL Underground/);
   assert.equal(post.guestInvite({ show: 'S', link: 'x', when: null }).ics, null, 'no time, no calendar entry');
   assert.match(post.guestInvite({ show: 'S', link: 'x', when: new Date('2026-07-01T18:30:00Z'), tz: 'Not/AZone' }).subject, /18:30 UTC/, 'an unknown time zone shows UTC');
+});
+
+// ---------- Altered Audio Editor ----------
+const altPlan = () => ({
+  title: 'AOL Underground - Ep 12 - The Keyword Era', show: 'AOL Underground', episode: { n: '12', title: 'The Keyword Era' },
+  tracks: [
+    { name: 'Intro', file: 'Intro.wav', start: 0, sr: 44100, channels: 2, samples: 441000 },
+    { name: 'Steve', file: 'Steve.wav', start: 10, sr: 48000, channels: 1, samples: 48000 * 60, color: '#3f73b8' },
+    { name: 'Steve (cleaned)', file: 'Steve - cleaned -16 LUFS.wav', start: 10, sr: 48000, channels: 1, samples: 48000 * 60, muted: true, hidden: true },
+    { name: 'Guest', file: 'Guest.wav', start: 10, sr: 48000, channels: 1, samples: 48000 * 59 },
+  ],
+  markers: [
+    { label: 'Interview', at: 10, dur: 0, group: 'Segment' },
+    { label: 'Ad break: Sponsor', at: 30, dur: 0, group: 'Ad break' },
+    { label: 'Producer note: Use as trailer', at: 40, dur: 0, group: 'Producer note', by: 'Sam' },
+    { label: 'Filler words: um — Steve: “Um, so…”', at: 41.5, dur: 0.4, group: 'Filler words' },
+  ],
+});
+
+test('Altered session (.altaudio): passes Altered\'s own schema and opening checks', () => {
+  const doc = JSON.parse(post.altaudio(altPlan()));
+  assert.deepEqual(alteredProblems(doc), []);
+  assert.equal(doc.format, 'altaudio.session'); assert.equal(doc.schema_version, 1);
+  // the checker itself catches a broken session, so passing means something
+  const broken = JSON.parse(JSON.stringify(doc)); delete broken.view; broken.tracks[0].clips[0].media_id = broken.id; broken.markers[0].contracted_duration = 5;
+  const found = alteredProblems(broken).join(' | ');
+  assert.match(found, /view/); assert.match(found, /missing media/); assert.match(found, /contracted length/);
+});
+
+test('Altered session: every file on its own track, lined up in samples, each file\'s own rate and length kept', () => {
+  const doc = JSON.parse(post.altaudio(altPlan()));
+  assert.deepEqual(doc.tracks.map(t => t.name), ['Intro', 'Steve', 'Steve (cleaned)', 'Guest']);
+  const steve = doc.tracks[1].clips[0], intro = doc.tracks[0].clips[0];
+  assert.equal(steve.start, 480000, 'starts after the 10 s intro, counted at the session\'s 48 kHz');
+  assert.equal(steve.source_out, 48000 * 60);
+  assert.equal(intro.source_out, 441000, 'the intro plays all of its 44.1 kHz file');
+  const introMedia = doc.media.find(m => m.id === intro.media_id);
+  assert.deepEqual([introMedia.sample_rate, introMedia.channels, introMedia.relative_path], [44100, 2, 'Intro.wav']);
+  assert.equal(doc.tracks[0].channels, 'stereo'); assert.equal(doc.tracks[1].channels, 'mono');
+  // the cleaned version is there to switch to, but silent and out of the way
+  assert.deepEqual([doc.tracks[2].muted, doc.tracks[2].hidden], [true, true]);
+  assert.equal(doc.tracks[1].hidden, undefined, 'the real recordings are not hidden');
+  // the episode details and Podcast mode
+  assert.deepEqual([doc.metadata.show, doc.metadata.title, doc.metadata.episode_number], ['AOL Underground', 'The Keyword Era', 12]);
+  assert.equal(doc.modes.podcast, true);
+  assert.equal(JSON.parse(post.altaudio({ ...altPlan(), episode: { n: '12b' } })).metadata.episode_number, null, 'an episode "number" that isn\'t one is left out');
+});
+
+test('Altered markers: segments are chapters, ad breaks are ad slots, notes and ranges are coloured cues', () => {
+  const m = JSON.parse(post.altaudio(altPlan())).markers;
+  assert.deepEqual(m.map(x => x.kind), ['chapter', 'ad_slot', 'cue', 'cue']);
+  assert.deepEqual(m.map(x => x.position), [480000, 1440000, 1920000, 1992000]);
+  assert.equal(m[3].duration, 19200, 'a filler word is a range');
+  assert.equal(m[0].duration, 0);
+  assert.equal(m[2].description, 'Producer note — by Sam');
+  assert.ok(m.every(x => /^#[0-9a-f]{6}$/.test(x.color)));
+  assert.notEqual(m[2].color, m[3].color, 'different kinds look different');
+});
+
+test('Altered download: files sorted into folders, the session pointing at them; other editors\' sessions left out', () => {
+  const place = o => post.alteredPlace(o);
+  assert.equal(place({ kind: 'audio', file: 'Steve.wav' }), 'Audio/Steve.wav');
+  assert.equal(place({ kind: 'cleaned', file: 'Steve - cleaned -16 LUFS.wav' }), 'Audio/Cleaned/Steve - cleaned -16 LUFS.wav');
+  assert.equal(place({ kind: 'intro', file: 'Intro.wav' }), 'Audio/Intro.wav');
+  assert.equal(place({ kind: 'roomtone', file: 'Steve - room tone.wav' }), 'Audio/Room tone/Steve - room tone.wav');
+  assert.equal(place({ kind: 'producermix', file: 'Producer mix -16 LUFS.wav' }), 'Mixes/Producer mix -16 LUFS.wav');
+  assert.equal(place({ kind: 'transcript', file: 'Transcript.srt' }), 'Notes/Transcript.srt');
+  assert.equal(place({ kind: 'session', file: 'Show (Audition).sesx' }), null);
+  assert.equal(place({ kind: 'markers', file: 'Markers (Audition).csv' }), null);
+  const files = [{ kind: 'audio', file: 'Steve.wav' }, { kind: 'cleaned', file: 'Steve - cleaned -16 LUFS.wav' }];
+  const doc = JSON.parse(post.relocateAltaudio(post.altaudio(altPlan()), name => { const o = files.find(f => f.file === name); return o ? place(o) : name; }));
+  const steve = doc.media.find(m => m.relative_path.endsWith('Steve.wav'));
+  assert.deepEqual([steve.relative_path, steve.path], ['Audio/Steve.wav', 'Audio/Steve.wav']);
+  assert.ok(doc.media.some(m => m.relative_path === 'Audio/Cleaned/Steve - cleaned -16 LUFS.wav'));
+  assert.deepEqual(alteredProblems(doc), []);
 });

@@ -4,6 +4,19 @@ What changed in each version of the studio — the part that runs on your server
 Newest first. The desktop app has its own list: [desk/CHANGELOG.md](desk/CHANGELOG.md).
 Rolling is still pre-release, so versions are 0.x.
 
+## 0.9.2 — ready for Altered Audio Editor
+- **Altered Audio Editor session** with every take (`… (Altered).altaudio`, for Altered 0.38): open it and everyone is
+  on their own track, lined up, with:
+  - every marker in its real kind: **segments and plain markers are chapters**, **ad breaks are ad slots**, and producer
+    notes, great bits, cuts, retakes, filler words, coughs, talkback, soundboard and long pauses are **coloured cues**
+    (the ones with a length — coughs, filler words, pauses, talkback, soundboard — as ranges)
+  - each person's **cleaned version as a hidden, muted track** right under them, to switch to
+  - the intro, soundboard and outro on their own tracks, the show, episode title and number filled in, Podcast mode on
+- **🎚 Download for Altered** on the Recordings page: one folder with the session on top and the files sorted into
+  `Audio` (with `Cleaned` and `Room tone`), `Mixes`, `Extras/Normalised`, `Video` and `Notes`
+- Rolling Desk's saved copy gets the Altered session too, next to the recordings, ready to open
+- Older takes get the Altered session with **Rebuild files** (or **Update documents**)
+
 ## 0.9.1 — a Health panel in plain words
 - **🩺 Health, rewritten for people, not engineers:** a summary at the top ("Everything looks good" or the list of
   things to look at), then:
