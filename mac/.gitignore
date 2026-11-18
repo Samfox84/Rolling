@@ -1,0 +1,6 @@
+Rolling/Resources/Studio/
+Rolling/Resources/Tools/
+build/
+DerivedData/
+xcuserdata/
+*.xcuserstate

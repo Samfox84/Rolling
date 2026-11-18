@@ -1,0 +1,58 @@
+# Rolling for Mac — the Xcode project is made from this file by XcodeGen (`xcodegen` in this folder).
+# The made project (Rolling.xcodeproj) is kept in git too, so you can just open it in Xcode.
+name: Rolling
+options:
+  bundleIdPrefix: io.github.samfox84
+  deploymentTarget:
+    macOS: "26.0"
+  createIntermediateGroups: true
+settings:
+  base:
+    MARKETING_VERSION: "1.0.0"
+    CURRENT_PROJECT_VERSION: "1"
+    SWIFT_VERSION: "6.0"
+    SWIFT_STRICT_CONCURRENCY: minimal
+    MACOSX_DEPLOYMENT_TARGET: "26.0"
+packages:
+  WebRTC:
+    url: https://github.com/stasel/WebRTC
+    from: "137.0.0"
+targets:
+  Rolling:
+    type: application
+    platform: macOS
+    sources:
+      - path: Rolling
+        excludes:
+          - "Resources/Studio/**"
+          - "Resources/Tools/**"
+      - path: Rolling/Resources/Studio
+        type: folder
+        buildPhase: resources
+        optional: true
+      - path: Rolling/Resources/Tools
+        type: folder
+        buildPhase: resources
+        optional: true
+    dependencies:
+      - package: WebRTC
+    preBuildScripts:
+      - name: Get the studio and its tools
+        script: |
+          # Copies Rolling's server into the app and downloads node, ffmpeg and cloudflared (only the first time).
+          "${PROJECT_DIR}/scripts/prepare.sh"
+        basedOnDependencyAnalysis: false
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: io.github.samfox84.rolling
+        PRODUCT_NAME: Rolling
+        INFOPLIST_FILE: Rolling/Support/Info.plist
+        CODE_SIGN_ENTITLEMENTS: Rolling/Support/Rolling.entitlements
+        CODE_SIGN_STYLE: Automatic
+        CODE_SIGN_IDENTITY: "-"
+        ENABLE_HARDENED_RUNTIME: YES
+        ENABLE_USER_SCRIPT_SANDBOXING: NO
+        COMBINE_HIDPI_IMAGES: YES
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        ARCHS: arm64
+        ONLY_ACTIVE_ARCH: YES
